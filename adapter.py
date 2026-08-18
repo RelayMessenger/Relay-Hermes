@@ -870,6 +870,13 @@ def is_connected(config) -> bool:
     return validate_config(config)
 
 
+# Operator intent is captured once. Hermes loads config more than once in one
+# process. Writing RELAY_ALLOW_ALL_USERS into os.environ made the second load
+# treat owner-only as allow-all.
+_OPERATOR_ALLOW_ALL = os.getenv("RELAY_ALLOW_ALL_USERS", "").strip()
+_OPERATOR_ALLOWED_USERS = os.getenv("RELAY_ALLOWED_USERS", "").strip()
+
+
 def _env_enablement() -> Optional[dict]:
     """Seed ``PlatformConfig.extra`` from env vars during gateway config load."""
     token = os.getenv("RELAY_AGENT_TOKEN", "").strip()
@@ -884,10 +891,8 @@ def _env_enablement() -> Optional[dict]:
     seed: dict = {
         "token": token,
         "base_url": os.getenv("RELAY_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-        # Captured before the hand-off below rewrites the environment. See
-        # _resolve_authz for why the adapter reads these from here.
-        "allow_all_users": os.getenv("RELAY_ALLOW_ALL_USERS", "").strip(),
-        "allowed_users": os.getenv("RELAY_ALLOWED_USERS", "").strip(),
+        "allow_all_users": _OPERATOR_ALLOW_ALL,
+        "allowed_users": _OPERATOR_ALLOWED_USERS,
     }
     os.environ["RELAY_ALLOW_ALL_USERS"] = "true"
     state_dir = os.getenv("RELAY_STATE_DIR", "").strip()

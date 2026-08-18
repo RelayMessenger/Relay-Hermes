@@ -30,8 +30,9 @@ plugin adds nothing to your environment.
 Copy this directory into your Hermes plugins directory and enable it:
 
 ```bash
-git clone https://github.com/relaymessenger/hermes-relay-plugin \
-  ~/.hermes/plugins/relay
+# Copy this directory to ~/.hermes/plugins/relay until the public
+# relaymessenger/hermes-relay-plugin repo exists.
+cp -R /path/to/hermes-relay-plugin ~/.hermes/plugins/relay
 hermes plugins enable relayapp-platform
 ```
 
