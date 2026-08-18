@@ -1,0 +1,57 @@
+name: relayapp-platform
+label: Relay
+kind: platform
+version: 1.0.0
+description: >
+  Relay messenger platform adapter for Hermes Agent. Your Hermes appears in
+  Relay as a contact people text like a friend. Inbound messages arrive by
+  long-polling Relay's durable event log (GET /v1/events), so there is no
+  webhook, no public URL and no signing secret, which is what makes this work
+  on a machine behind NAT. Replies go out through POST /v1/messages under a
+  derived Idempotency-Key, so a retry commits once.
+
+  No external SDK: only httpx, already a Hermes dependency. Create the agent
+  in the Relay app and copy its one-time Agent Token. Delivery is
+  at-least-once; the adapter deduplicates by event_id and persists its poll
+  cursor across restarts. By default it answers only the agent's owner.
+author: Companion, Inc.
+homepage: https://github.com/relaymessenger/hermes-relay-plugin
+license: MIT
+# requires_env and optional_env are scanned by hermes_cli/config.py and
+# auto-populate the `hermes config` UI. Supported dict keys per the plugin
+# contract: name, description, prompt, url, password, category.
+requires_env:
+  - name: RELAY_AGENT_TOKEN
+    description: "Relay Agent Token (rly_live_...), shown once when the agent is created"
+    prompt: "Relay Agent Token"
+    url: "https://docs.relayapp.im/guides/your-agent"
+    password: true
+optional_env:
+  - name: RELAY_BASE_URL
+    description: "Relay API origin (default: https://api.relayapp.im). Must be HTTPS unless it is loopback."
+    prompt: "Relay API base URL"
+    password: false
+  - name: RELAY_ALLOWED_USERS
+    description: "Comma-separated Relay user ids (usr_...) allowed to talk to the agent, in addition to its owner"
+    prompt: "Allowed Relay user ids (comma-separated)"
+    password: false
+  - name: RELAY_ALLOW_ALL_USERS
+    description: "Let anyone who can reach the agent talk to it (true/false, default false: owner only)"
+    prompt: "Allow all Relay users? (true/false)"
+    password: false
+  - name: RELAY_STATE_DIR
+    description: "Directory holding the poll cursor and dedupe window (default: ~/.hermes/relay)"
+    prompt: "Relay state directory (or empty)"
+    password: false
+  - name: RELAY_REPLY_TO_MODE
+    description: "When replies quote the message they answer: off | first | all | auto (default auto, quote only when it disambiguates)"
+    prompt: "Reply threading mode (off/first/all/auto)"
+    password: false
+  - name: RELAY_HOME_CHANNEL
+    description: "Default conversation id (cnv_...) for cron and notification delivery"
+    prompt: "Home conversation id (or empty)"
+    password: false
+  - name: RELAY_HOME_CHANNEL_NAME
+    description: "Human label for the home channel"
+    prompt: "Home channel display name (or empty)"
+    password: false

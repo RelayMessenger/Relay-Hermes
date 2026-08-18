@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-relay-plugin"
+version = "1.0.0"
+description = "Relay messenger platform adapter for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Companion, Inc." }]
+keywords = ["hermes", "hermes-agent", "relay", "relayapp", "messaging", "agent"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat",
+]
+# httpx is the only runtime requirement and Hermes already ships it
+# (hermes-agent pyproject: httpx[socks]==0.28.1), so installing this plugin
+# adds nothing to the host environment.
+dependencies = ["httpx>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyyaml>=6"]
+
+[project.urls]
+Homepage = "https://github.com/relaymessenger/hermes-relay-plugin"
+Documentation = "https://docs.relayapp.im"
+Issues = "https://github.com/relaymessenger/hermes-relay-plugin/issues"
+
+# Hermes discovers a pip-installed plugin through this entry point; a
+# drop-in copy into ~/.hermes/plugins/relay is discovered by directory scan
+# and needs no packaging at all.
+[project.entry-points."hermes_agent.plugins"]
+relayapp-platform = "hermes_relay_plugin:register"
+
+[tool.setuptools]
+py-modules = ["adapter", "relay_api", "state"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repo root is a Python package (it doubles as the plugin directory
+# Hermes imports), so prepend import mode would try to import its __init__ and
+# pull in the gateway. importlib mode imports each test file on its own.
+addopts = "--import-mode=importlib"
