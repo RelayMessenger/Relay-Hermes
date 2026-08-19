@@ -43,10 +43,12 @@ import dataclasses
 import logging
 import mimetypes
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -72,6 +74,8 @@ from .relay_api import (
     render_text,
     reply_idempotency_key,
     run_poll_loop,
+    split_paragraphs,
+    utf8_len,
 )
 from .state import DEFAULT_STATE_DIR, STATE_FILENAME, RelayState
 
@@ -89,8 +93,8 @@ MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 TEXT_BATCH_DELAY_SECONDS = 0.6
 TEXT_BATCH_SPLIT_DELAY_SECONDS = 2.0
 TEXT_BATCH_SPLIT_THRESHOLD = 4000
-INTER_CHUNK_DELAY_SECONDS = 0.4
 
+MEDIA_PLACEHOLDER = "[media]"
 SILENCE_SENTINEL = "[no reply]"
 REPLY_TO_MODES = {"off", "first", "all", "auto"}
 DEFAULT_REPLY_TO_MODE = "auto"
@@ -123,6 +127,75 @@ def _resolve_authz(extra: Dict[str, Any], key: str, env: str) -> str:
     return os.getenv(env, "").strip()
 
 
+_CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
+
+
+def _strip_chunk_indicators(chunks: List[str]) -> List[str]:
+    """Remove the base splitter's `` (1/3)`` suffixes.
+
+    Relay bubbles flow naturally without pagination furniture, the same
+    override the BlueBubbles iMessage channel makes.
+    """
+    return [_CHUNK_INDICATOR.sub("", chunk) for chunk in chunks]
+
+
+def _bubble_chunks(content: str) -> List[str]:
+    """One text part per thought.
+
+    Blank lines split bubbles first; only a paragraph still past Relay's
+    8 KB per-part cap falls back to the length splitter, measured in bytes
+    because that is what the server counts.
+    """
+    chunks: List[str] = []
+    for paragraph in split_paragraphs(content):
+        if utf8_len(paragraph) <= MAX_MESSAGE_LENGTH:
+            chunks.append(paragraph)
+        else:
+            chunks.extend(
+                _strip_chunk_indicators(
+                    BasePlatformAdapter.truncate_message(
+                        paragraph, max_length=MAX_MESSAGE_LENGTH, len_fn=utf8_len
+                    )
+                )
+            )
+    return chunks
+
+
+class _RelayBatchAggregator(TextBatchAggregator):
+    """Coalesce one user turn into one model turn.
+
+    The server splits one user send at ingest, so a text + photo send
+    arrives as a burst of ``message.received`` events, one per committed
+    message, every one carrying the same ``invocation_id`` in a group. The
+    base aggregator merges only text; this one also carries media across,
+    so a split batch dispatches as ONE event instead of one turn per
+    fragment, and the single reply consumes the invocation once. Flush
+    timing is the base's: plain-text debounce behavior is unchanged.
+    """
+
+    def enqueue(self, event: MessageEvent, key: str) -> None:
+        existing = self._pending.get(key)
+        if existing is None:
+            super().enqueue(event, key)
+            return
+        if event.media_urls:
+            existing.media_urls = [*(existing.media_urls or []), *event.media_urls]
+            existing.media_types = [*(existing.media_types or []), *(event.media_types or [])]
+            existing.message_type = MessageType.PHOTO
+        # The placeholder stands in only when a message carries no text at
+        # all; once the batch holds real text or the media itself, drop it.
+        incoming = "" if event.text == MEDIA_PLACEHOLDER else (event.text or "")
+        if existing.text == MEDIA_PLACEHOLDER:
+            existing.text = incoming or MEDIA_PLACEHOLDER
+        elif incoming:
+            existing.text = f"{existing.text}\n{incoming}"
+        existing._last_chunk_len = len(incoming)  # type: ignore[attr-defined]
+        prior = self._pending_tasks.get(key)
+        if prior and not prior.done():
+            prior.cancel()
+        self._pending_tasks[key] = asyncio.create_task(self._flush(key))
+
+
 def _explicit_reply_to_mode(config) -> str:
     """The operator's ``reply_to_mode``, or empty when they never set one.
 
@@ -148,11 +221,11 @@ class RelayAdapter(BasePlatformAdapter):
     no message-edit endpoint on the developer API, so ``SUPPORTS_MESSAGE_EDITING``
     stays off and the stream consumer skips the progressive-edit path.
 
-    Groups differ from DMs in one way that shapes the whole send path: a group
-    ``message.received`` carries ``data.invocation_id``, the reply and any
-    typing signal must carry it back, and the first committed reply completes
-    the invocation. A group turn therefore ships as ONE message with several
-    ordered text parts, while a DM turn may ship as several messages.
+    A turn is ONE POST either way: the server splits it at ingest into one
+    committed message per content run, so each text part lands as its own
+    bubble. Groups differ from DMs in one way: a group ``message.received``
+    carries ``data.invocation_id``, the reply and any typing signal must
+    carry it back, and the committed reply batch consumes it.
     """
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
@@ -216,7 +289,7 @@ class RelayAdapter(BasePlatformAdapter):
         # a stable Idempotency-Key instead of a random one.
         self._reply_keys: Dict[str, Tuple[str, int]] = {}
 
-        self._text_batcher = TextBatchAggregator(
+        self._text_batcher = _RelayBatchAggregator(
             handler=self.handle_message,
             batch_delay=TEXT_BATCH_DELAY_SECONDS,
             split_delay=TEXT_BATCH_SPLIT_DELAY_SECONDS,
@@ -424,7 +497,7 @@ class RelayAdapter(BasePlatformAdapter):
         )
 
         event = MessageEvent(
-            text=text or "[media]",
+            text=text or MEDIA_PLACEHOLDER,
             message_type=MessageType.PHOTO if media_paths else MessageType.TEXT,
             source=source,
             user_id=inbound.sender_id or None,
@@ -436,15 +509,14 @@ class RelayAdapter(BasePlatformAdapter):
             media_types=media_kinds,
         )
 
-        # Plain text bursts batch per conversation. Anything carrying media or
-        # a group invocation dispatches immediately: an invocation has a TTL
-        # and must not sit in a debounce window.
-        if (
-            event.message_type == MessageType.TEXT
-            and not media_paths
-            and not inbound.invocation_id
-            and self._text_batcher.is_enabled()
-        ):
+        # Everything batches per conversation, so one user turn dispatches as
+        # one model turn: the server splits a send into one event per
+        # committed message, and a split batch (or any burst) coalesces here
+        # instead of racing one turn per fragment. Media rides along in the
+        # merge, and events sharing an invocation_id collapse into the one
+        # dispatch whose reply consumes the invocation once. The invocation
+        # TTL is 15 minutes; a 2-second debounce window is nothing.
+        if self._text_batcher.is_enabled():
             self._text_batcher.enqueue(event, conversation_id)
             return
         await self.handle_message(event)
@@ -555,9 +627,11 @@ class RelayAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a text reply into a Relay conversation.
 
-        DMs send each chunk as its own message, because separate bubbles read
-        the way people text. Groups send one message with several ordered text
-        parts, because the first committed reply completes the invocation.
+        One turn is ONE POST: each blank-line paragraph rides as its own
+        text part and the server commits one message per part, so the reply
+        lands as separate bubbles the way people text. A group attaches the
+        pending invocation to that same single POST, which the committed
+        batch consumes once.
         """
         if self._client is None:
             return SendResult(success=False, error="Relay client is not connected")
@@ -577,31 +651,27 @@ class RelayAdapter(BasePlatformAdapter):
         if self._is_silence(content):
             content = "OK"
 
-        chunks = self.truncate_message(content, max_length=self.MAX_MESSAGE_LENGTH)
-
-        if chat_id in self._group_convs:
-            parts = [{"type": "text", "text": chunk} for chunk in chunks]
-            return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
-
-        last = SendResult(success=False, error="nothing to send")
-        for index, chunk in enumerate(chunks):
-            if index:
-                # Pace multi-bubble replies so they read like typing.
-                await asyncio.sleep(INTER_CHUNK_DELAY_SECONDS)
-            result = await self._post_message(
-                chat_id,
-                [{"type": "text", "text": chunk}],
-                reply_to=self._reply_anchor(chat_id, reply_to, index),
-            )
-            if not result.success:
-                return result
-            last = result
-        return last
+        parts = [{"type": "text", "text": chunk} for chunk in _bubble_chunks(content)]
+        if not parts:
+            return SendResult(success=False, error="nothing to send")
+        return await self._commit(chat_id, parts, reply_to)
 
     @staticmethod
     def _is_silence(content: str) -> bool:
         stripped = (content or "").strip()
         return not stripped or stripped.lower() == SILENCE_SENTINEL
+
+    @staticmethod
+    def truncate_message(
+        content: str,
+        max_length: int = MAX_MESSAGE_LENGTH,
+        len_fn=None,
+    ) -> List[str]:
+        # The base splitter appends " (1/3)" indicators when a reply spans
+        # chunks; Relay bubbles do not carry pagination furniture.
+        return _strip_chunk_indicators(
+            BasePlatformAdapter.truncate_message(content, max_length, len_fn=len_fn)
+        )
 
     def format_message(self, content: str) -> str:
         """Relay renders plain text, so strip the markdown a model emits.
@@ -614,15 +684,14 @@ class RelayAdapter(BasePlatformAdapter):
             return content
         return strip_markdown(content)
 
-    def _should_thread_reply(self, chat_id: str, reply_to: Optional[str], chunk_index: int) -> bool:
+    def _should_thread_reply(self, chat_id: str, reply_to: Optional[str]) -> bool:
         """Honor ``PlatformConfig.reply_to_mode``, as the Telegram adapter does.
 
-        | mode    | behavior                                                  |
-        |---------|-----------------------------------------------------------|
-        | `off`   | never quote                                               |
-        | `first` | quote the first chunk only                                |
-        | `all`   | quote every chunk                                         |
-        | `auto`  | quote only when it disambiguates (this plugin's default)  |
+        | mode          | behavior                                            |
+        |---------------|-----------------------------------------------------|
+        | `off`         | never quote                                         |
+        | `first`/`all` | always quote (a turn is one POST, so they agree)    |
+        | `auto`        | quote only when it disambiguates (this plugin's default) |
 
         ``auto`` matches how people use replies in a messenger: answering the
         newest message needs no quote, but once something newer arrived the
@@ -634,20 +703,20 @@ class RelayAdapter(BasePlatformAdapter):
         mode = self._reply_to_mode
         if mode == "off":
             return False
-        if mode == "all":
-            return True
         if mode == "auto":
             if chat_id in self._group_convs:
                 return True
             return reply_to != self._last_inbound.get(chat_id)
-        return chunk_index == 0
+        return True
 
     def _reply_anchor(
-        self, chat_id: str, reply_to: Optional[str], chunk_index: int = 0
+        self, chat_id: str, reply_to: Optional[str]
     ) -> Optional[Dict[str, Any]]:
-        if not self._should_thread_reply(chat_id, reply_to, chunk_index):
+        if not self._should_thread_reply(chat_id, reply_to):
             return None
-        return {"message_id": reply_to, "part_index": 0}
+        # Replies target a message id only. A part index is a reactions-only
+        # concept now, and only for media.
+        return {"message_id": reply_to}
 
     def _pending_invocation(self, chat_id: str) -> Optional[str]:
         entry = self._invocations.get(chat_id)
@@ -689,6 +758,16 @@ class RelayAdapter(BasePlatformAdapter):
             self._invocations.pop(chat_id, None)
         return result
 
+    async def _commit(
+        self, chat_id: str, parts: List[Dict[str, Any]], reply_to: Optional[str]
+    ) -> SendResult:
+        """Route one batch of parts through the group invocation gate or straight out."""
+        if chat_id in self._group_convs:
+            return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
+        return await self._post_message(
+            chat_id, parts, reply_to=self._reply_anchor(chat_id, reply_to)
+        )
+
     async def _post_message(
         self,
         chat_id: str,
@@ -696,7 +775,7 @@ class RelayAdapter(BasePlatformAdapter):
         reply_to: Optional[Dict[str, Any]] = None,
         invocation_id: Optional[str] = None,
     ) -> SendResult:
-        """POST one canonical message. Never raises."""
+        """POST one send; the server commits one message per content run. Never raises."""
         assert self._client is not None
         try:
             body = await self._client.send_message(
@@ -715,7 +794,11 @@ class RelayAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("[%s] send error: %s", self.name, exc)
             return SendResult(success=False, error=str(exc))
-        message_id = body.get("message_id") or (body.get("message") or {}).get("id")
+        # The 202 is a messages array, one entry per committed message; the
+        # head id is what edit/delete bookkeeping keys on. ``message_id`` is
+        # the pre-split server's shape, kept as a fallback.
+        head = (body.get("messages") or [{}])[0]
+        message_id = (head.get("id") if isinstance(head, dict) else None) or body.get("message_id")
         return SendResult(success=True, message_id=message_id)
 
     # -- Outbound media ----------------------------------------------------
@@ -757,13 +840,51 @@ class RelayAdapter(BasePlatformAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
     ) -> SendResult:
-        parts: List[Dict[str, Any]] = []
+        # A caption rides AFTER the media, as its own text part in the same
+        # POST, so it commits as its own bubble under the photo. Decided
+        # 2026-08-19 against the owner's measured chat.db majority; the
+        # BlueBubbles iMessage channel ships captions the same way.
+        parts: List[Dict[str, Any]] = [part]
         if caption:
-            parts.append({"type": "text", "text": caption[: self.MAX_MESSAGE_LENGTH]})
-        parts.append(part)
-        if chat_id in self._group_convs:
-            return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
-        return await self._post_message(chat_id, parts, reply_to=self._reply_anchor(chat_id, reply_to))
+            parts.extend({"type": "text", "text": chunk} for chunk in _bubble_chunks(caption))
+        return await self._commit(chat_id, parts, reply_to)
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """Ship an image batch as ONE POST of contiguous media parts.
+
+        Contiguous media parts commit as one stacked media message, which is
+        how Relay renders a photo set; the base implementation loops one send
+        per image and would land N separate bubbles. Alt texts follow the
+        stack as text parts so the media stays contiguous. ``human_delay`` is
+        accepted for signature parity and ignored: one POST has no gaps to
+        pace.
+        """
+        parts: List[Dict[str, Any]] = []
+        captions: List[str] = []
+        for image_url, alt_text in images:
+            if image_url.startswith("file://"):
+                attachment_id, error = await self._upload_attachment(unquote(image_url[7:]))
+                if not attachment_id:
+                    logger.error("[%s] image upload failed: %s", self.name, error)
+                    continue
+                parts.append({"type": "media", "attachment_id": attachment_id})
+            else:
+                parts.append({"type": "media", "url": image_url})
+            if alt_text:
+                captions.append(alt_text)
+        if not parts:
+            return
+        for caption in captions:
+            parts.extend({"type": "text", "text": chunk} for chunk in _bubble_chunks(caption))
+        result = await self._commit(chat_id, parts, None)
+        if not result.success:
+            logger.error("[%s] failed to send image batch: %s", self.name, result.error)
 
     async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None) -> SendResult:
         """Send a hosted image as a native media part."""
@@ -934,16 +1055,18 @@ async def _standalone_send(
     if not chat_id:
         return {"error": "relay standalone send: no conversation id (set RELAY_HOME_CHANNEL)"}
 
-    chunks = BasePlatformAdapter.truncate_message(message, max_length=MAX_MESSAGE_LENGTH)
+    parts = [{"type": "text", "text": chunk} for chunk in _bubble_chunks(message)]
+    if not parts:
+        return {"error": "relay standalone send: nothing to send"}
     try:
-        message_id = None
         async with RelayClient(token, base_url) as client:
-            for index, chunk in enumerate(chunks):
-                # Cron text is fixed for a run, so the key is derived from the
-                # target and the send time rather than an event id.
-                key = f"hermes-cron-{chat_id}-{time.time_ns()}-{index}"
-                body = await client.send_text(chat_id, chunk, idempotency_key=key)
-                message_id = body.get("message_id") or message_id
+            # Cron text is fixed for a run, so the key is derived from the
+            # target and the send time rather than an event id. One POST
+            # carries every part; the server commits one message per run.
+            key = f"hermes-cron-{chat_id}-{time.time_ns()}"
+            body = await client.send_message(chat_id, parts, idempotency_key=key)
+        head = (body.get("messages") or [{}])[0]
+        message_id = (head.get("id") if isinstance(head, dict) else None) or body.get("message_id")
         return {
             "success": True,
             "platform": PLATFORM_NAME,

@@ -23,7 +23,9 @@ from relay_api import (  # noqa: E402
     render_text,
     reply_idempotency_key,
     run_poll_loop,
+    split_paragraphs,
     transient_delay_seconds,
+    utf8_len,
 )
 
 TOKEN = "rly_live_test"
@@ -464,6 +466,35 @@ def test_render_text_joins_parts_in_order():
 
 def test_render_text_falls_back_to_server_rendering():
     assert render_text({"parts": [{"type": "media"}], "fallback_text": "sent a photo"}) == "sent a photo"
+
+
+def test_split_paragraphs_one_bubble_per_thought():
+    text = "First thought.\n\nSecond thought,\nsame bubble.\n\n\nThird."
+    assert split_paragraphs(text) == [
+        "First thought.",
+        "Second thought,\nsame bubble.",
+        "Third.",
+    ]
+
+
+def test_split_paragraphs_keeps_a_code_block_whole():
+    text = "Look:\n\n```python\ndef f():\n\n    return 1\n```\n\nDone."
+    assert split_paragraphs(text) == [
+        "Look:",
+        "```python\ndef f():\n\n    return 1\n```",
+        "Done.",
+    ]
+
+
+def test_split_paragraphs_drops_whitespace_only_input():
+    assert split_paragraphs("") == []
+    assert split_paragraphs("  \n\n \n") == []
+
+
+def test_utf8_len_counts_bytes_not_code_points():
+    assert utf8_len("abc") == 3
+    assert utf8_len("héllo") == 6
+    assert utf8_len("\N{EIGHT SPOKED ASTERISK}") == 3
 
 
 def test_dedupe_window_is_bounded_and_ordered():

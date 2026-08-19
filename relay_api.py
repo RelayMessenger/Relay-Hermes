@@ -434,7 +434,14 @@ class RelayClient:
         invocation_id: Optional[str] = None,
         timeout: Optional[float] = 30.0,
     ) -> Dict[str, Any]:
-        """``POST /v1/messages`` -> one canonical message, committed once."""
+        """``POST /v1/messages`` -> committed messages, one per content run.
+
+        The server splits one send at ingest: each visible non-media part
+        commits as its own message and contiguous media parts stay one
+        stacked message. The 202 carries ``messages``, one entry per
+        committed message; ``message_id`` on the body is a deprecated alias
+        for the head entry's id.
+        """
         body: Dict[str, Any] = {"conversation_id": conversation_id, "parts": parts}
         if invocation_id:
             body["invocation_id"] = invocation_id
@@ -693,6 +700,36 @@ def _log_terminal(error: RelayApiError, log: Callable[[str], None]) -> None:
 # ---------------------------------------------------------------------------
 # Message rendering helpers
 # ---------------------------------------------------------------------------
+
+
+def utf8_len(text: str) -> int:
+    """Relay caps a text part at 8 KB of UTF-8 bytes, not code points."""
+    return len(text.encode("utf-8"))
+
+
+def split_paragraphs(text: str) -> List[str]:
+    """Split outbound text on blank lines, one bubble per thought.
+
+    Each blank-line-separated paragraph rides as its own text part and the
+    server commits it as its own message, so a reply lands as separate
+    bubbles the way people text. Blank lines inside a ``` fence do not
+    split, so a code block ships as one part.
+    """
+    paragraphs: List[str] = []
+    current: List[str] = []
+    in_fence = False
+    for line in (text or "").split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence and not line.strip():
+            if current:
+                paragraphs.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append("\n".join(current).strip())
+    return [paragraph for paragraph in paragraphs if paragraph]
 
 
 def render_text(message: Dict[str, Any]) -> str:

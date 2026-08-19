@@ -124,21 +124,25 @@ Two more properties worth knowing:
 paths so the vision tools can read them. Other attachments and voice memos
 arrive as an explicit note rather than vanishing.
 
-**Replies.** Plain text, chunked at Relay's 8 KB limit. Markdown a model
-emits is stripped, because in a message bubble it reads as literal asterisks,
-though code fences survive intact. In a DM each chunk is its own bubble, so a
-long answer reads like someone typing rather than one wall of text.
+**Replies.** Plain text, split on blank lines so each thought is its own
+bubble, with Relay's 8 KB per-part limit as the backstop. The whole reply
+goes out as ONE `POST /v1/messages` carrying one text part per bubble; the
+server commits one message per part. Markdown a model emits is stripped,
+because in a message bubble it reads as literal asterisks, though code fences
+survive intact and never split mid-block.
 
 **Stays quiet when there is nothing to say.** A model that must emit something
 emits filler. Reply with exactly `[no reply]` and the adapter sends nothing.
 This is DM-only: a group invocation is an explicit request for an answer.
 
 **Groups.** A group message carries an `invocation_id` that the reply must
-carry back, and the first committed reply completes it, so a group turn goes
-out as one message with several ordered parts. Typing signals carry it too.
+carry back; the reply's one POST attaches it and the committed batch
+consumes it. Typing signals carry it too.
 
 **Sends media.** Images, documents, video, and native voice memos with an
-inline player, uploaded through `POST /v1/attachments`.
+inline player, uploaded through `POST /v1/attachments`. A multi-image reply
+ships as contiguous media parts in one POST, which Relay renders as a
+stacked photo set; a caption follows its media as its own bubble.
 
 **Typing indicators**, on the user's devices while the model works.
 
