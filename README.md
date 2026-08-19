@@ -204,8 +204,19 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 
 The transport (`relay_api.py`) and the durable state (`state.py`) carry the
 delivery semantics and import nothing from Hermes, so the whole receive path
-is tested with a fake HTTP layer and no network. `adapter.py` is only the
-binding to `BasePlatformAdapter` and needs a Hermes install to import.
+is tested with a fake HTTP layer and no network. `adapter.py` needs a Hermes
+source tree to import; `tests/test_adapter_send.py` drives it against a fake
+client and looks for that tree at `~/.hermes/hermes-agent`, or wherever
+`HERMES_AGENT_SRC` points:
+
+```bash
+HERMES_AGENT_SRC=/path/to/hermes-agent .venv/bin/python -m pytest
+```
+
+Without a Hermes tree those tests skip silently, so a green run alone does
+not prove the adapter; point `HERMES_AGENT_SRC` at a checkout of hermes-agent
+main (the batch-coalescing tests need `MessageEvent.user_id`, which hermes
+gained in 2026-08).
 
 ## Provenance
 

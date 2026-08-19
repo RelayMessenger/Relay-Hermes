@@ -222,7 +222,7 @@ def test_group_turn_is_one_post_and_consumes_the_invocation_once(plugin, tmp_pat
     client = FakeClient()
     adapter._client = client
     adapter._group_convs.add("cnv_grp")
-    adapter._invocations["cnv_grp"] = ("inv_1", _time.time())
+    adapter._invocations["cnv_grp"] = [("inv_1", _time.time())]
 
     async def run():
         first = await adapter.send("cnv_grp", "one\n\ntwo")
@@ -241,6 +241,68 @@ def test_group_turn_is_one_post_and_consumes_the_invocation_once(plugin, tmp_pat
     # The one reply consumed the invocation; a second group send has nothing
     # to attach and is suppressed rather than burned against the server.
     assert second.success is False
+
+
+def test_merged_dm_batch_answers_the_newest_fragment_without_a_quote(plugin, tmp_path, monkeypatch):
+    """A split user send in a DM must not earn a quote in auto reply mode.
+
+    The merge must carry the LAST fragment's id: ``_last_inbound`` holds the
+    last id, so a merged batch keeping the first would make ``auto`` quote
+    every split send, exactly what it documents it will not do.
+    """
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+
+    async def run():
+        dispatched = capture_dispatches(adapter)
+        adapter._text_batcher.enqueue(
+            MessageEvent(text="part one", message_type=MessageType.TEXT, message_id="msg_1"),
+            "cnv_dm",
+        )
+        adapter._text_batcher.enqueue(
+            MessageEvent(text="part two", message_type=MessageType.TEXT, message_id="msg_2"),
+            "cnv_dm",
+        )
+        await asyncio.sleep(0.2)
+        return dispatched
+
+    dispatched = asyncio.run(run())
+    assert len(dispatched) == 1
+    merged = dispatched[0]
+    assert merged.message_id == "msg_2"
+    adapter._last_inbound["cnv_dm"] = "msg_2"
+    # auto mode: answering the newest message needs no quote.
+    assert adapter._reply_anchor("cnv_dm", merged.message_id) is None
+
+
+def test_overlapping_invocations_get_their_own_dispatch_and_consumption(plugin, tmp_path, monkeypatch):
+    require_pinned_hermes(plugin)
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    install_fake_ingest(adapter)
+    client = FakeClient()
+    adapter._client = client
+
+    async def run():
+        dispatched = capture_dispatches(adapter)
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_1", "cnv_grp", "msg_1", text="hey", invocation_id="inv_1")
+        )
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_2", "cnv_grp", "msg_2", text="also hey", invocation_id="inv_2")
+        )
+        await asyncio.sleep(0.2)
+        first = await adapter.send("cnv_grp", "answering the first")
+        second = await adapter.send("cnv_grp", "answering the second")
+        return dispatched, first, second
+
+    dispatched, first, second = asyncio.run(run())
+    # Two invocations inside one window are two turns, not one merged turn.
+    assert len(dispatched) == 2
+    assert first.success is True
+    assert second.success is True
+    assert [call["invocation_id"] for call in client.calls] == ["inv_1", "inv_2"]
+    assert "cnv_grp" not in adapter._invocations
 
 
 def test_split_text_plus_media_batch_dispatches_once(plugin, tmp_path, monkeypatch):
@@ -351,6 +413,48 @@ def test_reply_anchor_is_message_level_only(plugin, tmp_path, monkeypatch):
     reply_to = client.calls[0]["reply_to"]
     assert reply_to == {"message_id": "msg_older"}
     assert "part_index" not in reply_to
+
+
+def test_forty_paragraph_reply_folds_into_the_part_cap_without_loss(plugin, tmp_path, monkeypatch):
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    paragraphs = [f"Thought number {index}." for index in range(40)]
+    content = "\n\n".join(paragraphs)
+
+    result = asyncio.run(adapter.send("cnv_dm", content))
+
+    assert result.success is True
+    parts = client.calls[0]["parts"]
+    # More than 32 parts is a non-retryable 422 and the whole reply drops;
+    # trailing paragraphs rejoin instead, losing nothing.
+    assert len(parts) == plugin.MAX_PARTS_PER_POST
+    assert "\n\n".join(part["text"] for part in parts) == content
+
+
+def test_image_batch_folds_trailing_alt_texts_into_the_part_cap(plugin, tmp_path, monkeypatch):
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    images = [(f"https://example.test/{index}.png", f"alt {index}") for index in range(20)]
+
+    asyncio.run(adapter.send_multiple_images("cnv_dm", images))
+
+    parts = client.calls[0]["parts"]
+    assert len(parts) == plugin.MAX_PARTS_PER_POST
+    assert sum(1 for part in parts if part["type"] == "media") == 20
+    joined = "\n\n".join(part["text"] for part in parts if part["type"] == "text")
+    assert joined == "\n\n".join(f"alt {index}" for index in range(20))
+
+
+def test_malformed_202_body_returns_a_result_instead_of_raising(plugin, tmp_path, monkeypatch):
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    adapter._client = FakeClient(body={"messages": 7})
+
+    result = asyncio.run(adapter.send("cnv_dm", "hello"))
+
+    assert result.success is False
+    assert result.error
 
 
 def test_send_reads_the_legacy_202_shape_as_fallback(plugin, tmp_path, monkeypatch):

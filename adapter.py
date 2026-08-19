@@ -85,6 +85,9 @@ PLATFORM_NAME = "relayapp"
 PLATFORM_LABEL = "Relay"
 
 MAX_MESSAGE_LENGTH = MAX_TEXT_PART_BYTES
+# The server rejects a send of more than 32 parts with a non-retryable 422,
+# which would drop the whole reply on the floor.
+MAX_PARTS_PER_POST = 32
 MAX_INLINE_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
@@ -161,6 +164,23 @@ def _bubble_chunks(content: str) -> List[str]:
     return chunks
 
 
+def _cap_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fold trailing text parts together until the POST fits the 32-part cap.
+
+    Trailing paragraphs rejoin with a blank line, so nothing is lost; only
+    the last bubbles arrive merged. Media parts never merge, and the fold
+    stops if it reaches one.
+    """
+    parts = list(parts)
+    while len(parts) > MAX_PARTS_PER_POST:
+        last, prev = parts[-1], parts[-2]
+        if last.get("type") != "text" or prev.get("type") != "text":
+            break
+        prev["text"] = f"{prev['text']}\n\n{last['text']}"
+        parts.pop()
+    return parts
+
+
 class _RelayBatchAggregator(TextBatchAggregator):
     """Coalesce one user turn into one model turn.
 
@@ -189,6 +209,10 @@ class _RelayBatchAggregator(TextBatchAggregator):
             existing.text = incoming or MEDIA_PLACEHOLDER
         elif incoming:
             existing.text = f"{existing.text}\n{incoming}"
+        # The merged turn answers the NEWEST fragment: ``_last_inbound`` holds
+        # the last id, so keeping the first here would make auto reply mode
+        # quote every split user send.
+        existing.message_id = event.message_id or existing.message_id
         existing._last_chunk_len = len(incoming)  # type: ignore[attr-defined]
         prior = self._pending_tasks.get(key)
         if prior and not prior.done():
@@ -280,8 +304,11 @@ class RelayAdapter(BasePlatformAdapter):
         self._poll_task: Optional[asyncio.Task] = None
         self._dedupe = MemoryDedupe()
 
-        # conversation_id -> (invocation id, received-at). Groups only.
-        self._invocations: Dict[str, Tuple[str, float]] = {}
+        # conversation_id -> FIFO of (invocation id, received-at). Groups
+        # only. A list, not one slot: two people can invoke the same group
+        # inside one debounce window, and each reply must consume its own
+        # invocation.
+        self._invocations: Dict[str, List[Tuple[str, float]]] = {}
         # conversation_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
         self._group_convs: set = set()
@@ -463,7 +490,9 @@ class RelayAdapter(BasePlatformAdapter):
         if inbound.invocation_id and conversation_id:
             if len(self._invocations) > 200:
                 self._invocations.pop(next(iter(self._invocations)), None)
-            self._invocations[conversation_id] = (inbound.invocation_id, time.time())
+            pending = self._invocations.setdefault(conversation_id, [])
+            if inbound.invocation_id not in (entry[0] for entry in pending):
+                pending.append((inbound.invocation_id, time.time()))
             if len(self._group_convs) > 1000:
                 self._group_convs.clear()
             self._group_convs.add(conversation_id)
@@ -514,10 +543,13 @@ class RelayAdapter(BasePlatformAdapter):
         # committed message, and a split batch (or any burst) coalesces here
         # instead of racing one turn per fragment. Media rides along in the
         # merge, and events sharing an invocation_id collapse into the one
-        # dispatch whose reply consumes the invocation once. The invocation
-        # TTL is 15 minutes; a 2-second debounce window is nothing.
+        # dispatch whose reply consumes the invocation once. Group batches
+        # key on the invocation, not the conversation: two people invoking
+        # the same group inside one window get their own dispatch each, and
+        # each reply consumes its own invocation. The invocation TTL is 15
+        # minutes; a 2-second debounce window is nothing.
         if self._text_batcher.is_enabled():
-            self._text_batcher.enqueue(event, conversation_id)
+            self._text_batcher.enqueue(event, inbound.invocation_id or conversation_id)
             return
         await self.handle_message(event)
 
@@ -719,16 +751,27 @@ class RelayAdapter(BasePlatformAdapter):
         return {"message_id": reply_to}
 
     def _pending_invocation(self, chat_id: str) -> Optional[str]:
-        entry = self._invocations.get(chat_id)
-        if not entry:
-            return None
-        invocation_id, received_at = entry
-        if time.time() - received_at > INVOCATION_TTL_SECONDS:
-            # The server already expired it; attaching a dead id only earns a
-            # rejection.
+        pending = self._invocations.get(chat_id) or []
+        while pending:
+            invocation_id, received_at = pending[0]
+            if time.time() - received_at > INVOCATION_TTL_SECONDS:
+                # The server already expired it; attaching a dead id only
+                # earns a rejection.
+                pending.pop(0)
+                continue
+            return invocation_id
+        self._invocations.pop(chat_id, None)
+        return None
+
+    def _consume_invocation(self, chat_id: str, invocation_id: str) -> None:
+        pending = [
+            entry for entry in self._invocations.get(chat_id) or []
+            if entry[0] != invocation_id
+        ]
+        if pending:
+            self._invocations[chat_id] = pending
+        else:
             self._invocations.pop(chat_id, None)
-            return None
-        return invocation_id
 
     async def _commit_group_message(
         self,
@@ -755,13 +798,14 @@ class RelayAdapter(BasePlatformAdapter):
             invocation_id=invocation_id,
         )
         if result.success or result.error and result.error.startswith("HTTP 403"):
-            self._invocations.pop(chat_id, None)
+            self._consume_invocation(chat_id, invocation_id)
         return result
 
     async def _commit(
         self, chat_id: str, parts: List[Dict[str, Any]], reply_to: Optional[str]
     ) -> SendResult:
         """Route one batch of parts through the group invocation gate or straight out."""
+        parts = _cap_parts(parts)
         if chat_id in self._group_convs:
             return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
         return await self._post_message(
@@ -784,6 +828,15 @@ class RelayAdapter(BasePlatformAdapter):
                 reply_to=reply_to,
                 invocation_id=invocation_id,
             )
+            # The 202 is a messages array, one entry per committed message;
+            # the head id is what edit/delete bookkeeping keys on.
+            # ``message_id`` is the pre-split server's shape, kept as a
+            # fallback. Parsed inside the try: a malformed body must not
+            # raise through this contract either.
+            head = (body.get("messages") or [{}])[0]
+            message_id = (
+                head.get("id") if isinstance(head, dict) else None
+            ) or body.get("message_id")
         except RelayApiError as error:
             logger.warning("[%s] send failed: %s", self.name, error)
             return SendResult(
@@ -794,11 +847,6 @@ class RelayAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("[%s] send error: %s", self.name, exc)
             return SendResult(success=False, error=str(exc))
-        # The 202 is a messages array, one entry per committed message; the
-        # head id is what edit/delete bookkeeping keys on. ``message_id`` is
-        # the pre-split server's shape, kept as a fallback.
-        head = (body.get("messages") or [{}])[0]
-        message_id = (head.get("id") if isinstance(head, dict) else None) or body.get("message_id")
         return SendResult(success=True, message_id=message_id)
 
     # -- Outbound media ----------------------------------------------------
@@ -1055,7 +1103,7 @@ async def _standalone_send(
     if not chat_id:
         return {"error": "relay standalone send: no conversation id (set RELAY_HOME_CHANNEL)"}
 
-    parts = [{"type": "text", "text": chunk} for chunk in _bubble_chunks(message)]
+    parts = _cap_parts([{"type": "text", "text": chunk} for chunk in _bubble_chunks(message)])
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
