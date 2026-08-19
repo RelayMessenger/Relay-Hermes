@@ -27,12 +27,11 @@ plugin adds nothing to your environment.
 
 ## Installation
 
-Copy this directory into your Hermes plugins directory and enable it:
+Clone this repository into your Hermes plugins directory and enable it:
 
 ```bash
-# Copy this directory to ~/.hermes/plugins/relay until the public
-# relaymessenger/hermes-relay-plugin repo exists.
-cp -R /path/to/hermes-relay-plugin ~/.hermes/plugins/relay
+git clone https://github.com/relaymessenger/hermes-relay-plugin \
+  ~/.hermes/plugins/relay
 hermes plugins enable relayapp-platform
 ```
 
