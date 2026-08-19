@@ -528,6 +528,37 @@ def test_group_media_overflow_keeps_the_first_32_and_warns(plugin, tmp_path, mon
     assert any("dropping 8 part(s)" in record.getMessage() for record in caplog.records)
 
 
+def test_group_overflow_keeps_the_caption_over_a_photo(plugin, tmp_path, monkeypatch, caplog):
+    """Words survive ahead of pictures when a group turn will not fit.
+
+    A caption rides after its media, so a plain prefix would keep 32 photos
+    and silently lose the sentence describing them. Dropping a photo is
+    visible; dropping the words is not.
+    """
+    import logging
+    import time as _time
+
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    adapter._group_convs.add("cnv_grp")
+    adapter._invocations["cnv_grp"] = [("inv_1", _time.time())]
+    # 33 photos plus one alt text: the alt rides AFTER its media, so a plain
+    # prefix of 32 would keep every photo and drop the only words.
+    images = [(f"https://example.test/{index}.png", "") for index in range(32)]
+    images.append(("https://example.test/32.png", "here they are"))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(adapter.send_multiple_images("cnv_grp", images))
+
+    assert len(client.calls) == 1
+    parts = client.calls[0]["parts"]
+    assert len(parts) == plugin.MAX_PARTS_PER_POST
+    texts = [part for part in parts if part["type"] == "text"]
+    assert any(part["text"] == "here they are" for part in texts), parts
+    assert any("0 of them text" in record.getMessage() for record in caplog.records)
+
+
 def test_out_of_order_group_replies_bind_to_their_own_invocation(plugin, tmp_path, monkeypatch):
     require_pinned_hermes(plugin)
     adapter = make_adapter(plugin, tmp_path, monkeypatch)

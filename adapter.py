@@ -894,15 +894,26 @@ class RelayAdapter(BasePlatformAdapter):
         if chat_id in self._group_convs:
             if len(parts) > MAX_PARTS_PER_POST:
                 # A group turn is ONE POST: a second POST cannot ride the
-                # consumed invocation, so the overflow drops. The first 32
-                # parts are the media stack (text folds first), which keeps
-                # the first 32 media.
+                # consumed invocation, so the overflow drops. Words survive
+                # ahead of pictures. A caption rides AFTER its media, so
+                # taking a plain prefix would keep 32 photos and silently
+                # lose the sentence describing them, which is the wrong half
+                # to drop. Text parts are kept and the remainder fills with
+                # media in order.
+                text_parts = [p for p in parts if p.get("type") == "text"]
+                other_parts = [p for p in parts if p.get("type") != "text"]
+                keep_text = text_parts[:MAX_PARTS_PER_POST]
+                room = MAX_PARTS_PER_POST - len(keep_text)
+                keep_other = other_parts[:room] if room > 0 else []
+                kept = set(map(id, keep_text)) | set(map(id, keep_other))
+                trimmed = [p for p in parts if id(p) in kept]
                 logger.warning(
-                    "[%s] group send exceeds the %d-part cap; dropping %d part(s) (%s)",
-                    self.name, MAX_PARTS_PER_POST,
-                    len(parts) - MAX_PARTS_PER_POST, chat_id,
+                    "[%s] group send exceeds the %d-part cap; dropping %d part(s), "
+                    "%d of them text (%s)",
+                    self.name, MAX_PARTS_PER_POST, len(parts) - len(trimmed),
+                    len(text_parts) - len(keep_text), chat_id,
                 )
-                parts = parts[:MAX_PARTS_PER_POST]
+                parts = trimmed
             return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
         # A DM has no invocation to consume, so anything folding cannot fit
         # ships as successive POSTs of at most 32 parts, in order, each with
