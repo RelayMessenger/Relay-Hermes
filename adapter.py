@@ -39,6 +39,7 @@ choice, made with ``RELAY_ALLOWED_USERS`` or ``RELAY_ALLOW_ALL_USERS``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import logging
 import mimetypes
@@ -88,6 +89,11 @@ MAX_MESSAGE_LENGTH = MAX_TEXT_PART_BYTES
 # The server rejects a send of more than 32 parts with a non-retryable 422,
 # which would drop the whole reply on the floor.
 MAX_PARTS_PER_POST = 32
+# Folding never grows a text part past the same byte cap the chunker splits
+# on, so a fold can never build a part the chunker itself would have taken
+# apart. Tied to the constant rather than repeated: two numbers telling the
+# same story drift.
+MERGE_BYTE_BUDGET = MAX_TEXT_PART_BYTES
 MAX_INLINE_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
@@ -104,6 +110,20 @@ DEFAULT_REPLY_TO_MODE = "auto"
 # Relay expires a group invocation server side; holding a dead id past this
 # only produces rejected sends.
 INVOCATION_TTL_SECONDS = 15 * 60
+
+# The invocation the CURRENT turn is answering, bound at dispatch.
+#
+# A group reply must carry the invocation of its own turn, and the send path
+# cannot always see which turn it belongs to: a progress line and an image
+# batch both go out with no reply anchor. Hermes runs each turn in its own
+# task (base.py handle_message -> asyncio.create_task) and asyncio copies the
+# context into a new task, so a value bound before the handler runs reaches
+# every send that turn makes. Two group turns dispatched inside one debounce
+# window get one copy each, so finishing out of order still binds each reply
+# to its own invocation instead of to whichever arrived first.
+_TURN_INVOCATION: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "relay_turn_invocation", default=""
+)
 
 
 def _resolve(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
@@ -164,20 +184,28 @@ def _bubble_chunks(content: str) -> List[str]:
     return chunks
 
 
-def _cap_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fold trailing text parts together until the POST fits the 32-part cap.
+def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fold adjacent text parts together until the POST fits the 32-part cap.
 
-    Trailing paragraphs rejoin with a blank line, so nothing is lost; only
-    the last bubbles arrive merged. Media parts never merge, and the fold
-    stops if it reaches one.
+    Later seams fold first, so early bubbles keep their shape and only the
+    tail arrives merged. Paragraphs rejoin with a blank line, so nothing is
+    lost. A merge that would push the part past ``MERGE_BYTE_BUDGET`` bytes
+    moves to an earlier seam instead, and media parts never merge, so the
+    result can still exceed the cap; ``_commit`` decides what happens then.
     """
-    parts = list(parts)
+    parts = [dict(part) for part in parts]
     while len(parts) > MAX_PARTS_PER_POST:
-        last, prev = parts[-1], parts[-2]
-        if last.get("type") != "text" or prev.get("type") != "text":
+        for index in range(len(parts) - 1, 0, -1):
+            prev, last = parts[index - 1], parts[index]
+            if prev.get("type") != "text" or last.get("type") != "text":
+                continue
+            if utf8_len(prev["text"]) + 2 + utf8_len(last["text"]) > MERGE_BYTE_BUDGET:
+                continue
+            prev["text"] = f"{prev['text']}\n\n{last['text']}"
+            parts.pop(index)
             break
-        prev["text"] = f"{prev['text']}\n\n{last['text']}"
-        parts.pop()
+        else:
+            break
     return parts
 
 
@@ -309,6 +337,11 @@ class RelayAdapter(BasePlatformAdapter):
         # inside one debounce window, and each reply must consume its own
         # invocation.
         self._invocations: Dict[str, List[Tuple[str, float]]] = {}
+        # message id -> invocation id. The gateway anchors a group reply to
+        # the message it answers, so this binds the reply to its OWN
+        # invocation even when two overlapping turns complete out of order;
+        # the FIFO above is only ordering fallback and TTL cleanup.
+        self._invocation_by_message: Dict[str, str] = {}
         # conversation_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
         self._group_convs: set = set()
@@ -317,7 +350,7 @@ class RelayAdapter(BasePlatformAdapter):
         self._reply_keys: Dict[str, Tuple[str, int]] = {}
 
         self._text_batcher = _RelayBatchAggregator(
-            handler=self.handle_message,
+            handler=self._dispatch_turn,
             batch_delay=TEXT_BATCH_DELAY_SECONDS,
             split_delay=TEXT_BATCH_SPLIT_DELAY_SECONDS,
             split_threshold=TEXT_BATCH_SPLIT_THRESHOLD,
@@ -401,6 +434,7 @@ class RelayAdapter(BasePlatformAdapter):
         await self._close_client()
         self._text_batcher.cancel_all()
         self._invocations.clear()
+        self._invocation_by_message.clear()
         self._group_convs.clear()
         self._last_inbound.clear()
         self._reply_keys.clear()
@@ -493,6 +527,12 @@ class RelayAdapter(BasePlatformAdapter):
             pending = self._invocations.setdefault(conversation_id, [])
             if inbound.invocation_id not in (entry[0] for entry in pending):
                 pending.append((inbound.invocation_id, time.time()))
+            if inbound.message_id:
+                if len(self._invocation_by_message) > 500:
+                    self._invocation_by_message.pop(
+                        next(iter(self._invocation_by_message)), None
+                    )
+                self._invocation_by_message[inbound.message_id] = inbound.invocation_id
             if len(self._group_convs) > 1000:
                 self._group_convs.clear()
             self._group_convs.add(conversation_id)
@@ -537,6 +577,11 @@ class RelayAdapter(BasePlatformAdapter):
             media_urls=media_paths,
             media_types=media_kinds,
         )
+        # The turn carries its own invocation to the send path. The batch key
+        # below already IS the invocation for a group, so every event merged
+        # into one dispatch shares this value. The aggregator sets private
+        # attributes on the event the same way (helpers.py _last_chunk_len).
+        event._relay_invocation = inbound.invocation_id or ""  # type: ignore[attr-defined]
 
         # Everything batches per conversation, so one user turn dispatches as
         # one model turn: the server splits a send into one event per
@@ -551,6 +596,19 @@ class RelayAdapter(BasePlatformAdapter):
         if self._text_batcher.is_enabled():
             self._text_batcher.enqueue(event, inbound.invocation_id or conversation_id)
             return
+        await self._dispatch_turn(event)
+
+    async def _dispatch_turn(self, event: MessageEvent) -> None:
+        """Bind this turn's invocation, then hand it to Hermes.
+
+        This is the aggregator's handler and the unbatched path's dispatch, so
+        it is the one place every turn passes through before the model runs.
+        """
+        # Set on every turn, including the empty DM case. A batched turn gets
+        # its own context with the flush task, but the unbatched path runs in
+        # the poll loop's context, where a value left behind would outlive the
+        # turn that bound it.
+        _TURN_INVOCATION.set(str(getattr(event, "_relay_invocation", "") or ""))
         await self.handle_message(event)
 
     async def _ingest_media(
@@ -637,11 +695,14 @@ class RelayAdapter(BasePlatformAdapter):
     # -- Send --------------------------------------------------------------
 
     def _next_idempotency_key(self, chat_id: str) -> str:
-        """A stable key per (event, reply ordinal).
+        """A fresh key per (event, reply ordinal); each call advances the ordinal.
 
-        A retry after a timeout re-sends the same key, so Relay commits the
-        message once. Falls back to a time-based key only when the reply is
-        not answering a known event, for example a cron delivery.
+        The transport's INTERNAL retry (a timeout inside one
+        ``send_message`` call) re-sends the same key, so Relay commits that
+        message once. A host-level retry lands here again and mints a NEW
+        key, which the server treats as a new send. Falls back to a
+        time-based key only when the reply is not answering a known event,
+        for example a cron delivery.
         """
         entry = self._reply_keys.get(chat_id)
         if entry is None:
@@ -763,6 +824,30 @@ class RelayAdapter(BasePlatformAdapter):
         self._invocations.pop(chat_id, None)
         return None
 
+    def _turn_invocation(self, chat_id: str, reply_to: Optional[str] = None) -> Optional[str]:
+        """The invocation THIS send belongs to, most specific evidence first.
+
+        ``reply_to`` is the id of the message being answered, and Hermes
+        anchors a final reply to it (base.py ``_reply_anchor_for_event``
+        returns ``event.message_id`` for this platform), so its invocation is
+        exact. The turn context comes next: it is bound at dispatch and copied
+        into the turn's task, which covers the sends that carry no anchor at
+        all, a progress line or an image batch. The FIFO head is the last
+        resort; on its own it answers with whichever invocation arrived first,
+        which is the wrong one as soon as two turns finish out of order.
+        """
+        # Call this first: it prunes anything the server has already expired,
+        # so the pending set below cannot validate against a dead id.
+        head = self._pending_invocation(chat_id)
+        pending = {entry[0] for entry in self._invocations.get(chat_id) or []}
+        anchored = self._invocation_by_message.get(reply_to or "")
+        if anchored and anchored in pending:
+            return anchored
+        carried = _TURN_INVOCATION.get()
+        if carried and carried in pending:
+            return carried
+        return head
+
     def _consume_invocation(self, chat_id: str, invocation_id: str) -> None:
         pending = [
             entry for entry in self._invocations.get(chat_id) or []
@@ -785,7 +870,7 @@ class RelayAdapter(BasePlatformAdapter):
         expired, or membership ended). A transient failure keeps it, so the
         retry still carries it.
         """
-        invocation_id = self._pending_invocation(chat_id)
+        invocation_id = self._turn_invocation(chat_id, reply_to)
         if not invocation_id:
             logger.info(
                 "[%s] suppressing group send with no pending invocation (%s)",
@@ -805,12 +890,35 @@ class RelayAdapter(BasePlatformAdapter):
         self, chat_id: str, parts: List[Dict[str, Any]], reply_to: Optional[str]
     ) -> SendResult:
         """Route one batch of parts through the group invocation gate or straight out."""
-        parts = _cap_parts(parts)
+        parts = _fold_parts(parts)
         if chat_id in self._group_convs:
+            if len(parts) > MAX_PARTS_PER_POST:
+                # A group turn is ONE POST: a second POST cannot ride the
+                # consumed invocation, so the overflow drops. The first 32
+                # parts are the media stack (text folds first), which keeps
+                # the first 32 media.
+                logger.warning(
+                    "[%s] group send exceeds the %d-part cap; dropping %d part(s) (%s)",
+                    self.name, MAX_PARTS_PER_POST,
+                    len(parts) - MAX_PARTS_PER_POST, chat_id,
+                )
+                parts = parts[:MAX_PARTS_PER_POST]
             return await self._commit_group_message(chat_id, parts, reply_to=reply_to)
-        return await self._post_message(
-            chat_id, parts, reply_to=self._reply_anchor(chat_id, reply_to)
-        )
+        # A DM has no invocation to consume, so anything folding cannot fit
+        # ships as successive POSTs of at most 32 parts, in order, each with
+        # its own idempotency key. Only the first carries the reply anchor.
+        first: Optional[SendResult] = None
+        for start in range(0, len(parts), MAX_PARTS_PER_POST):
+            result = await self._post_message(
+                chat_id,
+                parts[start:start + MAX_PARTS_PER_POST],
+                reply_to=self._reply_anchor(chat_id, reply_to) if start == 0 else None,
+            )
+            if not result.success:
+                return result
+            if first is None:
+                first = result
+        return first or SendResult(success=False, error="nothing to send")
 
     async def _post_message(
         self,
@@ -993,8 +1101,10 @@ class RelayAdapter(BasePlatformAdapter):
         invocation_id = None
         if chat_id in self._group_convs:
             # Group typing is rejected without the pending invocation, and once
-            # the reply consumed it there is nothing left to signal.
-            invocation_id = self._pending_invocation(chat_id)
+            # the reply consumed it there is nothing left to signal. Typing
+            # runs inside the turn, so it resolves the same way a send does:
+            # with two turns pending, the head can belong to the other one.
+            invocation_id = self._turn_invocation(chat_id)
             if not invocation_id:
                 return
         label = None
@@ -1103,18 +1213,33 @@ async def _standalone_send(
     if not chat_id:
         return {"error": "relay standalone send: no conversation id (set RELAY_HOME_CHANNEL)"}
 
-    parts = _cap_parts([{"type": "text", "text": chunk} for chunk in _bubble_chunks(message)])
+    parts = _fold_parts([{"type": "text", "text": chunk} for chunk in _bubble_chunks(message)])
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
+        first: Optional[Dict[str, Any]] = None
         async with RelayClient(token, base_url) as client:
             # Cron text is fixed for a run, so the key is derived from the
-            # target and the send time rather than an event id. One POST
-            # carries every part; the server commits one message per run.
-            key = f"hermes-cron-{chat_id}-{time.time_ns()}"
-            body = await client.send_message(chat_id, parts, idempotency_key=key)
-        head = (body.get("messages") or [{}])[0]
-        message_id = (head.get("id") if isinstance(head, dict) else None) or body.get("message_id")
+            # target and the send time rather than an event id. A POST carries
+            # at most 32 parts (the server's cap); anything folding cannot fit
+            # ships as successive POSTs. The ordinal is in the key as well as
+            # the clock, so two POSTs cannot collide on a coarse timer and
+            # have the server dedupe the second away.
+            stamp = time.time_ns()
+            for index, start in enumerate(range(0, len(parts), MAX_PARTS_PER_POST)):
+                body = await client.send_message(
+                    chat_id,
+                    parts[start:start + MAX_PARTS_PER_POST],
+                    idempotency_key=f"hermes-cron-{chat_id}-{stamp}-{index}",
+                )
+                if first is None:
+                    first = body
+        # Report the FIRST committed message, the same end of the run
+        # ``_commit`` reports, so callers key on one convention.
+        head = ((first or {}).get("messages") or [{}])[0]
+        message_id = (
+            head.get("id") if isinstance(head, dict) else None
+        ) or (first or {}).get("message_id")
         return {
             "success": True,
             "platform": PLATFORM_NAME,

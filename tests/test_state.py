@@ -54,6 +54,10 @@ def test_write_is_atomic_and_leaves_no_temp_file(tmp_path):
     assert payload == {"cursor": 3, "seen_event_ids": ["evt_1"]}
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="owner-only mode is a POSIX guarantee: Windows chmod cannot clear group/other bits",
+)
 def test_state_file_is_owner_readable_only(tmp_path):
     state = make_state(tmp_path).load()
     state.advance(1, [])

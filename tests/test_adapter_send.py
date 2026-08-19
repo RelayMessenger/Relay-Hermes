@@ -60,8 +60,26 @@ class FakeClient:
 
     def __init__(self, body: Optional[Dict[str, Any]] = None) -> None:
         self.calls: List[Dict[str, Any]] = []
+        self.typing_calls: List[Dict[str, Any]] = []
         self.body = body if body is not None else {"messages": [{"id": "msg_head"}]}
         self._http = None
+
+    async def set_typing(
+        self,
+        conversation_id: str,
+        started: bool,
+        *,
+        label: Optional[str] = None,
+        invocation_id: Optional[str] = None,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        self.typing_calls.append(
+            {
+                "conversation_id": conversation_id,
+                "started": started,
+                "invocation_id": invocation_id,
+            }
+        )
 
     async def send_message(
         self,
@@ -445,6 +463,145 @@ def test_image_batch_folds_trailing_alt_texts_into_the_part_cap(plugin, tmp_path
     assert sum(1 for part in parts if part["type"] == "media") == 20
     joined = "\n\n".join(part["text"] for part in parts if part["type"] == "text")
     assert joined == "\n\n".join(f"alt {index}" for index in range(20))
+
+
+def test_heavy_paragraphs_fold_within_the_byte_budget(plugin, tmp_path, monkeypatch):
+    """40 x 1000-byte paragraphs: the fold must move to earlier seams
+    instead of growing one part past the server's 8192-byte cap."""
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    paragraphs = [chr(ord("a") + index % 26) * 1000 for index in range(40)]
+    content = "\n\n".join(paragraphs)
+
+    result = asyncio.run(adapter.send("cnv_dm", content))
+
+    assert result.success is True
+    assert len(client.calls) == 1
+    parts = client.calls[0]["parts"]
+    assert len(parts) <= plugin.MAX_PARTS_PER_POST
+    for part in parts:
+        assert len(part["text"].encode("utf-8")) <= plugin.MERGE_BYTE_BUDGET
+    assert "\n\n".join(part["text"] for part in parts) == content
+
+
+def test_dm_media_overflow_ships_as_successive_posts(plugin, tmp_path, monkeypatch):
+    """Media cannot fold, so a 40-image DM batch becomes two ordered POSTs."""
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    images = [(f"https://example.test/{index}.png", "") for index in range(40)]
+
+    asyncio.run(adapter.send_multiple_images("cnv_dm", images))
+
+    assert len(client.calls) == 2
+    assert len(client.calls[0]["parts"]) == plugin.MAX_PARTS_PER_POST
+    assert len(client.calls[1]["parts"]) == 8
+    urls = [
+        part["url"] for call in client.calls for part in call["parts"]
+    ]
+    assert urls == [f"https://example.test/{index}.png" for index in range(40)]
+    assert client.calls[0]["idempotency_key"] != client.calls[1]["idempotency_key"]
+
+
+def test_group_media_overflow_keeps_the_first_32_and_warns(plugin, tmp_path, monkeypatch, caplog):
+    """A group turn is one POST: the overflow drops with a logged count,
+    because a second POST cannot ride the consumed invocation."""
+    import logging
+    import time as _time
+
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    adapter._group_convs.add("cnv_grp")
+    adapter._invocations["cnv_grp"] = [("inv_1", _time.time())]
+    images = [(f"https://example.test/{index}.png", "") for index in range(40)]
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(adapter.send_multiple_images("cnv_grp", images))
+
+    assert len(client.calls) == 1
+    parts = client.calls[0]["parts"]
+    assert len(parts) == plugin.MAX_PARTS_PER_POST
+    assert parts[-1]["url"] == "https://example.test/31.png"
+    assert client.calls[0]["invocation_id"] == "inv_1"
+    assert any("dropping 8 part(s)" in record.getMessage() for record in caplog.records)
+
+
+def test_out_of_order_group_replies_bind_to_their_own_invocation(plugin, tmp_path, monkeypatch):
+    require_pinned_hermes(plugin)
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    install_fake_ingest(adapter)
+    client = FakeClient()
+    adapter._client = client
+
+    async def run():
+        capture_dispatches(adapter)
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_1", "cnv_grp", "msg_1", text="first ask", invocation_id="inv_1")
+        )
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_2", "cnv_grp", "msg_2", text="second ask", invocation_id="inv_2")
+        )
+        await asyncio.sleep(0.2)
+        # The second turn finishes first: its reply anchors msg_2 and must
+        # carry inv_2, not the FIFO head inv_1.
+        late = await adapter.send("cnv_grp", "answering the second", reply_to="msg_2")
+        early = await adapter.send("cnv_grp", "answering the first", reply_to="msg_1")
+        return late, early
+
+    late, early = asyncio.run(run())
+    assert late.success is True
+    assert early.success is True
+    assert [call["invocation_id"] for call in client.calls] == ["inv_2", "inv_1"]
+    assert "cnv_grp" not in adapter._invocations
+
+
+def test_a_turn_carries_its_invocation_to_sends_with_no_anchor(plugin, tmp_path, monkeypatch):
+    """Two group turns finish out of order and neither send has a reply anchor.
+
+    An image batch and a typing signal both go out with no ``reply_to``, so
+    the anchor cannot say which turn they belong to. The dispatch context
+    must: hermes runs each turn in its own task and asyncio copies the
+    context into it.
+    """
+    require_pinned_hermes(plugin)
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    install_fake_ingest(adapter)
+    client = FakeClient()
+    adapter._client = client
+    turns: List[Any] = []
+
+    async def fake_handle(event):
+        async def turn(ev):
+            if ev.text == "first ask":
+                # The turn invoked FIRST answers LAST.
+                await asyncio.sleep(0.2)
+            await adapter.send_typing(ev.source.chat_id)
+            await adapter.send_multiple_images(
+                ev.source.chat_id, [("https://example.test/a.png", "")]
+            )
+
+        turns.append(asyncio.create_task(turn(event)))
+
+    adapter.handle_message = fake_handle
+
+    async def run():
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_1", "cnv_grp", "msg_1", text="first ask", invocation_id="inv_1")
+        )
+        await adapter._on_inbound(
+            make_inbound(plugin, "evt_2", "cnv_grp", "msg_2", text="second ask", invocation_id="inv_2")
+        )
+        await asyncio.sleep(0.1)
+        await asyncio.gather(*turns)
+
+    asyncio.run(run())
+
+    assert [call["invocation_id"] for call in client.calls] == ["inv_2", "inv_1"]
+    assert [call["reply_to"] for call in client.calls] == [None, None]
+    assert [call["invocation_id"] for call in client.typing_calls] == ["inv_2", "inv_1"]
+    assert "cnv_grp" not in adapter._invocations
 
 
 def test_malformed_202_body_returns_a_result_instead_of_raising(plugin, tmp_path, monkeypatch):
