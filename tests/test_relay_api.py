@@ -430,7 +430,9 @@ def test_typing_threads_the_invocation_id():
     client = RelayClient(TOKEN, transport=transport)
     asyncio.run(client.set_typing("cnv_1", True, label="Thinking", invocation_id="inv_2"))
     call = transport.calls[0]
-    assert call["path"] == "/v1/conversations/cnv_1/typing"
+    # The live name. Falling back to /v1/conversations/ takes a 404 first,
+    # which tests/test_cutover.py covers.
+    assert call["path"] == "/v1/chats/cnv_1/typing"
     assert call["body"] == {"started": True, "label": "Thinking", "invocation_id": "inv_2"}
 
 
@@ -442,7 +444,9 @@ def test_typing_threads_the_invocation_id():
 def test_parse_inbound_reads_group_invocation():
     inbound = parse_inbound(user_event("evt_1", invocation_id="inv_1"))
     assert inbound is not None
-    assert inbound.is_group is True
+    # An invocation still proves a group. Its ABSENCE proves nothing now that
+    # the server mints none, which is why this is a hint and not a boolean.
+    assert inbound.group_hint is True
     assert inbound.invocation_id == "inv_1"
     assert inbound.conversation_id == "cnv_1"
     assert inbound.sender_kind == "user"
