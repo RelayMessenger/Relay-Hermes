@@ -47,6 +47,10 @@ optional_env:
     description: "When replies quote the message they answer: off | first | all | auto (default auto, quote only when it disambiguates)"
     prompt: "Reply threading mode (off/first/all/auto)"
     password: false
+  - name: RELAY_GROUP_REPLY_POLICY
+    description: "What the agent does with a group message it was not named in: mentions | all (default mentions, reply only when mentioned). Direct messages are always answered."
+    prompt: "Group reply policy (mentions/all)"
+    password: false
   - name: RELAY_HOME_CHANNEL
     description: "Default conversation id (cnv_...) for cron and notification delivery"
     prompt: "Home conversation id (or empty)"

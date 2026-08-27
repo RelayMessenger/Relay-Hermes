@@ -19,7 +19,7 @@ a Hermes running on a laptop behind NAT works exactly like one on a server.
 | Needs a public URL | no | no | **no** |
 | Extra runtime deps | `python-telegram-bot` | Node 18+ and `spectrum-ts` | **none beyond Hermes** |
 | Agent has its own identity | a bot account | your phone number | **an agent profile people add** |
-| Group turns | mention-gated | mention-gated | **invocation-gated by the server** |
+| Group turns | mention-gated | mention-gated | **mention-gated** |
 
 The only runtime requirement is `httpx`, which Hermes already ships
 (`httpx[socks]==0.28.1` in its own `pyproject.toml`), so installing this
@@ -72,6 +72,7 @@ hermes gateway start
 | `RELAY_ALLOW_ALL_USERS` | no | `false` | Let anyone who can reach the agent talk to it |
 | `RELAY_STATE_DIR` | no | `~/.hermes/relay` | Where the poll cursor and dedupe window live |
 | `RELAY_REPLY_TO_MODE` | no | `auto` | `off`, `first`, `all`, or `auto` |
+| `RELAY_GROUP_REPLY_POLICY` | no | `mentions` | `mentions` answers a group only when named; `all` answers every group message |
 | `RELAY_HOME_CHANNEL` | no | | Conversation id for cron and notification delivery |
 | `RELAY_HOME_CHANNEL_NAME` | no | | Human label for that conversation |
 
@@ -132,11 +133,20 @@ survive intact and never split mid-block.
 
 **Stays quiet when there is nothing to say.** A model that must emit something
 emits filler. Reply with exactly `[no reply]` and the adapter sends nothing.
-This is DM-only: a group invocation is an explicit request for an answer.
+This is DM-only: a group turn only gets this far because the agent was named,
+and being named and then saying nothing reads as broken.
 
-**Groups.** A group message carries an `invocation_id` that the reply must
-carry back; the reply's one POST attaches it and the committed batch
-consumes it. Typing signals carry it too.
+**Groups: it answers only when it is mentioned.** Relay used to decide this.
+A group agent was delivered only the messages it had been *invoked* on. It no
+longer works that way, so the adapter receives every message in the group and
+makes the call itself, before the model runs. The rule is Relay's own: a
+mention is the structured field a client attaches, matched against your
+agent's handle, and the letters in the text carry no authority, so someone
+writing `@youragent is great` is talking *about* your agent and it stays out
+of it. Set `RELAY_GROUP_REPLY_POLICY=all` to answer every group message
+instead, for an agent whose job really is to read the whole room: a
+transcriber or a moderator. Anything unrecognised reads as `mentions`, so a
+typo cannot be what opens the floodgate.
 
 **Sends media.** Images, documents, video, and native voice memos with an
 inline player, uploaded through `POST /v1/attachments`. A multi-image reply
@@ -190,9 +200,12 @@ that replays everything still retained.
 agent. Webhooks and long polling are mutually exclusive per Agent Token.
 Remove the webhook to poll.
 
-**Group messages get no reply**. The invocation expired before the model
-finished, or a reply already consumed it. One invocation permits exactly one
-committed reply.
+**Group messages get no reply**. The agent was not mentioned. In a group it
+answers only when it is named, and a handle typed into the text without a real
+mention attached does not count. That is Relay's rule, not this plugin's. Set
+`RELAY_GROUP_REPLY_POLICY=all` if the agent is meant to answer everything. The
+log says `not mentioned in group` at debug level for each message it stayed
+out of.
 
 ## Development
 

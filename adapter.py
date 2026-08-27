@@ -27,6 +27,7 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
     RELAY_HOME_CHANNEL         Conversation id (cnv_...) for cron delivery
     RELAY_HOME_CHANNEL_NAME    Human label for the home channel
     RELAY_REPLY_TO_MODE        off | first | all | auto (default: auto)
+    RELAY_GROUP_REPLY_POLICY   mentions | all (default: mentions)
 
 Security model. Relay authenticates senders server side, so ``sender.id``
 (``usr_...``) is a real identity and is safe to authorize on. By default this
@@ -71,6 +72,7 @@ from .relay_api import (
     RelayApiError,
     RelayClient,
     is_consumer_takeover,
+    mentions_agent,
     normalize_base_url,
     render_text,
     reply_idempotency_key,
@@ -107,8 +109,18 @@ MEDIA_PLACEHOLDER = "[media]"
 SILENCE_SENTINEL = "[no reply]"
 REPLY_TO_MODES = {"off", "first", "all", "auto"}
 DEFAULT_REPLY_TO_MODE = "auto"
-# Relay expires a group invocation server side; holding a dead id past this
-# only produces rejected sends.
+
+# What the agent does with a group message it was not named in. "mentions"
+# answers only when mentioned; "all" answers every group message, for an agent
+# whose job really is to read the whole room. Direct messages are answered
+# either way.
+GROUP_REPLY_POLICIES = {"mentions", "all"}
+DEFAULT_GROUP_REPLY_POLICY = "mentions"
+
+# HISTORICAL. Relay expired a group invocation server side, and holding a dead
+# id past this only produced rejected sends. Nothing is gated on an invocation
+# any more; the TTL still bounds the ids kept for forwarding, so a stale one is
+# never attached to a send.
 INVOCATION_TTL_SECONDS = 15 * 60
 
 # The invocation the CURRENT turn is answering, bound at dispatch.
@@ -275,9 +287,15 @@ class RelayAdapter(BasePlatformAdapter):
 
     A turn is ONE POST either way: the server splits it at ingest into one
     committed message per content run, so each text part lands as its own
-    bubble. Groups differ from DMs in one way: a group ``message.received``
-    carries ``data.invocation_id``, the reply and any typing signal must
-    carry it back, and the committed reply batch consumes it.
+    bubble.
+
+    Groups differ from DMs in one way, and it is no longer the server's rule.
+    Relay used to deliver a group agent only the messages it had been invoked
+    on, ride the invocation on the event, and require it back on every reply
+    and typing call. It no longer mints or checks one, so this adapter receives
+    every message in every group it is in and decides for itself whether it was
+    addressed: it replies only when it is mentioned, unless
+    ``RELAY_GROUP_REPLY_POLICY`` says otherwise.
     """
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
@@ -318,6 +336,22 @@ class RelayAdapter(BasePlatformAdapter):
             mode = DEFAULT_REPLY_TO_MODE
         self._reply_to_mode = mode
 
+        # What this agent does with a group message it was not named in.
+        # Anything unrecognised reads as "mentions": a typo in a var must not
+        # be what turns an agent into one that answers every message in every
+        # group, which is the thing the invocation existed to prevent.
+        policy = _resolve(
+            extra, "group_reply_policy", "RELAY_GROUP_REPLY_POLICY",
+        ).strip().lower()
+        if policy and policy not in GROUP_REPLY_POLICIES:
+            logger.warning(
+                "[%s] unknown group_reply_policy %r, using %r (valid: %s)",
+                self.name, policy, DEFAULT_GROUP_REPLY_POLICY,
+                ", ".join(sorted(GROUP_REPLY_POLICIES)),
+            )
+            policy = ""
+        self._group_reply_policy = policy or DEFAULT_GROUP_REPLY_POLICY
+
         self._allow_all = _is_true(_resolve_authz(extra, "allow_all_users", "RELAY_ALLOW_ALL_USERS"))
         self._allowed_users = {
             entry.strip()
@@ -344,7 +378,10 @@ class RelayAdapter(BasePlatformAdapter):
         self._invocation_by_message: Dict[str, str] = {}
         # conversation_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
+        # conversation_id -> kind, learned once per thread. A thread never
+        # changes kind, so one read answers for its lifetime.
         self._group_convs: set = set()
+        self._direct_convs: set = set()
         # event id of the message currently being answered, so replies derive
         # a stable Idempotency-Key instead of a random one.
         self._reply_keys: Dict[str, Tuple[str, int]] = {}
@@ -435,6 +472,7 @@ class RelayAdapter(BasePlatformAdapter):
         self._text_batcher.cancel_all()
         self._invocations.clear()
         self._invocation_by_message.clear()
+        self._direct_convs.clear()
         self._group_convs.clear()
         self._last_inbound.clear()
         self._reply_keys.clear()
@@ -513,6 +551,61 @@ class RelayAdapter(BasePlatformAdapter):
     def _save_cursor(self, cursor: int) -> None:
         self._state.advance(cursor, self._dedupe.snapshot())
 
+    async def _is_group(self, conversation_id: str, hint: Optional[bool]) -> bool:
+        """Is this conversation a group?
+
+        This used to be free: an event carried an invocation exactly when it
+        was a group delivery. The server no longer mints one, so the absence of
+        an invocation says nothing and the chat itself has to be asked. One
+        read per conversation, remembered in ``_group_convs`` and
+        ``_direct_convs`` — a thread does not change kind.
+
+        A read that fails leaves the answer unknown. This returns True in that
+        case ON PURPOSE: it is what routes the message into the mention gate,
+        and staying quiet in a room the agent may not have been addressed in is
+        the safe side of a lookup failure.
+        """
+        if not conversation_id:
+            return False
+        if conversation_id in self._group_convs:
+            return True
+        if conversation_id in self._direct_convs:
+            return False
+        if hint is True:
+            self._group_convs.add(conversation_id)
+            return True
+        if self._client is None:
+            return True
+        try:
+            is_group = await self._client.is_group_chat(conversation_id)
+        except Exception as exc:
+            logger.warning(
+                "[%s] could not read chat %s (%s); treating it as a group so the "
+                "mention gate decides", self.name, conversation_id, exc,
+            )
+            return True
+        cache = self._group_convs if is_group else self._direct_convs
+        if len(cache) > 1000:
+            cache.clear()
+        cache.add(conversation_id)
+        return is_group
+
+    def _addressed_in_group(self, inbound: InboundMessage) -> bool:
+        """Was this agent named in this group message?
+
+        ``all`` answers everything, for an agent whose job is to read the whole
+        room. Otherwise the rule is Relay's own structured mention, matched on
+        this agent's handle and id — both of which ``connect`` already read from
+        ``GET /v1/agents/me``.
+        """
+        if self._group_reply_policy == "all":
+            return True
+        return mentions_agent(
+            inbound.message,
+            handle=self._agent_handle,
+            agent_id=self._agent_id,
+        )
+
     async def _on_inbound(self, inbound: InboundMessage) -> None:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
         conversation_id = inbound.conversation_id
@@ -537,8 +630,19 @@ class RelayAdapter(BasePlatformAdapter):
                 self._group_convs.clear()
             self._group_convs.add(conversation_id)
 
-        is_group = inbound.is_group or conversation_id in self._group_convs
+        is_group = await self._is_group(conversation_id, inbound.group_hint)
         chat_type = "group" if is_group else "dm"
+
+        # Relay used to answer this itself, by only delivering a group agent
+        # the messages it had been invoked on. It no longer does, so the
+        # decision is made here, before the model runs: an unaddressed group
+        # message costs nothing and produces nothing.
+        if is_group and not self._addressed_in_group(inbound):
+            logger.debug(
+                "[%s] not mentioned in group %s, staying out of %s",
+                self.name, conversation_id, inbound.message_id,
+            )
+            return
 
         text = render_text(inbound.message)
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
@@ -577,22 +681,24 @@ class RelayAdapter(BasePlatformAdapter):
             media_urls=media_paths,
             media_types=media_kinds,
         )
-        # The turn carries its own invocation to the send path. The batch key
-        # below already IS the invocation for a group, so every event merged
-        # into one dispatch shares this value. The aggregator sets private
-        # attributes on the event the same way (helpers.py _last_chunk_len).
+        # The turn carries its invocation to the send path, for as long as
+        # events still arrive with one. The aggregator sets private attributes
+        # on the event the same way (helpers.py _last_chunk_len).
         event._relay_invocation = inbound.invocation_id or ""  # type: ignore[attr-defined]
 
         # Everything batches per conversation, so one user turn dispatches as
         # one model turn: the server splits a send into one event per
         # committed message, and a split batch (or any burst) coalesces here
         # instead of racing one turn per fragment. Media rides along in the
-        # merge, and events sharing an invocation_id collapse into the one
-        # dispatch whose reply consumes the invocation once. Group batches
-        # key on the invocation, not the conversation: two people invoking
-        # the same group inside one window get their own dispatch each, and
-        # each reply consumes its own invocation. The invocation TTL is 15
-        # minutes; a 2-second debounce window is nothing.
+        # merge.
+        #
+        # The key used to be the invocation for a group and the conversation
+        # for a DM, which gave two people invoking the same group inside one
+        # window a dispatch each. No invocation is minted any more, so the
+        # conversation is now the key everywhere and a group behaves the way a
+        # DM always did: everything inside the debounce window is one turn. Two
+        # people mentioning the agent 600ms apart get one answer that saw both,
+        # which is what a person in that room would do.
         if self._text_batcher.is_enabled():
             self._text_batcher.enqueue(event, inbound.invocation_id or conversation_id)
             return
@@ -734,9 +840,11 @@ class RelayAdapter(BasePlatformAdapter):
         content = self.format_message(content)
 
         # Model-chosen silence. People do not answer every "ok cool", and an
-        # agent forced to emit something emits filler. A group invocation is
-        # an explicit call for a response and staying quiet leaves it pending,
-        # so silence is DM-only.
+        # agent forced to emit something emits filler. Silence stays DM-only:
+        # a group turn only reaches here because the agent was named, and being
+        # named and then saying nothing reads as broken rather than tactful.
+        # (The old reason was that quiet left the invocation pending. There is
+        # no invocation now; the mention is what makes the request explicit.)
         if self._is_silence(content) and chat_id not in self._group_convs:
             logger.info("[%s] model chose not to reply in %s", self.name, chat_id)
             await self.stop_typing(chat_id)
@@ -864,25 +972,30 @@ class RelayAdapter(BasePlatformAdapter):
         parts: List[Dict[str, Any]],
         reply_to: Optional[str] = None,
     ) -> SendResult:
-        """Commit the one reply a group invocation allows.
+        """Commit one group reply, forwarding an invocation if one is still around.
 
-        The invocation is dropped on success or on a definitive 403 (consumed,
-        expired, or membership ended). A transient failure keeps it, so the
-        retry still carries it.
+        This method used to be the gate: a send with no pending invocation was
+        suppressed here, because the server would have refused it anyway. The
+        server no longer mints or checks an invocation, so a missing one is now
+        the ordinary case and suppressing on it would silence every group reply.
+        The gate moved to ``_on_inbound``, where the mention is read — one gate,
+        before the model runs, rather than two.
+
+        What is left is forwarding. An invocation that still arrives on an
+        event is attached, because the deployed server does still require it,
+        and it is dropped on success or on a definitive 403 (consumed, expired,
+        or membership ended). A transient failure keeps it, so the retry still
+        carries it. When there is none, the send simply goes out without one.
         """
         invocation_id = self._turn_invocation(chat_id, reply_to)
-        if not invocation_id:
-            logger.info(
-                "[%s] suppressing group send with no pending invocation (%s)",
-                self.name, chat_id,
-            )
-            return SendResult(success=False, error="no pending invocation for this group turn")
         result = await self._post_message(
             chat_id, parts,
             reply_to=self._reply_anchor(chat_id, reply_to),
             invocation_id=invocation_id,
         )
-        if result.success or result.error and result.error.startswith("HTTP 403"):
+        if invocation_id and (
+            result.success or (result.error or "").startswith("HTTP 403")
+        ):
             self._consume_invocation(chat_id, invocation_id)
         return result
 

@@ -232,8 +232,8 @@ def test_batcher_merges_media_into_the_pending_turn(plugin, tmp_path, monkeypatc
     assert merged.message_type == MessageType.PHOTO
 
 
-def test_group_turn_is_one_post_and_consumes_the_invocation_once(plugin, tmp_path, monkeypatch):
-    """The send half of the invocation contract, on any hermes generation."""
+def test_group_turn_is_one_post_and_forwards_the_invocation_once(plugin, tmp_path, monkeypatch):
+    """A group turn is ONE POST, and an invocation that arrived rides with it."""
     import time as _time
 
     adapter = make_adapter(plugin, tmp_path, monkeypatch)
@@ -242,13 +242,8 @@ def test_group_turn_is_one_post_and_consumes_the_invocation_once(plugin, tmp_pat
     adapter._group_convs.add("cnv_grp")
     adapter._invocations["cnv_grp"] = [("inv_1", _time.time())]
 
-    async def run():
-        first = await adapter.send("cnv_grp", "one\n\ntwo")
-        second = await adapter.send("cnv_grp", "again")
-        return first, second
-
-    first, second = asyncio.run(run())
-    assert first.success is True
+    result = asyncio.run(adapter.send("cnv_grp", "one\n\ntwo"))
+    assert result.success is True
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call["invocation_id"] == "inv_1"
@@ -256,9 +251,29 @@ def test_group_turn_is_one_post_and_consumes_the_invocation_once(plugin, tmp_pat
         {"type": "text", "text": "one"},
         {"type": "text", "text": "two"},
     ]
-    # The one reply consumed the invocation; a second group send has nothing
-    # to attach and is suppressed rather than burned against the server.
-    assert second.success is False
+    # A landed send drops the id, so a later send does not attach a spent one.
+    assert "cnv_grp" not in adapter._invocations
+
+
+def test_a_group_send_with_no_invocation_still_goes_out(plugin, tmp_path, monkeypatch):
+    """The suppression this replaced would now silence every group reply.
+
+    ``_commit_group_message`` used to refuse a send with no pending
+    invocation, because the server would have refused it too. The server no
+    longer mints or checks one, so a missing invocation is the ordinary case.
+    Whether the agent should speak at all is decided once, at the mention gate,
+    before the model ever runs.
+    """
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    client = FakeClient()
+    adapter._client = client
+    adapter._group_convs.add("cnv_grp")
+    assert not adapter._invocations
+
+    result = asyncio.run(adapter.send("cnv_grp", "here you go"))
+    assert result.success is True
+    assert len(client.calls) == 1
+    assert client.calls[0]["invocation_id"] is None
 
 
 def test_merged_dm_batch_answers_the_newest_fragment_without_a_quote(plugin, tmp_path, monkeypatch):
@@ -706,3 +721,202 @@ def test_caption_rides_after_the_media(plugin, tmp_path, monkeypatch):
         {"type": "media", "url": "https://example.test/a.png"},
         {"type": "text", "text": "sunset"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# The group gate, end to end through _on_inbound
+#
+# Relay used to answer this itself, by delivering a group agent only the
+# messages it had been invoked on. It no longer does, so these drive the real
+# handler and assert what reaches the model.
+# ---------------------------------------------------------------------------
+
+
+class GroupKindClient(FakeClient):
+    """A FakeClient that also answers what kind of chat this is."""
+
+    def __init__(self, groups=(), **kwargs):
+        super().__init__(**kwargs)
+        self._groups = set(groups)
+        self.chat_lookups: List[str] = []
+
+    async def is_group_chat(self, conversation_id: str) -> bool:
+        self.chat_lookups.append(conversation_id)
+        return conversation_id in self._groups
+
+
+def mention_inbound(plugin, conversation_id, message_id, *, mention=None,
+                    invoked=None, text="hello"):
+    """One inbound message, optionally naming an agent."""
+    api = importlib.import_module("hermes_relay_plugin.relay_api")
+    part: Dict[str, Any] = {"type": "text", "text": text}
+    if mention:
+        part["mention"] = mention
+    message: Dict[str, Any] = {
+        "id": message_id,
+        "conversation_id": conversation_id,
+        "parts": [part],
+        "sender": {"id": "usr_1", "kind": "user", "display_name": "Ada"},
+        "created_at": "2026-08-27T00:00:00Z",
+    }
+    if invoked:
+        message["invoked_agents"] = list(invoked)
+    return api.InboundMessage(
+        event={"event_id": message_id},
+        event_id=message_id,
+        message=message,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        sender_id="usr_1",
+        sender_kind="user",
+    )
+
+
+def gate_adapter(plugin, tmp_path, monkeypatch, *, groups=("cnv_grp",), policy=None):
+    monkeypatch.delenv("RELAY_GROUP_REPLY_POLICY", raising=False)
+    if policy is not None:
+        monkeypatch.setenv("RELAY_GROUP_REPLY_POLICY", policy)
+    adapter = make_adapter(plugin, tmp_path, monkeypatch)
+    adapter._client = GroupKindClient(groups=groups)
+    adapter._agent_handle = "youragent"
+    adapter._agent_id = "agt_1"
+    install_fake_ingest(adapter)
+    return adapter, capture_dispatches(adapter)
+
+
+def test_a_group_message_naming_nobody_never_reaches_the_model(plugin, tmp_path, monkeypatch):
+    # No pin guard: the gate returns before a MessageEvent is built, so the
+    # silence half of the contract is provable on any hermes generation.
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch)
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(plugin, "cnv_grp", "msg_1", text="anyone up for lunch")
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert dispatched == []
+
+
+def test_a_group_message_naming_the_agent_reaches_the_model(plugin, tmp_path, monkeypatch):
+    require_pinned_hermes(plugin)
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch)
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(
+                plugin, "cnv_grp", "msg_1",
+                mention="youragent", text="@youragent take this one",
+            )
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
+    assert dispatched[0].source.chat_type == "group"
+
+
+def test_the_agent_id_dialect_also_names_the_agent(plugin, tmp_path, monkeypatch):
+    """The vocabulary the deployed server still speaks: invoked_agents."""
+    require_pinned_hermes(plugin)
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch)
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(plugin, "cnv_grp", "msg_1", invoked=["agt_1"])
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
+
+
+def test_a_direct_message_reaches_the_model_with_no_mention(plugin, tmp_path, monkeypatch):
+    require_pinned_hermes(plugin)
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch, groups=())
+
+    async def run():
+        await adapter._on_inbound(mention_inbound(plugin, "cnv_dm", "msg_1"))
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
+    assert dispatched[0].source.chat_type == "dm"
+
+
+def test_the_all_policy_lets_every_group_message_through(plugin, tmp_path, monkeypatch):
+    require_pinned_hermes(plugin)
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch, policy="all")
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(plugin, "cnv_grp", "msg_1", text="anyone up for lunch")
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
+
+
+def test_a_typo_in_the_policy_does_not_open_the_floodgate(plugin, tmp_path, monkeypatch):
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch, policy="ALL_OF_THEM")
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(plugin, "cnv_grp", "msg_1", text="anyone up for lunch")
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert adapter._group_reply_policy == "mentions"
+    assert dispatched == []
+
+
+def test_the_chat_kind_is_read_once_and_remembered(plugin, tmp_path, monkeypatch):
+    """A thread never changes kind, so it costs one lookup for its lifetime.
+
+    Driven through unnamed group messages so no MessageEvent is built and the
+    caching is provable on any hermes generation.
+    """
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch)
+
+    async def run():
+        for index in range(3):
+            await adapter._on_inbound(
+                mention_inbound(plugin, "cnv_grp", f"msg_{index}", text="lunch?")
+            )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert adapter._client.chat_lookups == ["cnv_grp"]
+    assert dispatched == []
+
+
+def test_a_chat_lookup_that_fails_routes_into_the_gate_rather_than_past_it(
+    plugin, tmp_path, monkeypatch
+):
+    """Unknown kind is treated as a group, so silence is the safe side.
+
+    A lookup that fails leaves the kind unknown. Answering anyway is how an
+    agent starts talking in a room it was never addressed in, so the unknown
+    case goes through the mention gate rather than around it.
+    """
+    adapter, dispatched = gate_adapter(plugin, tmp_path, monkeypatch, groups=())
+
+    async def explode(conversation_id: str) -> bool:
+        raise RuntimeError("relay is unreachable")
+
+    adapter._client.is_group_chat = explode
+
+    async def run():
+        await adapter._on_inbound(
+            mention_inbound(plugin, "cnv_unknown", "msg_1", text="anyone up for lunch")
+        )
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert dispatched == []
+    # Nothing was cached, so a later read can still learn the real kind.
+    assert "cnv_unknown" not in adapter._group_convs
+    assert "cnv_unknown" not in adapter._direct_convs

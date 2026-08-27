@@ -324,6 +324,33 @@ class RelayClient:
             raise self._error_for(method, path, response)
         return response
 
+    async def _conversation_scoped(
+        self,
+        conversation_id: str,
+        suffix: str,
+        method: str = "POST",
+        **kwargs: Any,
+    ) -> RelayResponse:
+        """One request against a route that hangs off a single conversation,
+        tried under both names Relay has for that collection.
+
+        ``/v1/chats/...`` is the live name. ``/v1/conversations/...`` is the
+        name the deployed server still answers to, and the one its
+        compatibility bridge keeps alive through the cutover. Only a 404 falls
+        through to the second spelling, so a server that speaks either one is
+        served by this same build and no other status is retried.
+        """
+        try:
+            return await self._request(
+                method, f"/v1/chats/{conversation_id}{suffix}", **kwargs,
+            )
+        except RelayApiError as error:
+            if error.status != 404:
+                raise
+        return await self._request(
+            method, f"/v1/conversations/{conversation_id}{suffix}", **kwargs,
+        )
+
     async def _http_request(
         self,
         method: str,
@@ -481,39 +508,50 @@ class RelayClient:
         invocation_id: Optional[str] = None,
         timeout: Optional[float] = 5.0,
     ) -> None:
-        """``POST /v1/conversations/{id}/typing``. Ephemeral, never logged."""
+        """``POST /v1/chats/{id}/typing``. Ephemeral, never logged.
+
+        ``invocation_id`` is forwarded when an event still carries one. The
+        live server ignores the field; the deployed one refuses group typing
+        without it, so forwarding what arrived is what keeps the typist visible
+        in a group until the cutover lands.
+        """
         body: Dict[str, Any] = {"started": started}
         if label:
             body["label"] = label
         if invocation_id:
             body["invocation_id"] = invocation_id
-        await self._request(
-            "POST", f"/v1/conversations/{conversation_id}/typing",
-            body=body, timeout=timeout,
-        )
-
-    async def set_responding(
-        self,
-        conversation_id: str,
-        message_id: str,
-        *,
-        label: Optional[str] = None,
-        invocation_id: Optional[str] = None,
-    ) -> None:
-        body: Dict[str, Any] = {"message_id": message_id}
-        if label:
-            body["label"] = label
-        if invocation_id:
-            body["invocation_id"] = invocation_id
-        await self._request(
-            "POST", f"/v1/conversations/{conversation_id}/responding", body=body,
+        await self._conversation_scoped(
+            conversation_id, "/typing", body=body, timeout=timeout,
         )
 
     async def mark_read(self, conversation_id: str, message_id: str) -> None:
-        await self._request(
-            "POST", f"/v1/conversations/{conversation_id}/read",
-            body={"message_id": message_id},
+        """``POST /v1/chats/{id}/read``.
+
+        This and ``set_typing`` are what the deleted ``/responding`` route did
+        in one round trip. Callers treat a failure here as a missing "Read",
+        never as a failed turn.
+        """
+        await self._conversation_scoped(
+            conversation_id, "/read", body={"message_id": message_id},
         )
+
+    async def get_chat(self, conversation_id: str) -> Dict[str, Any]:
+        """``GET /v1/chats/{id}`` -> the chat, under either server's key."""
+        response = await self._conversation_scoped(conversation_id, "", method="GET")
+        body = response.body if isinstance(response.body, dict) else {}
+        chat = body.get("chat") or body.get("conversation") or {}
+        return chat if isinstance(chat, dict) else {}
+
+    async def is_group_chat(self, conversation_id: str) -> bool:
+        """Is this conversation a group? Cache it: a thread never changes kind.
+
+        ``is_group`` is the live field and ``kind`` is the deployed server's;
+        either answers.
+        """
+        chat = await self.get_chat(conversation_id)
+        if isinstance(chat.get("is_group"), bool):
+            return bool(chat["is_group"])
+        return chat.get("kind") == "group"
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +576,71 @@ def transient_delay_seconds(attempt: int, random_fn: Callable[[], float] = _rand
 def is_message_received(event: Dict[str, Any]) -> bool:
     if event.get("event_type") != "message.received":
         return False
+    return inbound_message_body(event) is not None
+
+
+def inbound_message_body(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The message inside a ``message.received`` event, under either shape.
+
+    The deployed server wraps it as ``data.message``; the server after the
+    cleanup sends the message itself as ``data``, and the compatibility bridge
+    sends both during the window. A message is recognisable by carrying its own
+    ``id``, which the wrapper never does, so no version detection is needed.
+    """
     data = event.get("data")
-    return isinstance(data, dict) and isinstance(data.get("message"), dict)
+    if not isinstance(data, dict):
+        return None
+    wrapped = data.get("message")
+    if isinstance(wrapped, dict):
+        return wrapped
+    return data if isinstance(data.get("id"), str) else None
+
+
+def mentions_agent(
+    message: Dict[str, Any],
+    *,
+    handle: str = "",
+    agent_id: str = "",
+) -> bool:
+    """True when this message names this agent.
+
+    The rule is Relay's own, copied from the server rather than designed here:
+    a mention is the STRUCTURED field a client attaches, matched against the
+    agent's handle — Relay's own push path decides a group notification exactly
+    this way — and the words in the text carry no authority ("Structured group
+    targets. Text mentions are presentation, never authority"). So ``@youragent``
+    typed into a message that carries no mention is people talking ABOUT the
+    agent, and it stays out of it.
+
+    Both vocabularies are read, because one build has to serve the server
+    production runs today and the one it is being cut over to: ``mention`` on a
+    text part is the live shape and names a handle, while ``invoked_agents`` and
+    ``mentions[].participant_id`` are the deployed server's and name an id.
+    """
+    parts = message.get("parts")
+    parts = parts if isinstance(parts, list) else []
+    wanted = handle.lstrip("@").lower()
+    if wanted:
+        for part in parts:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            named = part.get("mention")
+            if isinstance(named, str) and named.lstrip("@").lower() == wanted:
+                return True
+    if agent_id:
+        invoked = message.get("invoked_agents")
+        if isinstance(invoked, list) and agent_id in invoked:
+            return True
+        for part in parts:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            ranges = part.get("mentions")
+            if not isinstance(ranges, list):
+                continue
+            for entry in ranges:
+                if isinstance(entry, dict) and entry.get("participant_id") == agent_id:
+                    return True
+    return False
 
 
 @dataclass
@@ -553,33 +654,46 @@ class InboundMessage:
     message_id: str
     sender_id: str
     sender_kind: str
+    #: HISTORICAL. Relay minted an invocation for every group delivery and made
+    #: it the permission to speak. The server no longer mints one and no longer
+    #: checks one; it is carried only to be forwarded to the routes that still
+    #: want it on the deployed server.
     invocation_id: Optional[str] = None
 
     @property
-    def is_group(self) -> bool:
-        """A group turn is exactly one that carries an invocation id.
+    def group_hint(self) -> Optional[bool]:
+        """What the EVENT alone can say about whether this is a group.
 
-        The server rejects an agent reply or typing signal in a group without
-        the pending invocation, and the first committed reply consumes it.
+        An invocation was only ever minted for a group, so one still riding an
+        event proves it. Its absence proves nothing any more — the server does
+        not mint them — so the answer is unknown and the caller has to ask
+        ``RelayClient.is_group_chat``. Returning ``False`` here is what would
+        make every group look like a DM.
         """
-        return bool(self.invocation_id)
+        return True if self.invocation_id else None
 
 
 def parse_inbound(event: Dict[str, Any]) -> Optional[InboundMessage]:
-    if not is_message_received(event):
+    message = inbound_message_body(event) if is_message_received(event) else None
+    if message is None:
         return None
-    data = event["data"]
-    message = data["message"]
-    sender = message.get("sender") or {}
+    data = event.get("data") or {}
+    sender = message.get("sender") or message.get("sender_handle") or {}
+    conversation_id = (
+        message.get("conversation_id")
+        or message.get("chat_id")
+        or event.get("chat_id")
+        or ""
+    )
     return InboundMessage(
         event=event,
         event_id=str(event.get("event_id") or ""),
         message=message,
-        conversation_id=str(message.get("conversation_id") or ""),
+        conversation_id=str(conversation_id),
         message_id=str(message.get("id") or ""),
         sender_id=str(sender.get("id") or ""),
         sender_kind=str(sender.get("kind") or ""),
-        invocation_id=data.get("invocation_id") or None,
+        invocation_id=(data.get("invocation_id") if isinstance(data, dict) else None) or None,
     )
 
 
