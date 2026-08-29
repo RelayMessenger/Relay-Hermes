@@ -1,84 +1,77 @@
-"""Relay v1 developer-API transport for the Hermes platform plugin.
-
-This module is a direct port of Relay's canonical TypeScript SDK
-(``@relaymessenger/sdk``, ``cli/packages/sdk/src/``) into Python. It carries
-the transport semantics and nothing else: no Hermes imports live here, so the
-whole receive path is testable without a gateway.
-
-Ported piece by piece:
-
-* ``url.py`` origin validation  -> :func:`normalize_base_url` (url.ts)
-* ``errors.ts`` status classes  -> :class:`RelayApiError`, :func:`classify_status`
-* ``idempotency.ts``            -> :func:`reply_idempotency_key`
-* ``memory-dedupe.ts``          -> :class:`MemoryDedupe`
-* ``client.ts``                 -> :class:`RelayClient`
-* ``poll-loop.ts``              -> :func:`run_poll_loop`
-
-Transport contract, in one paragraph. Inbound events arrive from
-``GET /v1/events?cursor=N&timeout=30``, a long poll that needs no webhook and
-no public URL, so a machine behind NAT works. Delivery is at-least-once: the
-consumer deduplicates by ``event_id`` and records an id only after the handler
-has succeeded, and the cursor advances only after every event on the page was
-handled, so a failure replays rather than drops. Replies go out on
-``POST /v1/messages`` under an ``Idempotency-Key`` derived from the event id
-and the reply ordinal, so a retry after a timeout commits once. Webhooks and
-long polling are mutually exclusive per Agent Token; a second consumer taking
-the token ends this one with ``409 terminated_by_other_consumer``.
-"""
+"""Current Relay v1 REST and WebSocket transport for Hermes."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import random as _random
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
-from urllib.parse import urlsplit
+import re
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
+from urllib.parse import quote, urlsplit
 
-try:  # httpx is a core Hermes dependency (pyproject: httpx[socks]==0.28.1).
+try:
     import httpx
     HTTPX_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only on a broken install
+except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
     HTTPX_AVAILABLE = False
+
+try:
+    from websockets.asyncio.client import connect as websocket_connect
+    from websockets.exceptions import ConnectionClosed
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    websocket_connect = None  # type: ignore[assignment]
+    ConnectionClosed = None  # type: ignore[assignment,misc]
+    WEBSOCKETS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.relayapp.im"
-
-# poll-loop.ts: TRANSIENT_BASE_DELAY_MS / TRANSIENT_MAX_DELAY_MS.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
+MAX_TEXT_PART_UNITS = 10_000
+MAX_PARTS_PER_MESSAGE = 100
 TRANSIENT_BASE_DELAY_MS = 500
 TRANSIENT_MAX_DELAY_MS = 30_000
-TRANSIENT_JITTER_MS = 250
-# poll-loop.ts caps the doubling exponent at 6 (500ms * 2**6 = 32s, clamped
-# to the 30s ceiling), so the ladder stops climbing instead of running away.
-TRANSIENT_MAX_EXPONENT = 6
-
-# client.ts clamps the long-poll window to the server's accepted range.
-MIN_POLL_TIMEOUT_SECONDS = 1
-MAX_POLL_TIMEOUT_SECONDS = 30
-# client.ts: pollEvents allows timeoutSeconds + 15 before giving up locally.
-POLL_READ_MARGIN_SECONDS = 15
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
-
-# Relay caps a text part at 8 KB.
-MAX_TEXT_PART_BYTES = 8000
-
-
-# ---------------------------------------------------------------------------
-# Errors (port of errors.ts)
-# ---------------------------------------------------------------------------
+_SEQUENCE_PATTERN = re.compile(r"^(0|[1-9][0-9]*)$")
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_WEBHOOK_EVENT_TYPES = {
+    "message.sent",
+    "message.received",
+    "message.read",
+    "message.delivered",
+    "reaction.added",
+    "reaction.removed",
+    "participant.added",
+    "participant.removed",
+    "chat.created",
+    "chat.group_name_updated",
+    "chat.group_icon_updated",
+}
+_DISCONNECT_REASONS = {
+    "disabled",
+    "replaced",
+    "revoked",
+    "heartbeat_timeout",
+    "restart",
+}
+_WEBSOCKET_ERROR_CODES = {
+    "invalid_frame",
+    "ack_out_of_range",
+    "stale_connection",
+    "ack_failed",
+    "delivery_failed",
+}
 
 
 class RelayApiError(Exception):
-    """A classified Relay API failure.
-
-    ``terminal`` means retrying the identical request cannot succeed. The poll
-    loop retries only ``retryable`` failures and surfaces everything else.
-    """
-
     def __init__(
         self,
         message: str,
@@ -103,30 +96,57 @@ class RelayApiError(Exception):
         return self.kind == "retryable"
 
 
+class RelayWebSocketError(Exception):
+    """A server-supplied WebSocket error frame."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        fatal: bool,
+        retryable: bool,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.fatal = fatal
+        self.retryable = retryable
+
+    @property
+    def terminal(self) -> bool:
+        # fatal means the current connection cannot continue. retryable is
+        # the authority for whether a fresh ticket/connection may resume.
+        return not self.retryable
+
+
+class RelayWebSocketDisconnect(Exception):
+    """A server-supplied disconnect frame."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"Relay WebSocket disconnected: {reason}")
+        self.reason = reason
+
+    @property
+    def terminal(self) -> bool:
+        return self.reason not in ("heartbeat_timeout", "restart")
+
+
+class RelayWebSocketClosed(Exception):
+    """The connection ended without a terminal Relay frame."""
+
+
+class RelayWebSocketProtocolError(RuntimeError):
+    """A frame or connection ticket violated the canonical Relay schema."""
+
+
 def classify_status(status: int) -> str:
-    """errors.ts ``classifyRelayHttpStatus``, value for value."""
     if status == 401:
         return "auth"
-    if status == 409:
+    if status in (403, 409):
         return "conflict"
-    if status == 408 or status == 429 or status >= 500:
+    if status in (408, 429) or status >= 500:
         return "retryable"
     return "rejected"
-
-
-def is_consumer_takeover(error: BaseException) -> bool:
-    """True when a newer consumer claimed this Agent Token.
-
-    Relay allows one long-poll consumer per token. When a second one starts,
-    the older poll ends with ``409 terminated_by_other_consumer``. Restarting
-    does not win the slot back, so the caller stops cleanly and says why.
-    """
-    return isinstance(error, RelayApiError) and error.code == "terminated_by_other_consumer"
-
-
-# ---------------------------------------------------------------------------
-# Base URL validation (port of url.ts)
-# ---------------------------------------------------------------------------
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -134,105 +154,43 @@ def _is_loopback_host(hostname: str) -> bool:
     try:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
-        pass
-    return normalized == "localhost" or normalized.endswith(".localhost")
+        return normalized == "localhost" or normalized.endswith(".localhost")
 
 
 def normalize_base_url(raw: Optional[str]) -> str:
-    """Validate and canonicalize the API origin before a bearer token is sent.
-
-    Remote origins must be HTTPS. Plain HTTP is accepted only on loopback, for
-    local development. A URL carrying credentials, a path, a query, or a
-    fragment is rejected rather than silently trimmed: a bearer token must not
-    be posted to a surprising place because a config string had a typo.
-    """
     candidate = (raw or "").strip() or DEFAULT_BASE_URL
     parts = urlsplit(candidate)
     if not parts.scheme or not parts.hostname:
         raise ValueError(f"relay: invalid base URL {candidate!r}")
     if parts.username or parts.password:
         raise ValueError("relay: base URL must not contain credentials")
-    if parts.query or parts.fragment:
-        raise ValueError("relay: base URL must not contain a query or fragment")
-    if parts.path not in ("", "/"):
-        raise ValueError("relay: base URL must be an origin without a path")
+    if parts.query or parts.fragment or parts.path not in ("", "/"):
+        raise ValueError("relay: base URL must be an origin")
     if parts.scheme != "https" and not (
         parts.scheme == "http" and _is_loopback_host(parts.hostname)
     ):
         raise ValueError(
-            "relay: base URL must use HTTPS (HTTP is allowed only for loopback development)"
+            "relay: base URL must use HTTPS (HTTP is allowed only on loopback)"
         )
     return f"{parts.scheme}://{parts.netloc}"
 
 
-# ---------------------------------------------------------------------------
-# Idempotency (port of idempotency.ts)
-# ---------------------------------------------------------------------------
+def reply_idempotency_key(
+    event_id: str,
+    ordinal: int = 0,
+    content: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Derive one stable key from the event and logical request body."""
 
-
-def reply_idempotency_key(event_id: str, ordinal: int = 0) -> str:
-    """``replyIdempotencyKey`` from idempotency.ts: ``reply-<event_id>-<n>``.
-
-    The nth reply to one event always derives the same key, so a send retried
-    after a timeout or a redelivered event commits exactly one message. A
-    random key per attempt looks equivalent and is not: it turns every retry
-    into a duplicate bubble on the user's screen.
-    """
-    return f"reply-{event_id}-{ordinal}"
-
-
-# ---------------------------------------------------------------------------
-# Dedupe window (port of memory-dedupe.ts)
-# ---------------------------------------------------------------------------
-
-
-class MemoryDedupe:
-    """Bounded insertion-ordered ``event_id`` window for at-least-once delivery."""
-
-    def __init__(self, capacity: int = 4096) -> None:
-        if capacity < 1:
-            raise ValueError("relay dedupe capacity must be a positive integer")
-        self._capacity = capacity
-        self._seen: Dict[str, None] = {}
-
-    def has(self, event_id: str) -> bool:
-        return event_id in self._seen
-
-    def record(self, event_id: str) -> None:
-        """Record only once the event was handled. See :func:`run_poll_loop`."""
-        if not event_id:
-            return
-        self._seen[event_id] = None
-        while len(self._seen) > self._capacity:
-            self._seen.pop(next(iter(self._seen)))
-
-    def snapshot(self) -> List[str]:
-        return list(self._seen)
-
-    def restore(self, event_ids: Sequence[str]) -> None:
-        for event_id in event_ids:
-            self.record(event_id)
-
-    def clear(self) -> None:
-        self._seen.clear()
-
-    def __len__(self) -> int:
-        return len(self._seen)
-
-
-# ---------------------------------------------------------------------------
-# Client (port of client.ts)
-# ---------------------------------------------------------------------------
+    if content is None:
+        return f"reply-{event_id}-{ordinal}"
+    canonical = json.dumps(content, separators=(",", ":"), sort_keys=True)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return f"reply-{event_id}-{ordinal}-{digest}"
 
 
 @dataclass
 class RelayResponse:
-    """One HTTP result, in the shape the client needs.
-
-    A plain dataclass rather than an httpx type so tests can drive the client
-    through a fake transport with no network and no httpx import.
-    """
-
     status: int
     body: Any = None
     text: str = ""
@@ -241,19 +199,7 @@ class RelayResponse:
 Transport = Callable[..., Awaitable[RelayResponse]]
 
 
-@dataclass
-class EventsPage:
-    events: List[Dict[str, Any]] = field(default_factory=list)
-    next_cursor: int = 0
-
-
 class RelayClient:
-    """Typed calls against the Relay v1 developer API.
-
-    ``transport`` exists for tests: pass an async callable and no socket is
-    ever opened. Left unset, the client builds an ``httpx.AsyncClient``.
-    """
-
     def __init__(
         self,
         token: str,
@@ -269,8 +215,9 @@ class RelayClient:
         self._request_timeout = request_timeout
         self._transport = transport
         self._http: Optional[Any] = None
-
-    # -- lifecycle ----------------------------------------------------------
+        # Attachment URLs are capabilities and can point at storage on another
+        # origin. Keep them on a client that never carries the Agent Token.
+        self._transfer_http: Optional[Any] = None
 
     async def __aenter__(self) -> "RelayClient":
         self.open()
@@ -280,26 +227,23 @@ class RelayClient:
         await self.aclose()
 
     def open(self) -> None:
-        if self._transport is not None or self._http is not None:
-            return
         if not HTTPX_AVAILABLE:
-            raise RuntimeError("relay: httpx is required (pip install httpx)")
-        self._http = httpx.AsyncClient(
-            headers={"authorization": f"Bearer {self._token}"},
-            timeout=httpx.Timeout(
-                connect=15.0,
-                read=MAX_POLL_TIMEOUT_SECONDS + POLL_READ_MARGIN_SECONDS,
-                write=15.0,
-                pool=15.0,
-            ),
-        )
+            raise RuntimeError("relay: httpx is required")
+        if self._transport is None and self._http is None:
+            self._http = httpx.AsyncClient(
+                headers={"authorization": f"Bearer {self._token}"},
+                timeout=self._request_timeout,
+            )
+        if self._transfer_http is None:
+            self._transfer_http = httpx.AsyncClient(timeout=120.0)
 
     async def aclose(self) -> None:
         if self._http is not None:
             await self._http.aclose()
             self._http = None
-
-    # -- request plumbing ---------------------------------------------------
+        if self._transfer_http is not None:
+            await self._transfer_http.aclose()
+            self._transfer_http = None
 
     async def _request(
         self,
@@ -313,43 +257,20 @@ class RelayClient:
     ) -> RelayResponse:
         if self._transport is not None:
             response = await self._transport(
-                method=method, path=path, query=query or {},
-                body=body, headers=headers or {}, timeout=timeout,
+                method=method,
+                path=path,
+                query=query or {},
+                body=body,
+                headers=headers or {},
+                timeout=timeout,
             )
         else:
             response = await self._http_request(
-                method, path, query or {}, body, headers or {}, timeout,
+                method, path, query or {}, body, headers or {}, timeout
             )
         if response.status >= 400:
             raise self._error_for(method, path, response)
         return response
-
-    async def _conversation_scoped(
-        self,
-        conversation_id: str,
-        suffix: str,
-        method: str = "POST",
-        **kwargs: Any,
-    ) -> RelayResponse:
-        """One request against a route that hangs off a single conversation,
-        tried under both names Relay has for that collection.
-
-        ``/v1/chats/...`` is the live name. ``/v1/conversations/...`` is the
-        name the deployed server still answers to, and the one its
-        compatibility bridge keeps alive through the cutover. Only a 404 falls
-        through to the second spelling, so a server that speaks either one is
-        served by this same build and no other status is retried.
-        """
-        try:
-            return await self._request(
-                method, f"/v1/chats/{conversation_id}{suffix}", **kwargs,
-            )
-        except RelayApiError as error:
-            if error.status != 404:
-                raise
-        return await self._request(
-            method, f"/v1/conversations/{conversation_id}{suffix}", **kwargs,
-        )
 
     async def _http_request(
         self,
@@ -372,38 +293,34 @@ class RelayClient:
                 headers=headers or None,
                 timeout=timeout or self._request_timeout,
             )
-        except httpx.TimeoutException as exc:
+        except Exception as exc:
             raise RelayApiError(
-                f"relay: {method} {path} timed out", kind="retryable",
+                f"relay: network error: {exc}", kind="retryable"
             ) from exc
-        except Exception as exc:  # network-layer failure: worth another try
-            raise RelayApiError(
-                f"relay: network error: {exc}", kind="retryable",
-            ) from exc
-        parsed: Any = None
         try:
             parsed = raw.json()
         except Exception:
             parsed = None
-        return RelayResponse(status=raw.status_code, body=parsed, text=raw.text)
+        return RelayResponse(raw.status_code, parsed, raw.text)
 
     @staticmethod
-    def _error_for(method: str, path: str, response: RelayResponse) -> RelayApiError:
+    def _error_for(
+        method: str, path: str, response: RelayResponse
+    ) -> RelayApiError:
         code: Optional[str] = None
         detail = ""
         details: Dict[str, Any] = {}
-        body = response.body
-        if isinstance(body, dict):
-            error = body.get("error")
+        if isinstance(response.body, dict):
+            error = response.body.get("error")
             if isinstance(error, dict):
                 code = error.get("code")
-                detail = error.get("message") or ""
+                detail = str(error.get("message") or "")
                 if isinstance(error.get("details"), dict):
                     details = error["details"]
-            detail = detail or body.get("message") or ""
+            detail = detail or str(response.body.get("message") or "")
         message = f"relay: {method} {path} failed with {response.status}"
         if detail:
-            message = f"{message}: {detail}"
+            message += f": {detail}"
         return RelayApiError(
             message,
             kind=classify_status(response.status),
@@ -412,71 +329,38 @@ class RelayClient:
             details=details,
         )
 
-    # -- endpoints ----------------------------------------------------------
+    async def get_websocket_settings(self) -> Dict[str, Any]:
+        response = await self._request("GET", "/v1/websocket")
+        return response.body if isinstance(response.body, dict) else {}
 
-    async def get_me(self) -> Dict[str, Any]:
-        """``GET /v1/agents/me`` -> the agent profile.
-
-        ``owner_user_id`` on that profile is what the default allowlist keys
-        on, so this call is also the authorization bootstrap.
-        """
-        response = await self._request("GET", "/v1/agents/me")
-        body = response.body or {}
-        return body.get("agent", {}) if isinstance(body, dict) else {}
-
-    async def poll_events(
-        self,
-        cursor: int,
-        *,
-        timeout_seconds: int = MAX_POLL_TIMEOUT_SECONDS,
-        limit: Optional[int] = None,
-    ) -> EventsPage:
-        """``GET /v1/events`` long poll. Returns this page and its next cursor."""
-        window = max(MIN_POLL_TIMEOUT_SECONDS, min(timeout_seconds, MAX_POLL_TIMEOUT_SECONDS))
+    async def update_websocket(self, enabled: bool) -> Dict[str, Any]:
         response = await self._request(
-            "GET",
-            "/v1/events",
-            query={"cursor": cursor, "timeout": window, "limit": limit},
-            timeout=window + POLL_READ_MARGIN_SECONDS,
+            "PUT", "/v1/websocket", body={"enabled": enabled}
         )
-        body = response.body if isinstance(response.body, dict) else {}
-        events = body.get("events")
-        next_cursor = body.get("next_cursor")
-        # A missing or malformed next_cursor holds position rather than
-        # rewinding to zero, which would replay the whole retained log.
-        if not isinstance(next_cursor, int) or isinstance(next_cursor, bool) or next_cursor < 0:
-            next_cursor = cursor
-        return EventsPage(
-            events=events if isinstance(events, list) else [],
-            next_cursor=next_cursor,
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def create_websocket_connection(self) -> Dict[str, Any]:
+        response = await self._request(
+            "POST", "/v1/websocket-connections", body={}
         )
+        return response.body if isinstance(response.body, dict) else {}
 
     async def send_message(
         self,
-        conversation_id: str,
+        chat_id: str,
         parts: List[Dict[str, Any]],
         *,
         idempotency_key: str,
         reply_to: Optional[Dict[str, Any]] = None,
-        invocation_id: Optional[str] = None,
         timeout: Optional[float] = 30.0,
     ) -> Dict[str, Any]:
-        """``POST /v1/messages`` -> committed messages, one per content run.
-
-        The server splits one send at ingest: each visible non-media part
-        commits as its own message and contiguous media parts stay one
-        stacked message. The 202 carries ``messages``, one entry per
-        committed message; ``message_id`` on the body is a deprecated alias
-        for the head entry's id.
-        """
-        body: Dict[str, Any] = {"conversation_id": conversation_id, "parts": parts}
-        if invocation_id:
-            body["invocation_id"] = invocation_id
+        message: Dict[str, Any] = {"parts": parts}
         if reply_to:
-            body["reply_to"] = reply_to
+            message["reply_to"] = reply_to
         response = await self._request(
-            "POST", "/v1/messages",
-            body=body,
+            "POST",
+            f"/v1/chats/{quote(chat_id, safe='')}/messages",
+            body={"message": message},
             headers={"idempotency-key": idempotency_key},
             timeout=timeout,
         )
@@ -484,384 +368,434 @@ class RelayClient:
 
     async def send_text(
         self,
-        conversation_id: str,
+        chat_id: str,
         text: str,
         *,
         idempotency_key: str,
         reply_to: Optional[Dict[str, Any]] = None,
-        invocation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await self.send_message(
-            conversation_id,
-            [{"type": "text", "text": text}],
+            chat_id,
+            [{"type": "text", "value": text}],
             idempotency_key=idempotency_key,
             reply_to=reply_to,
-            invocation_id=invocation_id,
         )
 
-    async def set_typing(
+    async def mark_read(self, chat_id: str) -> None:
+        await self._request(
+            "POST", f"/v1/chats/{quote(chat_id, safe='')}/read"
+        )
+
+    async def get_chat(self, chat_id: str) -> Dict[str, Any]:
+        response = await self._request(
+            "GET", f"/v1/chats/{quote(chat_id, safe='')}"
+        )
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def request_upload(
         self,
-        conversation_id: str,
-        started: bool,
         *,
-        label: Optional[str] = None,
-        invocation_id: Optional[str] = None,
-        timeout: Optional[float] = 5.0,
-    ) -> None:
-        """``POST /v1/chats/{id}/typing``. Ephemeral, never logged.
-
-        ``invocation_id`` is forwarded when an event still carries one. The
-        live server ignores the field; the deployed one refuses group typing
-        without it, so forwarding what arrived is what keeps the typist visible
-        in a group until the cutover lands.
-        """
-        body: Dict[str, Any] = {"started": started}
-        if label:
-            body["label"] = label
-        if invocation_id:
-            body["invocation_id"] = invocation_id
-        await self._conversation_scoped(
-            conversation_id, "/typing", body=body, timeout=timeout,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+    ) -> Dict[str, Any]:
+        response = await self._request(
+            "POST",
+            "/v1/attachments",
+            body={
+                "filename": filename,
+                "content_type": content_type,
+                "size_bytes": size_bytes,
+            },
         )
+        return response.body if isinstance(response.body, dict) else {}
 
-    async def mark_read(self, conversation_id: str, message_id: str) -> None:
-        """``POST /v1/chats/{id}/read``.
-
-        This and ``set_typing`` are what the deleted ``/responding`` route did
-        in one round trip. Callers treat a failure here as a missing "Read",
-        never as a failed turn.
-        """
-        await self._conversation_scoped(
-            conversation_id, "/read", body={"message_id": message_id},
+    async def upload_attachment(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        data: bytes,
+    ) -> str:
+        allocation = await self.request_upload(
+            filename=filename,
+            content_type=content_type,
+            size_bytes=len(data),
         )
+        attachment_id = allocation.get("attachment_id")
+        upload_url = allocation.get("upload_url")
+        required_headers = allocation.get("required_headers")
+        if not isinstance(attachment_id, str) or not isinstance(upload_url, str):
+            raise RelayApiError(
+                "relay: upload allocation was incomplete", kind="rejected"
+            )
+        if self._transfer_http is None:
+            self.open()
+        if self._transfer_http is None:
+            raise RuntimeError("relay: attachment upload requires an HTTP client")
+        response = await self._transfer_http.put(
+            upload_url,
+            content=data,
+            headers=required_headers if isinstance(required_headers, dict) else {},
+            timeout=120.0,
+        )
+        if response.status_code >= 300:
+            raise RelayApiError(
+                f"relay: attachment PUT failed with {response.status_code}",
+                kind=classify_status(response.status_code),
+                status=response.status_code,
+            )
+        return attachment_id
 
-    async def get_chat(self, conversation_id: str) -> Dict[str, Any]:
-        """``GET /v1/chats/{id}`` -> the chat, under either server's key."""
-        response = await self._conversation_scoped(conversation_id, "", method="GET")
-        body = response.body if isinstance(response.body, dict) else {}
-        chat = body.get("chat") or body.get("conversation") or {}
-        return chat if isinstance(chat, dict) else {}
-
-    async def is_group_chat(self, conversation_id: str) -> bool:
-        """Is this conversation a group? Cache it: a thread never changes kind.
-
-        ``is_group`` is the live field and ``kind`` is the deployed server's;
-        either answers.
-        """
-        chat = await self.get_chat(conversation_id)
-        if isinstance(chat.get("is_group"), bool):
-            return bool(chat["is_group"])
-        return chat.get("kind") == "group"
-
-
-# ---------------------------------------------------------------------------
-# Poll loop (port of poll-loop.ts)
-# ---------------------------------------------------------------------------
-
-
-def transient_delay_seconds(attempt: int, random_fn: Callable[[], float] = _random.random) -> float:
-    """The backoff ladder from poll-loop.ts, in seconds.
-
-    ``attempt`` is the count of consecutive transient failures, so the first
-    retry is attempt 1. 500ms doubles per attempt, the exponent is capped at
-    6, the result is clamped to 30s, and up to 250ms of jitter is added so a
-    fleet of consumers does not retry in lockstep:
-    1.0s, 2.0s, 4.0s, 8.0s, 16.0s, then 30.0s forever.
-    """
-    exponent = min(max(attempt, 0), TRANSIENT_MAX_EXPONENT)
-    backoff_ms = min(TRANSIENT_MAX_DELAY_MS, TRANSIENT_BASE_DELAY_MS * (2 ** exponent))
-    return (backoff_ms + int(random_fn() * TRANSIENT_JITTER_MS)) / 1000.0
-
-
-def is_message_received(event: Dict[str, Any]) -> bool:
-    if event.get("event_type") != "message.received":
-        return False
-    return inbound_message_body(event) is not None
+    async def send_voice_memo(
+        self,
+        chat_id: str,
+        attachment_id: str,
+    ) -> Dict[str, Any]:
+        response = await self._request(
+            "POST",
+            f"/v1/chats/{quote(chat_id, safe='')}/voicememo",
+            body={"attachment_id": attachment_id},
+        )
+        return response.body if isinstance(response.body, dict) else {}
 
 
-def inbound_message_body(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The message inside a ``message.received`` event, under either shape.
-
-    The deployed server wraps it as ``data.message``; the server after the
-    cleanup sends the message itself as ``data``, and the compatibility bridge
-    sends both during the window. A message is recognisable by carrying its own
-    ``id``, which the wrapper never does, so no version detection is needed.
-    """
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return None
-    wrapped = data.get("message")
-    if isinstance(wrapped, dict):
-        return wrapped
-    return data if isinstance(data.get("id"), str) else None
+def transient_delay_seconds(
+    attempt: int, random_fn: Callable[[], float] = _random.random
+) -> float:
+    ceiling = min(
+        TRANSIENT_MAX_DELAY_MS,
+        TRANSIENT_BASE_DELAY_MS * (2 ** max(0, attempt - 1)),
+    )
+    return random_fn() * ceiling / 1000.0
 
 
-def mentions_agent(
-    message: Dict[str, Any],
+class DurableInbox(Protocol):
+    def accept(self, sequence: str, event: Dict[str, Any]) -> bool: ...
+
+
+async def consume_websocket(
+    socket: Any,
     *,
-    handle: str = "",
-    agent_id: str = "",
-) -> bool:
-    """True when this message names this agent.
+    inbox: DurableInbox,
+    on_accepted: Callable[[], Any] = lambda: None,
+    on_ready: Callable[[], Any] = lambda: None,
+) -> None:
+    """Consume one connection, commit before cumulative ACK, and never process."""
 
-    The rule is Relay's own, copied from the server rather than designed here:
-    a mention is the STRUCTURED field a client attaches, matched against the
-    agent's handle — Relay's own push path decides a group notification exactly
-    this way — and the words in the text carry no authority ("Structured group
-    targets. Text mentions are presentation, never authority"). So ``@youragent``
-    typed into a message that carries no mention is people talking ABOUT the
-    agent, and it stays out of it.
+    ready = False
+    accepted_through: Optional[int] = None
+    async for raw in socket:
+        if not isinstance(raw, str):
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received a non-text frame"
+            )
+        try:
+            frame = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received invalid JSON"
+            ) from exc
+        frame_type = frame.get("type") if isinstance(frame, dict) else None
+        if frame_type == "ready":
+            checkpoint = frame.get("acked_through")
+            if (
+                ready
+                or set(frame) != {
+                    "type",
+                    "connection_id",
+                    "acked_through",
+                    "heartbeat_interval_ms",
+                    "max_in_flight",
+                }
+                or not isinstance(checkpoint, str)
+                or _SEQUENCE_PATTERN.fullmatch(checkpoint) is None
+                or not isinstance(frame.get("connection_id"), str)
+                or _UUID_PATTERN.fullmatch(frame["connection_id"]) is None
+                or isinstance(frame.get("heartbeat_interval_ms"), bool)
+                or not isinstance(frame.get("heartbeat_interval_ms"), int)
+                or frame["heartbeat_interval_ms"] < 1
+                or isinstance(frame.get("max_in_flight"), bool)
+                or not isinstance(frame.get("max_in_flight"), int)
+                or frame["max_in_flight"] < 1
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid ready frame"
+                )
+            accepted_through = int(checkpoint)
+            ready = True
+            result = on_ready()
+            if asyncio.iscoroutine(result):
+                await result
+            continue
+        if frame_type == "disconnect":
+            reason = frame.get("reason")
+            if set(frame) != {"type", "reason"} or reason not in _DISCONNECT_REASONS:
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid disconnect frame"
+                )
+            raise RelayWebSocketDisconnect(reason)
+        if frame_type == "error":
+            code = frame.get("code")
+            message = frame.get("message")
+            fatal = frame.get("fatal")
+            retryable = frame.get("retryable")
+            if (
+                set(frame) != {
+                    "type",
+                    "code",
+                    "message",
+                    "fatal",
+                    "retryable",
+                }
+                or not isinstance(code, str)
+                or code not in _WEBSOCKET_ERROR_CODES
+                or not isinstance(message, str)
+                or not isinstance(fatal, bool)
+                or not isinstance(retryable, bool)
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid error frame"
+                )
+            raise RelayWebSocketError(
+                message,
+                code=code,
+                fatal=fatal,
+                retryable=retryable,
+            )
+        if (
+            frame_type != "event"
+            or set(frame) != {"type", "sequence", "event"}
+            or not ready
+        ):
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received an invalid frame"
+            )
+        sequence = frame.get("sequence")
+        event = frame.get("event")
+        if (
+            not isinstance(sequence, str)
+            or _SEQUENCE_PATTERN.fullmatch(sequence) is None
+        ):
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received an invalid sequence"
+            )
+        if (
+            not isinstance(event, dict)
+            or event.get("api_version") != "v1"
+            or not isinstance(event.get("webhook_version"), str)
+            or event.get("event_type") not in _WEBHOOK_EVENT_TYPES
+            or not isinstance(event.get("event_id"), str)
+            or _UUID_PATTERN.fullmatch(event["event_id"]) is None
+            or not isinstance(event.get("created_at"), str)
+            or not isinstance(event.get("trace_id"), str)
+            or not isinstance(event.get("agent_id"), str)
+            or _UUID_PATTERN.fullmatch(event["agent_id"]) is None
+            or not isinstance(event.get("data"), dict)
+        ):
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received an invalid event"
+            )
+        sequence_number = int(sequence)
+        if accepted_through is None or sequence_number != accepted_through + 1:
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket sequence is not contiguous"
+            )
+        inbox.accept(sequence, event)
+        accepted_through = sequence_number
+        await socket.send(json.dumps({
+            "type": "ack",
+            "through_sequence": sequence,
+        }, separators=(",", ":")))
+        result = on_accepted()
+        if asyncio.iscoroutine(result):
+            await result
+    raise RelayWebSocketClosed("Relay WebSocket closed")
 
-    Both vocabularies are read, because one build has to serve the server
-    production runs today and the one it is being cut over to: ``mention`` on a
-    text part is the live shape and names a handle, while ``invoked_agents`` and
-    ``mentions[].participant_id`` are the deployed server's and name an id.
-    """
-    parts = message.get("parts")
-    parts = parts if isinstance(parts, list) else []
-    wanted = handle.lstrip("@").lower()
-    if wanted:
-        for part in parts:
-            if not isinstance(part, dict) or part.get("type") != "text":
-                continue
-            named = part.get("mention")
-            if isinstance(named, str) and named.lstrip("@").lower() == wanted:
-                return True
-    if agent_id:
-        invoked = message.get("invoked_agents")
-        if isinstance(invoked, list) and agent_id in invoked:
-            return True
-        for part in parts:
-            if not isinstance(part, dict) or part.get("type") != "text":
-                continue
-            ranges = part.get("mentions")
-            if not isinstance(ranges, list):
-                continue
-            for entry in ranges:
-                if isinstance(entry, dict) and entry.get("participant_id") == agent_id:
-                    return True
-    return False
+
+async def run_websocket_loop(
+    *,
+    client: RelayClient,
+    inbox: DurableInbox,
+    on_accepted: Callable[[], Any] = lambda: None,
+    should_continue: Callable[[], bool] = lambda: True,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    random_fn: Callable[[], float] = _random.random,
+    connect_factory: Optional[Callable[..., Any]] = None,
+    log: Callable[[str], None] = logger.warning,
+) -> None:
+    """Reconnect with full jitter. Processing is deliberately a separate loop."""
+
+    connector = connect_factory or websocket_connect
+    if connector is None:
+        raise RuntimeError("relay: websockets is required")
+    attempt = 0
+    while should_continue():
+        try:
+            ticket = await client.create_websocket_connection()
+            url = ticket.get("url")
+            expires_at = ticket.get("expires_at")
+            protocol = ticket.get("subprotocol")
+            parsed_url = urlsplit(url) if isinstance(url, str) else None
+            if (
+                set(ticket) != {"url", "expires_at", "subprotocol"}
+                or parsed_url is None
+                or parsed_url.scheme not in ("ws", "wss")
+                or not parsed_url.hostname
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or not isinstance(expires_at, str)
+                or protocol != "relay.v1.json"
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay returned an invalid WebSocket ticket"
+                )
+            async with connector(url, subprotocols=[protocol]) as socket:
+                def mark_ready() -> None:
+                    nonlocal attempt
+                    attempt = 0
+
+                await consume_websocket(
+                    socket,
+                    inbox=inbox,
+                    on_accepted=on_accepted,
+                    on_ready=mark_ready,
+                )
+        except asyncio.CancelledError:
+            raise
+        except RelayApiError as error:
+            if error.terminal:
+                raise
+            attempt += 1
+            delay = transient_delay_seconds(attempt, random_fn)
+            log(f"WebSocket reconnect in {delay:.2f}s: {error}")
+            await sleep(delay)
+        except RelayWebSocketError as error:
+            if error.terminal:
+                raise
+            attempt += 1
+            delay = transient_delay_seconds(attempt, random_fn)
+            log(f"WebSocket reconnect in {delay:.2f}s: {error}")
+            await sleep(delay)
+        except RelayWebSocketDisconnect as error:
+            if error.terminal:
+                raise
+            attempt += 1
+            delay = transient_delay_seconds(attempt, random_fn)
+            log(f"WebSocket reconnect in {delay:.2f}s: {error}")
+            await sleep(delay)
+        except RelayWebSocketProtocolError:
+            raise
+        except Exception as error:
+            if not should_continue():
+                return
+            if (
+                ConnectionClosed is not None
+                and isinstance(error, ConnectionClosed)
+                and (
+                    getattr(error, "code", None)
+                    or getattr(getattr(error, "rcvd", None), "code", None)
+                ) == 4409
+            ):
+                raise RelayWebSocketDisconnect("replaced") from error
+            attempt += 1
+            delay = transient_delay_seconds(attempt, random_fn)
+            log(f"WebSocket reconnect in {delay:.2f}s: {error}")
+            await sleep(delay)
 
 
 @dataclass
 class InboundMessage:
-    """One inbound ``message.received`` event, unpacked for the handler."""
-
     event: Dict[str, Any]
     event_id: str
     message: Dict[str, Any]
-    conversation_id: str
+    chat_id: str
     message_id: str
     sender_id: str
     sender_kind: str
-    #: HISTORICAL. Relay minted an invocation for every group delivery and made
-    #: it the permission to speak. The server no longer mints one and no longer
-    #: checks one; it is carried only to be forwarded to the routes that still
-    #: want it on the deployed server.
-    invocation_id: Optional[str] = None
-
-    @property
-    def group_hint(self) -> Optional[bool]:
-        """What the EVENT alone can say about whether this is a group.
-
-        An invocation was only ever minted for a group, so one still riding an
-        event proves it. Its absence proves nothing any more — the server does
-        not mint them — so the answer is unknown and the caller has to ask
-        ``RelayClient.is_group_chat``. Returning ``False`` here is what would
-        make every group look like a DM.
-        """
-        return True if self.invocation_id else None
+    sender_name: str
+    agent_handle: str
+    is_group: bool
+    created_at: Optional[str]
 
 
 def parse_inbound(event: Dict[str, Any]) -> Optional[InboundMessage]:
-    message = inbound_message_body(event) if is_message_received(event) else None
-    if message is None:
+    if event.get("event_type") != "message.received":
         return None
-    data = event.get("data") or {}
-    sender = message.get("sender") or message.get("sender_handle") or {}
-    conversation_id = (
-        message.get("conversation_id")
-        or message.get("chat_id")
-        or event.get("chat_id")
-        or ""
-    )
+    data = event.get("data")
+    if not isinstance(data, dict) or data.get("direction") != "inbound":
+        return None
+    chat = data.get("chat")
+    sender = data.get("sender_handle")
+    parts = data.get("parts")
+    if not isinstance(chat, dict) or not isinstance(sender, dict):
+        return None
+    if not isinstance(parts, list):
+        return None
+    owner = chat.get("owner_handle")
     return InboundMessage(
         event=event,
         event_id=str(event.get("event_id") or ""),
-        message=message,
-        conversation_id=str(conversation_id),
-        message_id=str(message.get("id") or ""),
+        message=data,
+        chat_id=str(chat.get("id") or ""),
+        message_id=str(data.get("id") or ""),
         sender_id=str(sender.get("id") or ""),
         sender_kind=str(sender.get("kind") or ""),
-        invocation_id=(data.get("invocation_id") if isinstance(data, dict) else None) or None,
+        sender_name=str(sender.get("display_name") or sender.get("handle") or ""),
+        agent_handle=(
+            str(owner.get("handle") or "") if isinstance(owner, dict) else ""
+        ),
+        is_group=bool(chat.get("is_group")),
+        created_at=(
+            str(data.get("sent_at"))
+            if isinstance(data.get("sent_at"), str)
+            else str(event.get("created_at") or "") or None
+        ),
     )
 
 
-async def run_poll_loop(
-    *,
-    client: RelayClient,
-    get_cursor: Callable[[], int],
-    set_cursor: Callable[[int], Any],
-    dedupe: MemoryDedupe,
-    on_message: Callable[[InboundMessage], Awaitable[None]],
-    allow_sender: Optional[Callable[[str], bool]] = None,
-    should_continue: Callable[[], bool] = lambda: True,
-    timeout_seconds: int = MAX_POLL_TIMEOUT_SECONDS,
-    limit: Optional[int] = None,
-    log: Callable[[str], None] = logger.info,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    random_fn: Callable[[], float] = _random.random,
-) -> None:
-    """Receive loop for hosts that cannot expose a public webhook URL.
-
-    Three ordering rules carry the delivery guarantee, and each one is load
-    bearing:
-
-    1. ``on_message`` runs before ``dedupe.record``. Recording on entry looks
-       equivalent and silently drops messages: a handler that raises leaves
-       the cursor unsaved, the server redelivers, and the event then looks
-       like a duplicate.
-    2. The cursor advances once, after every event on the page was handled. A
-       failure mid-page replays the page rather than skipping its tail.
-    3. Only ``retryable`` failures back off and retry. Terminal ones stop the
-       loop, because retrying an identical request cannot fix them.
-    """
-    transient_attempts = 0
-
-    while should_continue():
-        try:
-            page = await client.poll_events(
-                get_cursor(), timeout_seconds=timeout_seconds, limit=limit,
-            )
-        except asyncio.CancelledError:
-            raise
-        except RelayApiError as error:
-            if not should_continue():
-                return
-            if error.terminal:
-                _log_terminal(error, log)
-                raise
-            transient_attempts += 1
-            delay = transient_delay_seconds(transient_attempts, random_fn)
-            log(f"[relay] transient poll error (attempt {transient_attempts}): {error}")
-            await sleep(delay)
+def mentions_agent(message: Dict[str, Any], *, handle: str) -> bool:
+    wanted = handle.lstrip("@").lower()
+    if not wanted:
+        return False
+    for part in message.get("parts") or []:
+        if not isinstance(part, dict) or part.get("type") != "text":
             continue
-
-        transient_attempts = 0
-
-        for event in page.events:
-            if not should_continue():
-                return
-            inbound = parse_inbound(event)
-            if inbound is None:
-                continue
-            # Echo-loop guard: never react to this agent's own messages.
-            if inbound.sender_kind == "agent":
-                continue
-            if (
-                allow_sender is not None
-                and inbound.sender_kind == "user"
-                and not allow_sender(inbound.sender_id)
-            ):
-                # A dropped sender is a decided outcome, not a failure, so it
-                # is recorded: redelivering it would re-run the same drop.
-                dedupe.record(inbound.event_id)
-                continue
-            if dedupe.has(inbound.event_id):
-                continue
-            await on_message(inbound)
-            dedupe.record(inbound.event_id)
-
-        result = set_cursor(page.next_cursor)
-        if asyncio.iscoroutine(result):
-            await result
+        named = part.get("mention")
+        if isinstance(named, str) and named.lstrip("@").lower() == wanted:
+            return True
+    return False
 
 
-def _log_terminal(error: RelayApiError, log: Callable[[str], None]) -> None:
-    """Say what an operator has to do, per failure, in plain words."""
-    if is_consumer_takeover(error):
-        log(
-            "[relay] another consumer took this Agent Token (409 "
-            "terminated_by_other_consumer). Relay allows one long-poll consumer "
-            "per token, and restarting will not win the slot back. Stop the "
-            "other process, or issue this Hermes its own agent and token."
-        )
-    elif error.status == 410:
-        log(
-            "[relay] cursor expired (410): it is behind the seven-day retention "
-            "ceiling. Reconcile from conversation history. Do not reset the "
-            "cursor to zero."
-        )
-    elif error.status == 422:
-        highest = error.details.get("highest_delivered_cursor")
-        where = "error.details.highest_delivered_cursor" if highest is None else f"cursor {highest}"
-        log(
-            "[relay] cursor ahead of the delivered ledger (422): reconcile "
-            f"history over REST, then resume from {where}."
-        )
-    elif error.kind == "auth":
-        log("[relay] Relay rejected the Agent Token (401). Check RELAY_AGENT_TOKEN.")
-    elif error.kind == "conflict":
-        log(
-            f"[relay] long poll conflict: {error}. Webhooks and long polling are "
-            "mutually exclusive per Agent Token: disable the webhook endpoint to "
-            "poll."
-        )
-    else:
-        log(f"[relay] poll stopped: {error}")
-
-
-# ---------------------------------------------------------------------------
-# Message rendering helpers
-# ---------------------------------------------------------------------------
-
-
-def utf8_len(text: str) -> int:
-    """Relay caps a text part at 8 KB of UTF-8 bytes, not code points."""
-    return len(text.encode("utf-8"))
+def utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
 def split_paragraphs(text: str) -> List[str]:
-    """Split outbound text on blank lines, one bubble per thought.
-
-    Each blank-line-separated paragraph rides as its own text part and the
-    server commits it as its own message, so a reply lands as separate
-    bubbles the way people text. Blank lines inside a ``` fence do not
-    split, so a code block ships as one part.
-    """
-    paragraphs: List[str] = []
+    blocks: List[str] = []
     current: List[str] = []
     in_fence = False
-    for line in (text or "").split("\n"):
-        if line.lstrip().startswith("```"):
+    for line in text.strip().splitlines():
+        if line.strip().startswith("```"):
             in_fence = not in_fence
-        if not in_fence and not line.strip():
-            if current:
-                paragraphs.append("\n".join(current).strip())
-                current = []
-            continue
-        current.append(line)
-    if current:
-        paragraphs.append("\n".join(current).strip())
-    return [paragraph for paragraph in paragraphs if paragraph]
+        if not line.strip() and not in_fence:
+            block = "\n".join(current).strip()
+            if block:
+                blocks.append(block)
+            current = []
+        else:
+            current.append(line)
+    block = "\n".join(current).strip()
+    if block:
+        blocks.append(block)
+    return blocks
 
 
 def render_text(message: Dict[str, Any]) -> str:
-    """Flatten a canonical message's ordered parts into one string.
-
-    ``fallback_text`` is the server's own plain rendering and covers the case
-    where every part was media.
-    """
-    chunks: List[str] = []
+    values: List[str] = []
     for part in message.get("parts") or []:
         if not isinstance(part, dict):
             continue
-        kind = part.get("type")
-        if kind in ("text", "link") and part.get("text"):
-            chunks.append(str(part["text"]))
-        elif kind == "link" and part.get("url"):
-            chunks.append(str(part["url"]))
-        elif kind == "data" and part.get("data") is not None:
-            chunks.append(json.dumps(part["data"], ensure_ascii=False))
-    rendered = "\n".join(chunks).strip()
-    return rendered or str(message.get("fallback_text") or "").strip()
+        if part.get("type") in ("text", "link") and isinstance(part.get("value"), str):
+            values.append(part["value"])
+    return "\n".join(values).strip()

@@ -1,530 +1,563 @@
-"""Transport tests. No network: every call goes through a fake transport."""
-
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List
 
 import pytest
+from hermes_relay_plugin.state import RelayInbox
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from relay_api import (  # noqa: E402
-    MemoryDedupe,
-    RelayApiError,
+from hermes_relay_plugin.relay_api import (
     RelayClient,
     RelayResponse,
+    RelayWebSocketClosed,
+    RelayWebSocketDisconnect,
+    RelayWebSocketError,
+    RelayWebSocketProtocolError,
     classify_status,
-    is_consumer_takeover,
+    consume_websocket,
+    mentions_agent,
     normalize_base_url,
     parse_inbound,
     render_text,
     reply_idempotency_key,
-    run_poll_loop,
+    run_websocket_loop,
     split_paragraphs,
     transient_delay_seconds,
-    utf8_len,
+    utf16_len,
 )
 
-TOKEN = "rly_live_test"
-
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
+TOKEN = "relay-test-token"
+CHAT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
+EVENT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
 
 
 class FakeTransport:
-    """Records every request and replays a scripted list of responses."""
-
-    def __init__(self, responses: List[Any]) -> None:
-        self._responses = list(responses)
+    def __init__(self, responses: List[RelayResponse]) -> None:
+        self.responses = responses
         self.calls: List[Dict[str, Any]] = []
 
     async def __call__(self, **kwargs: Any) -> RelayResponse:
         self.calls.append(kwargs)
-        if not self._responses:
-            # An idle long poll: nothing new, cursor unchanged.
-            return RelayResponse(status=200, body={"events": [], "next_cursor": 0})
-        nxt = self._responses.pop(0)
-        if isinstance(nxt, BaseException):
-            raise nxt
-        return nxt
+        return self.responses.pop(0)
 
 
-def events_page(events: List[Dict[str, Any]], next_cursor: int) -> RelayResponse:
-    return RelayResponse(status=200, body={"events": events, "next_cursor": next_cursor})
+def event(*, group: bool = False, mention: bool = False) -> Dict[str, Any]:
+    text: Dict[str, Any] = {"type": "text", "value": "@helper hello"}
+    if mention:
+        text.update({"mention": "helper", "mention_range": [0, 7]})
+    return {
+        "api_version": "v1",
+        "webhook_version": "2026-02-03",
+        "event_id": EVENT_ID,
+        "event_type": "message.received",
+        "created_at": "2026-08-29T00:00:00Z",
+        "trace_id": "trace-test",
+        "agent_id": "01993d50-ef7b-7b37-886b-23fd80c7ec13",
+        "data": {
+            "chat": {
+                "id": CHAT_ID,
+                "is_group": group,
+                "owner_handle": {
+                    "id": "01993d50-ef7b-7b37-886b-23fd80c7ec14",
+                    "handle": "helper",
+                    "joined_at": "2026-08-29T00:00:00Z",
+                    "kind": "agent",
+                    "is_me": True,
+                },
+            },
+            "id": MESSAGE_ID,
+            "direction": "inbound",
+            "sender_handle": {
+                "id": "01993d50-ef7b-7b37-886b-23fd80c7ec15",
+                "handle": "advait",
+                "joined_at": "2026-08-29T00:00:00Z",
+                "kind": "user",
+                "display_name": "Advait",
+            },
+            "parts": [text],
+            "sent_at": "2026-08-29T00:00:00Z",
+        },
+    }
 
 
-def user_event(event_id: str, sender_id: str = "usr_owner", text: str = "hi",
-               conversation_id: str = "cnv_1", invocation_id: Optional[str] = None) -> Dict[str, Any]:
-    data: Dict[str, Any] = {
+def test_current_event_parsing_and_mentions():
+    inbound = parse_inbound(event(group=True, mention=True))
+    assert inbound is not None
+    assert inbound.chat_id == CHAT_ID
+    assert inbound.message_id == MESSAGE_ID
+    assert inbound.is_group is True
+    assert inbound.agent_handle == "helper"
+    assert inbound.sender_name == "Advait"
+    assert mentions_agent(inbound.message, handle=inbound.agent_handle)
+
+
+def test_visible_at_text_is_not_a_structured_mention():
+    inbound = parse_inbound(event(group=True, mention=False))
+    assert inbound is not None
+    assert not mentions_agent(inbound.message, handle="helper")
+
+
+def test_render_text_uses_value_and_link_parts():
+    message = event()["data"]
+    message["parts"] = [
+        {"type": "text", "value": "one"},
+        {"type": "media", "url": "https://files.example/photo"},
+        {"type": "link", "value": "https://example.com"},
+    ]
+    assert render_text(message) == "one\nhttps://example.com"
+
+
+def test_send_message_uses_chat_route_and_current_body():
+    transport = FakeTransport([
+        RelayResponse(202, {"chat_id": CHAT_ID, "message": {"id": MESSAGE_ID}})
+    ])
+    client = RelayClient(TOKEN, transport=transport)
+    result = asyncio.run(client.send_text(
+        CHAT_ID,
+        "hello",
+        idempotency_key="reply-key",
+        reply_to={"message_id": MESSAGE_ID},
+    ))
+    assert result["message"]["id"] == MESSAGE_ID
+    call = transport.calls[0]
+    assert call["path"] == f"/v1/chats/{CHAT_ID}/messages"
+    assert call["headers"] == {"idempotency-key": "reply-key"}
+    assert call["body"] == {
         "message": {
-            "id": f"msg_{event_id}",
-            "conversation_id": conversation_id,
-            "sender": {"kind": "user", "id": sender_id, "display_name": "Someone"},
-            "parts": [{"type": "text", "text": text}],
-            "created_at": "2026-08-18T00:00:00Z",
+            "parts": [{"type": "text", "value": "hello"}],
+            "reply_to": {"message_id": MESSAGE_ID},
         }
     }
-    if invocation_id:
-        data["invocation_id"] = invocation_id
-    return {
-        "event_id": event_id,
-        "event_type": "message.received",
-        "agent_id": "agt_1",
-        "created_at": "2026-08-18T00:00:00Z",
-        "data": data,
-    }
 
 
-class Harness:
-    """Cursor, dedupe and handler wiring shared by the poll-loop tests."""
-
-    def __init__(self, allow_sender=None) -> None:
-        self.cursor = 0
-        self.dedupe = MemoryDedupe()
-        self.handled: List[str] = []
-        self.slept: List[float] = []
-        self.logs: List[str] = []
-        self.allow_sender = allow_sender
-        self.fail_on: Optional[str] = None
-        self.transport: Optional[FakeTransport] = None
-        self.polls = 1
-        self.polls_served = 0
-        # True between a good page arriving and its cursor being saved, so the
-        # poll budget never cuts a page off half way through.
-        self.draining = False
-
-    def set_cursor(self, value: int) -> None:
-        self.cursor = value
-        self.draining = False
-
-    async def on_message(self, inbound) -> None:
-        if self.fail_on and inbound.event_id == self.fail_on:
-            raise RuntimeError("handler blew up")
-        self.handled.append(inbound.event_id)
-
-    async def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-
-    def should_continue(self) -> bool:
-        """Bound the loop so a test cannot spin forever.
-
-        In production this is the adapter's running flag, always True mid
-        page. Here it also caps how many polls the loop may make, while
-        letting a page that already arrived finish.
-        """
-        return self.draining or self.polls_served < self.polls
-
-    async def run(self, transport: FakeTransport, polls: int = 1) -> None:
-        self.transport = transport
-        self.polls = polls
-
-        async def counted(**kwargs: Any) -> RelayResponse:
-            self.draining = False
-            self.polls_served += 1
-            response = await transport(**kwargs)
-            self.draining = response.status < 400
-            return response
-
-        client = RelayClient(TOKEN, transport=counted)
-        await run_poll_loop(
-            client=client,
-            get_cursor=lambda: self.cursor,
-            set_cursor=self.set_cursor,
-            dedupe=self.dedupe,
-            on_message=self.on_message,
-            allow_sender=self.allow_sender,
-            should_continue=self.should_continue,
-            log=self.logs.append,
-            sleep=self.sleep,
-            random_fn=lambda: 0.0,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Idempotency key derivation
-# ---------------------------------------------------------------------------
-
-
-def test_idempotency_key_is_derived_from_event_and_ordinal():
-    assert reply_idempotency_key("evt_1", 0) == "reply-evt_1-0"
-    assert reply_idempotency_key("evt_1", 2) == "reply-evt_1-2"
-
-
-def test_idempotency_key_is_stable_across_retries():
-    """The whole point: retrying the same reply must reuse the same key."""
-    first = reply_idempotency_key("evt_9", 1)
-    second = reply_idempotency_key("evt_9", 1)
-    assert first == second
-
-
-def test_idempotency_key_differs_per_reply_and_per_event():
-    assert reply_idempotency_key("evt_1", 0) != reply_idempotency_key("evt_1", 1)
-    assert reply_idempotency_key("evt_1", 0) != reply_idempotency_key("evt_2", 0)
-
-
-def test_send_message_puts_the_key_on_the_wire():
-    transport = FakeTransport([RelayResponse(status=200, body={"message_id": "msg_1"})])
+def test_read_has_no_body_and_voice_has_dedicated_route():
+    transport = FakeTransport([
+        RelayResponse(204),
+        RelayResponse(202, {"voice_memo": {"id": MESSAGE_ID}}),
+    ])
     client = RelayClient(TOKEN, transport=transport)
-    body = asyncio.run(
-        client.send_message(
-            "cnv_1", [{"type": "text", "text": "yo"}],
-            idempotency_key=reply_idempotency_key("evt_7", 0),
-            invocation_id="inv_3",
+    asyncio.run(client.mark_read(CHAT_ID))
+    result = asyncio.run(client.send_voice_memo(
+        CHAT_ID,
+        "01993d50-ef7b-7b37-886b-23fd80c7ec16",
+    ))
+    assert result["voice_memo"]["id"] == MESSAGE_ID
+    assert transport.calls[0]["path"] == f"/v1/chats/{CHAT_ID}/read"
+    assert transport.calls[0]["body"] is None
+    assert transport.calls[1]["path"] == f"/v1/chats/{CHAT_ID}/voicememo"
+    assert transport.calls[1]["body"] == {
+        "attachment_id": "01993d50-ef7b-7b37-886b-23fd80c7ec16",
+    }
+    assert transport.calls[1]["headers"] == {}
+
+
+def test_attachment_allocates_with_json_then_puts_raw_bytes():
+    attachment_id = "01993d50-ef7b-7b37-886b-23fd80c7ec16"
+    transport = FakeTransport([
+        RelayResponse(200, {
+            "attachment_id": attachment_id,
+            "upload_url": "https://upload.example/one-use",
+            "download_url": "https://download.example/file",
+            "http_method": "PUT",
+            "expires_at": "2026-08-29T00:15:00Z",
+            "required_headers": {"content-type": "image/png"},
+        }),
+    ])
+
+    class FakeHttp:
+        def __init__(self):
+            self.calls = []
+
+        async def put(self, url, *, content, headers, timeout):
+            self.calls.append({
+                "url": url,
+                "content": content,
+                "headers": headers,
+                "timeout": timeout,
+            })
+            return type("Response", (), {"status_code": 200})()
+
+    client = RelayClient(TOKEN, transport=transport)
+    raw = FakeHttp()
+    client._transfer_http = raw
+    result = asyncio.run(client.upload_attachment(
+        filename="photo.png",
+        content_type="image/png",
+        data=b"PNG",
+    ))
+    assert result == attachment_id
+    assert transport.calls[0]["path"] == "/v1/attachments"
+    assert transport.calls[0]["body"] == {
+        "filename": "photo.png",
+        "content_type": "image/png",
+        "size_bytes": 3,
+    }
+    assert raw.calls == [{
+        "url": "https://upload.example/one-use",
+        "content": b"PNG",
+        "headers": {"content-type": "image/png"},
+        "timeout": 120.0,
+    }]
+
+
+def test_websocket_settings_and_ticket_routes():
+    transport = FakeTransport([
+        RelayResponse(200, {"enabled": False, "acked_through": "0"}),
+        RelayResponse(200, {"enabled": True, "acked_through": "0"}),
+        RelayResponse(200, {
+            "url": "wss://events.example/ticket",
+            "expires_at": "2026-08-29T00:01:00Z",
+            "subprotocol": "relay.v1.json",
+        }),
+    ])
+    client = RelayClient(TOKEN, transport=transport)
+    asyncio.run(client.get_websocket_settings())
+    asyncio.run(client.update_websocket(True))
+    asyncio.run(client.create_websocket_connection())
+    assert [call["path"] for call in transport.calls] == [
+        "/v1/websocket",
+        "/v1/websocket",
+        "/v1/websocket-connections",
+    ]
+    assert transport.calls[1]["body"] == {"enabled": True}
+    assert transport.calls[2]["body"] == {}
+
+
+class OrderedInbox:
+    def __init__(self, order: List[str]) -> None:
+        self.order = order
+        self.events: List[Dict[str, Any]] = []
+
+    def accept(self, sequence: str, payload: Dict[str, Any]) -> bool:
+        self.order.append(f"commit:{sequence}")
+        self.events.append(payload)
+        return True
+
+
+class FakeSocket:
+    def __init__(self, frames: List[Dict[str, Any]], order: List[str]) -> None:
+        self.frames = [json.dumps(frame) for frame in frames]
+        self.sent: List[Dict[str, Any]] = []
+        self.order = order
+
+    def __aiter__(self):
+        async def iterator():
+            for frame in self.frames:
+                yield frame
+        return iterator()
+
+    async def send(self, raw: str) -> None:
+        frame = json.loads(raw)
+        self.order.append(f"ack:{frame['through_sequence']}")
+        self.sent.append(frame)
+
+
+def test_websocket_commits_before_cumulative_ack():
+    order: List[str] = []
+    socket = FakeSocket([
+        {
+            "type": "ready",
+            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+            "acked_through": "40",
+            "heartbeat_interval_ms": 30_000,
+            "max_in_flight": 64,
+        },
+        {"type": "event", "sequence": "41", "event": event()},
+    ], order)
+    inbox = OrderedInbox(order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=inbox))
+    assert order == ["commit:41", "ack:41"]
+    assert socket.sent == [{"type": "ack", "through_sequence": "41"}]
+
+
+def test_websocket_refuses_to_ack_over_a_sequence_gap():
+    order: List[str] = []
+    socket = FakeSocket([
+        {
+            "type": "ready",
+            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+            "acked_through": "40",
+            "heartbeat_interval_ms": 30_000,
+            "max_in_flight": 64,
+        },
+        {"type": "event", "sequence": "42", "event": event()},
+    ], order)
+    with pytest.raises(RuntimeError, match="not contiguous"):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == []
+
+
+@pytest.mark.parametrize("value", ["00", "01", "-1", "1.0"])
+def test_websocket_rejects_noncanonical_decimal_sequences(value):
+    order: List[str] = []
+    socket = FakeSocket([
+        {
+            "type": "ready",
+            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+            "acked_through": "0",
+            "heartbeat_interval_ms": 30_000,
+            "max_in_flight": 64,
+        },
+        {"type": "event", "sequence": value, "event": event()},
+    ], order)
+    with pytest.raises(RuntimeError, match="invalid sequence"):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == []
+
+
+def test_websocket_honors_error_and_disconnect_frames():
+    ready = {
+        "type": "ready",
+        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+        "acked_through": "0",
+        "heartbeat_interval_ms": 30_000,
+        "max_in_flight": 64,
+    }
+    retryable = FakeSocket([
+        ready,
+        {
+            "type": "error",
+            "code": "delivery_failed",
+            "message": "try again",
+            "fatal": True,
+            "retryable": True,
+        },
+    ], [])
+    with pytest.raises(RelayWebSocketError) as raised:
+        asyncio.run(consume_websocket(retryable, inbox=OrderedInbox([])))
+    assert raised.value.code == "delivery_failed"
+    assert raised.value.terminal is False
+
+    for reason in (
+        "disabled",
+        "replaced",
+        "revoked",
+        "heartbeat_timeout",
+        "restart",
+    ):
+        disconnected = FakeSocket([
+            ready,
+            {"type": "disconnect", "reason": reason},
+        ], [])
+        with pytest.raises(RelayWebSocketDisconnect) as raised:
+            asyncio.run(consume_websocket(disconnected, inbox=OrderedInbox([])))
+        assert raised.value.reason == reason
+        assert raised.value.terminal is (
+            reason not in ("heartbeat_timeout", "restart")
         )
-    )
-    assert body["message_id"] == "msg_1"
-    call = transport.calls[0]
-    assert call["headers"]["idempotency-key"] == "reply-evt_7-0"
-    assert call["body"]["invocation_id"] == "inv_3"
-    assert call["path"] == "/v1/messages"
+
+    unknown_error = FakeSocket([
+        ready,
+        {
+            "type": "error",
+            "code": "unknown",
+            "message": "not in Relay v1",
+            "fatal": True,
+            "retryable": False,
+        },
+    ], [])
+    with pytest.raises(RelayWebSocketProtocolError, match="invalid error"):
+        asyncio.run(consume_websocket(
+            unknown_error,
+            inbox=OrderedInbox([]),
+        ))
 
 
-# ---------------------------------------------------------------------------
-# Cursor advance and failure
-# ---------------------------------------------------------------------------
+def test_websocket_requires_ready_exact_keys_and_complete_envelopes():
+    with pytest.raises(RuntimeError, match="invalid frame"):
+        asyncio.run(consume_websocket(
+            FakeSocket([
+                {"type": "event", "sequence": "1", "event": event()},
+            ], []),
+            inbox=OrderedInbox([]),
+        ))
+
+    invalid_ready = {
+        "type": "ready",
+        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+        "acked_through": "0",
+        "heartbeat_interval_ms": True,
+        "max_in_flight": 64,
+    }
+    with pytest.raises(RuntimeError, match="invalid ready"):
+        asyncio.run(consume_websocket(
+            FakeSocket([invalid_ready], []),
+            inbox=OrderedInbox([]),
+        ))
+
+    extra = event()
+    frames = [
+        {
+            "type": "ready",
+            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+            "acked_through": "0",
+            "heartbeat_interval_ms": 30_000,
+            "max_in_flight": 64,
+        },
+        {"type": "event", "sequence": "1", "event": extra, "unexpected": True},
+    ]
+    with pytest.raises(RuntimeError, match="invalid frame"):
+        asyncio.run(consume_websocket(
+            FakeSocket(frames, []),
+            inbox=OrderedInbox([]),
+        ))
 
 
-def test_cursor_advances_after_a_clean_page():
-    harness = Harness()
-    transport = FakeTransport([events_page([user_event("evt_1")], 12)])
-    asyncio.run(harness.run(transport))
-    assert harness.handled == ["evt_1"]
-    assert harness.cursor == 12
+class FakeConnectionContext:
+    def __init__(self, socket):
+        self.socket = socket
+
+    async def __aenter__(self):
+        return self.socket
+
+    async def __aexit__(self, *_exc):
+        return None
 
 
-def test_cursor_does_not_advance_when_the_handler_fails():
-    """A failed handler must replay, so the cursor stays where it was."""
-    harness = Harness()
-    harness.fail_on = "evt_2"
-    transport = FakeTransport([events_page([user_event("evt_1"), user_event("evt_2")], 30)])
-    with pytest.raises(RuntimeError):
-        asyncio.run(harness.run(transport))
-    assert harness.handled == ["evt_1"]
-    assert harness.cursor == 0
-    # The failed event was never recorded, so redelivery is not mistaken for
-    # a duplicate.
-    assert not harness.dedupe.has("evt_2")
-    assert harness.dedupe.has("evt_1")
+def test_websocket_loop_reconnects_heartbeat_with_fresh_ticket_then_stops_disabled():
+    ready = {
+        "type": "ready",
+        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+        "acked_through": "0",
+        "heartbeat_interval_ms": 30_000,
+        "max_in_flight": 64,
+    }
+    sockets = [
+        FakeSocket([
+            ready,
+            {"type": "disconnect", "reason": "heartbeat_timeout"},
+        ], []),
+        FakeSocket([
+            ready,
+            {"type": "disconnect", "reason": "restart"},
+        ], []),
+        FakeSocket([
+            ready,
+            {"type": "disconnect", "reason": "disabled"},
+        ], []),
+    ]
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def create_websocket_connection(self):
+            self.calls += 1
+            return {
+                "url": f"wss://relay.test/v1/websocket?ticket={self.calls}",
+                "expires_at": "2026-08-29T00:01:00Z",
+                "subprotocol": "relay.v1.json",
+            }
+
+    client = Client()
+    connections = []
+    sleeps = []
+
+    def connect(url, *, subprotocols):
+        connections.append((url, subprotocols))
+        return FakeConnectionContext(sockets[len(connections) - 1])
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    with pytest.raises(RelayWebSocketDisconnect) as raised:
+        asyncio.run(run_websocket_loop(
+            client=client,
+            inbox=OrderedInbox([]),
+            connect_factory=connect,
+            sleep=sleep,
+            random_fn=lambda: 1.0,
+        ))
+
+    assert raised.value.reason == "disabled"
+    assert client.calls == 3
+    assert [entry[1] for entry in connections] == [
+        ["relay.v1.json"],
+        ["relay.v1.json"],
+        ["relay.v1.json"],
+    ]
+    assert sleeps == [0.5, 0.5]
 
 
-def test_duplicate_event_is_handled_once():
-    harness = Harness()
-    transport = FakeTransport([
-        events_page([user_event("evt_1")], 5),
-        events_page([user_event("evt_1")], 6),
-    ])
-    asyncio.run(harness.run(transport, polls=2))
-    assert harness.handled == ["evt_1"]
-    assert harness.cursor == 6
+def test_websocket_loop_stops_on_protocol_violation_without_ticket_churn():
+    socket = FakeSocket([
+        {"type": "event", "sequence": "1", "event": event()},
+    ], [])
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def create_websocket_connection(self):
+            self.calls += 1
+            return {
+                "url": "wss://relay.test/v1/websocket?ticket=one",
+                "expires_at": "2026-08-29T00:01:00Z",
+                "subprotocol": "relay.v1.json",
+            }
+
+    client = Client()
+    with pytest.raises(RelayWebSocketProtocolError):
+        asyncio.run(run_websocket_loop(
+            client=client,
+            inbox=OrderedInbox([]),
+            connect_factory=lambda *_args, **_kwargs: FakeConnectionContext(socket),
+            sleep=lambda _delay: None,
+        ))
+    assert client.calls == 1
 
 
-def test_malformed_next_cursor_holds_position():
-    harness = Harness()
-    harness.cursor = 40
-    transport = FakeTransport([RelayResponse(status=200, body={"events": [], "next_cursor": None})])
-    asyncio.run(harness.run(transport))
-    assert harness.cursor == 40
+def test_websocket_replay_is_deduplicated_but_acknowledged_again(tmp_path):
+    frames = [
+        {
+            "type": "ready",
+            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+            "acked_through": "0",
+            "heartbeat_interval_ms": 30_000,
+            "max_in_flight": 64,
+        },
+        {"type": "event", "sequence": "1", "event": event()},
+    ]
+    inbox = RelayInbox(tmp_path / "inbox.sqlite3").open()
+    first = FakeSocket(frames, [])
+    replay = FakeSocket(frames, [])
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(first, inbox=inbox))
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(replay, inbox=inbox))
+    assert inbox.event_count() == 1
+    assert first.sent == [{"type": "ack", "through_sequence": "1"}]
+    assert replay.sent == [{"type": "ack", "through_sequence": "1"}]
+    inbox.close()
 
 
-def test_agent_own_messages_are_skipped():
-    harness = Harness()
-    event = user_event("evt_1")
-    event["data"]["message"]["sender"] = {"kind": "agent", "id": "agt_1"}
-    asyncio.run(harness.run(FakeTransport([events_page([event], 3)])))
-    assert harness.handled == []
-    assert harness.cursor == 3
-
-
-# ---------------------------------------------------------------------------
-# Owner allowlist
-# ---------------------------------------------------------------------------
-
-
-def test_owner_allowlist_drops_other_senders():
-    harness = Harness(allow_sender=lambda sender_id: sender_id == "usr_owner")
-    transport = FakeTransport([
-        events_page(
-            [user_event("evt_ok", "usr_owner"), user_event("evt_no", "usr_stranger")], 9,
-        )
-    ])
-    asyncio.run(harness.run(transport))
-    assert harness.handled == ["evt_ok"]
-    # A drop is a decided outcome, so it is recorded and not re-evaluated.
-    assert harness.dedupe.has("evt_no")
-    assert harness.cursor == 9
-
-
-def test_allowlist_absent_lets_everyone_through():
-    harness = Harness()
-    transport = FakeTransport([events_page([user_event("evt_1", "usr_stranger")], 4)])
-    asyncio.run(harness.run(transport))
-    assert harness.handled == ["evt_1"]
-
-
-# ---------------------------------------------------------------------------
-# Backoff schedule
-# ---------------------------------------------------------------------------
-
-
-def test_backoff_schedule_matches_the_sdk_ladder():
-    """500ms doubling, exponent capped at 6, clamped to 30s. Jitter off."""
-    ladder = [transient_delay_seconds(n, lambda: 0.0) for n in range(1, 9)]
-    assert ladder == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]
-
-
-def test_backoff_adds_bounded_jitter():
-    assert transient_delay_seconds(1, lambda: 0.999) == pytest.approx(1.249, abs=0.002)
-
-
-def test_transient_error_backs_off_and_retries():
-    harness = Harness()
-    transport = FakeTransport([
-        RelayResponse(status=503, body={"error": {"message": "upstream down"}}),
-        events_page([user_event("evt_1")], 7),
-    ])
-    asyncio.run(harness.run(transport, polls=2))
-    assert harness.slept == [1.0]
-    assert harness.handled == ["evt_1"]
-    assert harness.cursor == 7
-
-
-def test_backoff_resets_after_a_good_poll():
-    harness = Harness()
-    transport = FakeTransport([
-        RelayResponse(status=500, body={}),
-        events_page([], 1),
-        RelayResponse(status=500, body={}),
-        events_page([], 2),
-    ])
-    asyncio.run(harness.run(transport, polls=4))
-    assert harness.slept == [1.0, 1.0]
-
-
-# ---------------------------------------------------------------------------
-# Terminal failures
-# ---------------------------------------------------------------------------
-
-
-def test_terminated_by_other_consumer_stops_the_loop():
-    harness = Harness()
-    transport = FakeTransport([
-        RelayResponse(
-            status=409,
-            body={"error": {
-                "code": "terminated_by_other_consumer",
-                "message": "a newer consumer took the token",
-            }},
-        ),
-        events_page([user_event("evt_never")], 99),
-    ])
-    with pytest.raises(RelayApiError) as excinfo:
-        asyncio.run(harness.run(transport, polls=2))
-    error = excinfo.value
-    assert is_consumer_takeover(error)
-    assert error.status == 409
-    # It stops rather than retrying: no sleep, no second poll, no events.
-    assert harness.slept == []
-    assert harness.handled == []
-    assert harness.cursor == 0
-    assert any("another consumer took this Agent Token" in line for line in harness.logs)
-
-
-def test_unauthorized_stops_the_loop():
-    harness = Harness()
-    transport = FakeTransport([RelayResponse(status=401, body={"error": {"message": "bad token"}})])
-    with pytest.raises(RelayApiError) as excinfo:
-        asyncio.run(harness.run(transport, polls=2))
-    assert excinfo.value.kind == "auth"
-    assert harness.slept == []
-
-
-def test_expired_cursor_reports_what_to_do():
-    harness = Harness()
-    transport = FakeTransport([RelayResponse(status=410, body={"error": {"message": "gone"}})])
-    with pytest.raises(RelayApiError):
-        asyncio.run(harness.run(transport, polls=2))
-    assert any("Do not reset the cursor to zero" in line for line in harness.logs)
-
-
-def test_cursor_ahead_of_ledger_names_the_resume_point():
-    harness = Harness()
-    transport = FakeTransport([
-        RelayResponse(
-            status=422,
-            body={"error": {"message": "ahead", "details": {"highest_delivered_cursor": 88}}},
-        )
-    ])
-    with pytest.raises(RelayApiError):
-        asyncio.run(harness.run(transport, polls=2))
-    assert any("resume from cursor 88" in line for line in harness.logs)
-
-
-def test_status_classification():
-    assert classify_status(401) == "auth"
-    assert classify_status(409) == "conflict"
-    assert classify_status(408) == "retryable"
-    assert classify_status(429) == "retryable"
-    assert classify_status(503) == "retryable"
-    assert classify_status(400) == "rejected"
-    assert classify_status(410) == "rejected"
-
-
-# ---------------------------------------------------------------------------
-# Base URL validation
-# ---------------------------------------------------------------------------
-
-
-def test_base_url_defaults_and_canonicalizes():
+def test_base_url_idempotency_and_errors():
     assert normalize_base_url(None) == "https://api.relayapp.im"
-    assert normalize_base_url("  https://api.relayapp.im/  ") == "https://api.relayapp.im"
-
-
-def test_base_url_allows_loopback_http_only():
-    assert normalize_base_url("http://localhost:8787") == "http://localhost:8787"
-    assert normalize_base_url("http://127.0.0.1:8787") == "http://127.0.0.1:8787"
+    assert normalize_base_url("http://localhost:8790") == "http://localhost:8790"
     with pytest.raises(ValueError):
         normalize_base_url("http://api.relayapp.im")
+    assert reply_idempotency_key(EVENT_ID, 2) == f"reply-{EVENT_ID}-2"
+    first = reply_idempotency_key(EVENT_ID, 0, {"message": {"value": "one"}})
+    assert first == reply_idempotency_key(
+        EVENT_ID, 0, {"message": {"value": "one"}}
+    )
+    assert first != reply_idempotency_key(
+        EVENT_ID, 0, {"message": {"value": "two"}}
+    )
+    assert classify_status(401) == "auth"
+    assert classify_status(429) == "retryable"
+    assert classify_status(400) == "rejected"
+    assert transient_delay_seconds(1, lambda: 1.0) == 0.5
+    assert transient_delay_seconds(2, lambda: 1.0) == 1.0
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "https://user:pw@api.relayapp.im",
-        "https://api.relayapp.im/v1",
-        "https://api.relayapp.im?x=1",
-        "not-a-url",
-    ],
-)
-def test_base_url_rejects_surprising_origins(bad):
-    with pytest.raises(ValueError):
-        normalize_base_url(bad)
-
-
-def test_client_requires_a_token():
-    with pytest.raises(ValueError):
-        RelayClient("   ")
-
-
-# ---------------------------------------------------------------------------
-# Poll request shape
-# ---------------------------------------------------------------------------
-
-
-def test_poll_clamps_the_long_poll_window():
-    transport = FakeTransport([events_page([], 1), events_page([], 2)])
-    client = RelayClient(TOKEN, transport=transport)
-    asyncio.run(client.poll_events(4, timeout_seconds=900))
-    asyncio.run(client.poll_events(4, timeout_seconds=0))
-    assert transport.calls[0]["query"]["timeout"] == 30
-    assert transport.calls[1]["query"]["timeout"] == 1
-    assert transport.calls[0]["query"]["cursor"] == 4
-
-
-def test_typing_threads_the_invocation_id():
-    transport = FakeTransport([RelayResponse(status=204, body=None)])
-    client = RelayClient(TOKEN, transport=transport)
-    asyncio.run(client.set_typing("cnv_1", True, label="Thinking", invocation_id="inv_2"))
-    call = transport.calls[0]
-    # The live name. Falling back to /v1/conversations/ takes a 404 first,
-    # which tests/test_cutover.py covers.
-    assert call["path"] == "/v1/chats/cnv_1/typing"
-    assert call["body"] == {"started": True, "label": "Thinking", "invocation_id": "inv_2"}
-
-
-# ---------------------------------------------------------------------------
-# Event parsing and dedupe window
-# ---------------------------------------------------------------------------
-
-
-def test_parse_inbound_reads_group_invocation():
-    inbound = parse_inbound(user_event("evt_1", invocation_id="inv_1"))
-    assert inbound is not None
-    # An invocation still proves a group. Its ABSENCE proves nothing now that
-    # the server mints none, which is why this is a hint and not a boolean.
-    assert inbound.group_hint is True
-    assert inbound.invocation_id == "inv_1"
-    assert inbound.conversation_id == "cnv_1"
-    assert inbound.sender_kind == "user"
-
-
-def test_parse_inbound_ignores_other_event_types():
-    assert parse_inbound({"event_type": "message.read", "data": {}}) is None
-    assert parse_inbound({"event_type": "message.received", "data": {}}) is None
-
-
-def test_render_text_joins_parts_in_order():
-    message = {
-        "parts": [
-            {"type": "text", "text": "one"},
-            {"type": "data", "data": {"k": 1}},
-            {"type": "text", "text": "two"},
-        ]
-    }
-    assert render_text(message) == 'one\n{"k": 1}\ntwo'
-
-
-def test_render_text_falls_back_to_server_rendering():
-    assert render_text({"parts": [{"type": "media"}], "fallback_text": "sent a photo"}) == "sent a photo"
-
-
-def test_split_paragraphs_one_bubble_per_thought():
-    text = "First thought.\n\nSecond thought,\nsame bubble.\n\n\nThird."
-    assert split_paragraphs(text) == [
-        "First thought.",
-        "Second thought,\nsame bubble.",
-        "Third.",
+def test_text_helpers_use_utf16_units_and_preserve_fences():
+    assert utf16_len("a😀") == 3
+    assert split_paragraphs("one\n\n```\na\n\nb\n```\n\ntwo") == [
+        "one",
+        "```\na\n\nb\n```",
+        "two",
     ]
-
-
-def test_split_paragraphs_keeps_a_code_block_whole():
-    text = "Look:\n\n```python\ndef f():\n\n    return 1\n```\n\nDone."
-    assert split_paragraphs(text) == [
-        "Look:",
-        "```python\ndef f():\n\n    return 1\n```",
-        "Done.",
-    ]
-
-
-def test_split_paragraphs_drops_whitespace_only_input():
-    assert split_paragraphs("") == []
-    assert split_paragraphs("  \n\n \n") == []
-
-
-def test_utf8_len_counts_bytes_not_code_points():
-    assert utf8_len("abc") == 3
-    assert utf8_len("héllo") == 6
-    assert utf8_len("\N{EIGHT SPOKED ASTERISK}") == 3
-
-
-def test_dedupe_window_is_bounded_and_ordered():
-    dedupe = MemoryDedupe(capacity=2)
-    dedupe.record("a")
-    dedupe.record("b")
-    dedupe.record("c")
-    assert dedupe.has("a") is False
-    assert dedupe.snapshot() == ["b", "c"]
-
-
-def test_dedupe_restore_round_trips():
-    dedupe = MemoryDedupe()
-    dedupe.restore(["x", "y"])
-    assert dedupe.has("x") and dedupe.has("y")
-
-
-def test_a_shutting_down_loop_returns_quietly():
-    """A failure that lands while the adapter is stopping is not an error.
-
-    ``disconnect()`` clears the running flag mid-poll, so the in-flight
-    request fails on a closed client. Raising there would turn every clean
-    shutdown into a logged crash.
-    """
-    harness = Harness()
-    transport = FakeTransport([RelayResponse(status=401, body={"error": {"message": "bad token"}})])
-    asyncio.run(harness.run(transport, polls=1))
-    assert harness.handled == []
-    assert harness.logs == []

@@ -8,21 +8,20 @@ version = "1.0.0"
 description = "Relay messenger platform adapter for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Companion, Inc." }]
 keywords = ["hermes", "hermes-agent", "relay", "relayapp", "messaging", "agent"]
 classifiers = [
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Communications :: Chat",
 ]
-# httpx is the only runtime requirement and Hermes already ships it
-# (hermes-agent pyproject: httpx[socks]==0.28.1), so installing this plugin
-# adds nothing to the host environment.
-dependencies = ["httpx>=0.27"]
+dependencies = [
+  "httpx>=0.27",
+  "websockets>=14",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyyaml>=6"]
@@ -39,7 +38,8 @@ Issues = "https://github.com/relaymessenger/hermes-relay-plugin/issues"
 relayapp-platform = "hermes_relay_plugin:register"
 
 [tool.setuptools]
-py-modules = ["adapter", "relay_api", "state"]
+packages = ["hermes_relay_plugin"]
+package-dir = { hermes_relay_plugin = "." }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

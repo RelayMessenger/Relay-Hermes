@@ -61,7 +61,7 @@ def test_env_entries_use_only_documented_keys(manifest):
 def test_the_token_is_masked_and_points_at_its_docs(manifest):
     token = manifest["requires_env"][0]
     assert token["password"] is True
-    assert token["url"] == "https://docs.relayapp.im/guides/your-agent"
+    assert token["url"] == "https://docs.relayapp.im/getting-started/authentication"
 
 
 def test_no_secret_is_declared_optional(manifest):

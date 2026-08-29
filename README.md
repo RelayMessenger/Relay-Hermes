@@ -1,247 +1,96 @@
 # hermes-relay-plugin
 
-A **[Relay](https://relayapp.im)** platform adapter for
+A Relay platform adapter for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Relay is a messenger where people text AI agents like contacts. This plugin
-makes a Relay agent conversation a Hermes channel: your Hermes gets a profile,
-a handle, and a thread in someone's message list, and it answers there.
+Hermes is an always-on gateway, so this plugin uses Relay's optional WebSocket
+transport.
 
-Pure Python. No Node sidecar, no webhook server, no public URL, no signing
-secret. Inbound messages arrive by long-polling Relay's durable event log, so
-a Hermes running on a laptop behind NAT works exactly like one on a server.
+## Reliability
 
-## How it compares to the other Hermes messaging channels
+For every WebSocket event, the plugin:
 
-| | Telegram | Photon (iMessage) | **Relay (this plugin)** |
-|---|---|---|---|
-| Inbound transport | long poll (`getUpdates`) | gRPC stream via a Node sidecar | **long poll (`GET /v1/events`)** |
-| Needs a public URL | no | no | **no** |
-| Extra runtime deps | `python-telegram-bot` | Node 18+ and `spectrum-ts` | **none beyond Hermes** |
-| Agent has its own identity | a bot account | your phone number | **an agent profile people add** |
-| Group turns | mention-gated | mention-gated | **mention-gated** |
+1. commits the complete envelope and `event_id` to a FULL-sync SQLite inbox;
+2. sends a cumulative ACK only after that commit;
+3. processes the inbox after acceptance;
+4. deduplicates replayed `event_id` values;
+5. replies through `POST /v1/chats/{chatId}/messages`;
+6. derives a stable `Idempotency-Key` from the triggering event.
 
-The only runtime requirement is `httpx`, which Hermes already ships
-(`httpx[socks]==0.28.1` in its own `pyproject.toml`), so installing this
-plugin adds nothing to your environment.
+The inbox survives a gateway restart. A processing failure returns the row to
+`pending`; it does not move Relay's ACK backward or lose the event.
 
-## Installation
+## Setup
 
-Clone this repository into your Hermes plugins directory and enable it:
-
-```bash
+```sh
 git clone https://github.com/relaymessenger/hermes-relay-plugin \
   ~/.hermes/plugins/relay
 hermes plugins enable relayapp-platform
 ```
 
-Then put your Agent Token in `~/.hermes/.env`:
+Set the Agent Token:
 
-```bash
-RELAY_AGENT_TOKEN=rly_live_...
+```sh
+RELAY_AGENT_TOKEN=your_agent_token
 ```
 
-Or set it through the config UI, where the plugin's env vars appear with
-their own prompts and help text:
+Then start Hermes:
 
-```bash
-hermes config
-```
-
-## Getting an Agent Token
-
-1. Open Relay and create an agent (**Create your own**).
-2. Copy the Agent Token. Relay shows it **once**, at creation.
-3. Paste it into `~/.hermes/.env` as `RELAY_AGENT_TOKEN`.
-
-Full walkthrough: <https://docs.relayapp.im/guides/your-agent>.
-
-Start the gateway and the agent is live:
-
-```bash
+```sh
 hermes gateway start
 ```
+
+On its first connection, the plugin enables:
+
+```http
+PUT /v1/websocket
+{"enabled":true}
+```
+
+It requests one-use tickets from `POST /v1/websocket-connections` and connects
+with the `relay.v1.json` subprotocol.
+
+Relay reconnects after `heartbeat_timeout`, `restart`, close codes `1011`,
+`1012`, or `4408`, and retryable `ack_failed`/`delivery_failed` errors. It
+stops on `disabled`, `replaced`, or `revoked` so two consumers do not fight for
+one Agent Contact and an operator action is not silently undone. Relay refuses
+to disable WebSocket delivery while any event remains unacknowledged.
 
 ## Configuration
 
 | Variable | Required | Default | Meaning |
-|---|---|---|---|
-| `RELAY_AGENT_TOKEN` | yes | | Agent Token (`rly_live_...`), shown once at creation |
-| `RELAY_BASE_URL` | no | `https://api.relayapp.im` | API origin. HTTPS, unless it is loopback |
-| `RELAY_ALLOWED_USERS` | no | | Comma-separated Relay user ids allowed in, besides the owner |
-| `RELAY_ALLOW_ALL_USERS` | no | `false` | Let anyone who can reach the agent talk to it |
-| `RELAY_STATE_DIR` | no | `~/.hermes/relay` | Where the poll cursor and dedupe window live |
+| --- | --- | --- | --- |
+| `RELAY_AGENT_TOKEN` | yes | | Agent Token |
+| `RELAY_BASE_URL` | no | `https://api.relayapp.im` | Relay API origin |
+| `RELAY_ALLOWED_USERS` | no | | Comma-separated Contact ids; unset accepts all |
+| `RELAY_STATE_DIR` | no | `~/.hermes/relay` | SQLite inbox directory |
 | `RELAY_REPLY_TO_MODE` | no | `auto` | `off`, `first`, `all`, or `auto` |
-| `RELAY_GROUP_REPLY_POLICY` | no | `mentions` | `mentions` answers a group only when named; `all` answers every group message |
-| `RELAY_HOME_CHANNEL` | no | | Conversation id for cron and notification delivery |
-| `RELAY_HOME_CHANNEL_NAME` | no | | Human label for that conversation |
+| `RELAY_GROUP_REPLY_POLICY` | no | `mentions` | `mentions` or `all` |
+| `RELAY_HOME_CHANNEL` | no | | Chat id for cron delivery |
+| `RELAY_HOME_CHANNEL_NAME` | no | | Human label for that Chat |
 
-Everything is also settable in `config.yaml`, where env wins over YAML:
+## Current Relay contract
 
-```yaml
-gateway:
-  platforms:
-    relayapp:
-      enabled: true
-      extra:
-        token: "rly_live_..."
-        base_url: "https://api.relayapp.im"
-```
+- inbound Message data is the webhook `data` object;
+- Chat id is `data.chat.id`;
+- sender is `data.sender_handle`;
+- text is `part.value`;
+- mentions use `part.mention`;
+- Read is `POST /v1/chats/{chatId}/read` with no body;
+- replies use `POST /v1/chats/{chatId}/messages`;
+- voice memos use `POST /v1/chats/{chatId}/voicememo`;
+- attachments are allocated with JSON, then uploaded by raw `PUT`.
 
-The platform id is `relayapp`, not `relay`. Hermes already ships a built-in
-`Platform.RELAY` for its own connector, so this plugin takes the next
-available name.
-
-## Security model
-
-**Only the agent's owner is answered, by default.** At connect the adapter
-reads `owner_user_id` from `GET /v1/agents/me` and drops every other sender
-before the text ever reaches the model. A Hermes with shell and file tools is
-not a public endpoint, so opening it up has to be a decision somebody made on
-purpose:
-
-```bash
-RELAY_ALLOWED_USERS=usr_abc123,usr_def456   # a named few
-RELAY_ALLOW_ALL_USERS=true                  # anyone who can reach the agent
-```
-
-Relay authenticates senders on the server, so `sender.id` is a real identity
-and is safe to authorize on. Nothing user-controlled feeds the check.
-
-Two more properties worth knowing:
-
-* **No inbound secret exists.** Long polling means there is no webhook
-  endpoint to expose and no signing secret to leak or rotate. The Agent Token
-  is the only credential, it travels outbound only, and it never appears in a
-  log line.
-* **Attachment URLs are capability URLs.** They are handed to the fetch and
-  never logged or reported, because possession of one is possession of the
-  file.
-
-## What it does
-
-**Receives.** Text, and images that land in the Hermes image cache as local
-paths so the vision tools can read them. Other attachments and voice memos
-arrive as an explicit note rather than vanishing.
-
-**Replies.** Plain text, split on blank lines so each thought is its own
-bubble, with Relay's 8 KB per-part limit as the backstop. The whole reply
-goes out as ONE `POST /v1/messages` carrying one text part per bubble; the
-server commits one message per part. Markdown a model emits is stripped,
-because in a message bubble it reads as literal asterisks, though code fences
-survive intact and never split mid-block.
-
-**Stays quiet when there is nothing to say.** A model that must emit something
-emits filler. Reply with exactly `[no reply]` and the adapter sends nothing.
-This is DM-only: a group turn only gets this far because the agent was named,
-and being named and then saying nothing reads as broken.
-
-**Groups: it answers only when it is mentioned.** Relay used to decide this.
-A group agent was delivered only the messages it had been *invoked* on. It no
-longer works that way, so the adapter receives every message in the group and
-makes the call itself, before the model runs. The rule is Relay's own: a
-mention is the structured field a client attaches, matched against your
-agent's handle, and the letters in the text carry no authority, so someone
-writing `@youragent is great` is talking *about* your agent and it stays out
-of it. Set `RELAY_GROUP_REPLY_POLICY=all` to answer every group message
-instead, for an agent whose job really is to read the whole room: a
-transcriber or a moderator. Anything unrecognised reads as `mentions`, so a
-typo cannot be what opens the floodgate.
-
-**Sends media.** Images, documents, video, and native voice memos with an
-inline player, uploaded through `POST /v1/attachments`. A multi-image reply
-ships as contiguous media parts in one POST, which Relay renders as a
-stacked photo set; a caption follows its media as its own bubble.
-
-**Typing indicators**, on the user's devices while the model works.
-
-**Cron and `hermes send`.** Set `RELAY_HOME_CHANNEL` and `deliver=relayapp`
-routes there, including from a process that is not the gateway.
-
-## Delivery guarantees
-
-Relay's event log is at-least-once, and the adapter is built around that:
-
-* The poll **cursor advances only after every event on a page was handled**.
-  A handler that fails replays the page instead of skipping past it.
-* Events are **deduplicated by `event_id`**, and an id is recorded only after
-  its handler succeeded, so a redelivery after a crash is not mistaken for a
-  duplicate.
-* Cursor and dedupe window are written **together, atomically** (temp file
-  plus `os.replace`) under `~/.hermes/relay/`. A restart never reads a
-  half-written file.
-* Replies carry a **derived `Idempotency-Key`** (`reply-<event_id>-<n>`), so a
-  send retried after a timeout commits one message, not two.
-* Transient failures back off **500 ms doubling to a 30 s ceiling**, with
-  jitter. Terminal failures stop with an explanation instead of hammering.
-
-## Troubleshooting
-
-**"Relay rejected the Agent Token (401)"**. The token is wrong, or it was
-rotated. Tokens are shown once at creation; issue a new one in Relay and
-update `RELAY_AGENT_TOKEN`.
-
-**"Another consumer took this Agent Token"**. Relay allows one long-poll
-consumer per token, and a newer one wins. Something else is running with the
-same token, usually a second Hermes or a stray process. Restarting will not
-win the slot back. Stop the other consumer, or give this Hermes its own agent
-and its own token.
-
-**The agent connects but never answers**. The sender is not the owner, and
-no allowlist is set. The log says which. Add `RELAY_ALLOWED_USERS` or
-`RELAY_ALLOW_ALL_USERS=true`.
-
-**"cursor expired (410)"**. The cursor fell behind Relay's seven-day event
-retention, which means the agent was offline longer than that. Recover the
-missed conversation through the history API. Do not reset the cursor to zero:
-that replays everything still retained.
-
-**"long poll conflict (409)"**. A webhook endpoint is registered for this
-agent. Webhooks and long polling are mutually exclusive per Agent Token.
-Remove the webhook to poll.
-
-**Group messages get no reply**. The agent was not mentioned. In a group it
-answers only when it is named, and a handle typed into the text without a real
-mention attached does not count. That is Relay's rule, not this plugin's. Set
-`RELAY_GROUP_REPLY_POLICY=all` if the agent is meant to answer everything. The
-log says `not mentioned in group` at debug level for each message it stayed
-out of.
+Hermes' typing callbacks are no-ops because Relay v1 has no typing endpoint.
 
 ## Development
 
-```bash
-python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest
-```
-
-The transport (`relay_api.py`) and the durable state (`state.py`) carry the
-delivery semantics and import nothing from Hermes, so the whole receive path
-is tested with a fake HTTP layer and no network. `adapter.py` needs a Hermes
-source tree to import; `tests/test_adapter_send.py` drives it against a fake
-client and looks for that tree at `~/.hermes/hermes-agent`, or wherever
-`HERMES_AGENT_SRC` points:
-
-```bash
+```sh
+python -m venv .venv
+.venv/bin/pip install -e '.[dev]'
 HERMES_AGENT_SRC=/path/to/hermes-agent .venv/bin/python -m pytest
 ```
 
-Without a Hermes tree those tests skip silently, so a green run alone does
-not prove the adapter; point `HERMES_AGENT_SRC` at a checkout of hermes-agent
-main (the batch-coalescing tests need `MessageEvent.user_id`, which hermes
-gained in 2026-08).
-
-## Provenance
-
-`relay_api.py` is a port of Relay's canonical TypeScript SDK
-(`@relaymessenger/sdk`): `client.ts`, `poll-loop.ts`, `idempotency.ts`,
-`errors.ts`, `url.ts`, and `memory-dedupe.ts`. The semantics are carried over
-deliberately rather than reinvented, so this plugin and Relay's other
-integrations fail and recover the same way.
-
-Built and verified against hermes-agent
-[`e02d1e41fc6104187e20af9eac8b2820566e3508`](https://github.com/NousResearch/hermes-agent/commit/e02d1e41fc6104187e20af9eac8b2820566e3508)
-(2026-08-18).
-
-## License
-
-MIT. Copyright Companion, Inc. See [LICENSE](LICENSE).
+The tests cover exact REST paths and bodies, current event parsing, WebSocket
+commit-before-ACK ordering, replay deduplication, durable recovery, and the
+real Hermes adapter and plugin registration surfaces.
