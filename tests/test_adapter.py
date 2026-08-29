@@ -224,6 +224,86 @@ def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path
     adapter._inbox.close()
 
 
+def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
+    plugin,
+    tmp_path,
+):
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox.open()
+    direct_chat = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+    group_chat = "01993d50-ef7b-7b37-886b-23fd80c7ec20"
+    old_inbound = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
+    new_inbound = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
+    snapshot = [
+        {
+            "chat": {"id": direct_chat, "is_group": False},
+            "messages": [
+                {
+                    "id": new_inbound,
+                    "chat_id": direct_chat,
+                    "is_from_me": False,
+                    "is_system_message": False,
+                    "created_at": "2026-08-29T02:00:00Z",
+                },
+                {
+                    "id": old_inbound,
+                    "chat_id": direct_chat,
+                    "is_from_me": False,
+                    "is_system_message": False,
+                    "created_at": "2026-08-29T01:00:00Z",
+                },
+            ],
+        },
+        {
+            "chat": {"id": group_chat, "is_group": True},
+            "messages": [],
+        },
+    ]
+
+    class FullSyncClient:
+        async def fetch_full_snapshot(self):
+            return snapshot
+
+    adapter._client = FullSyncClient()
+    asyncio.run(adapter._on_full_sync(
+        "42",
+        "checkpoint_outside_retention",
+    ))
+
+    assert adapter._direct_convs == {direct_chat}
+    assert adapter._group_convs == {group_chat}
+    assert adapter._last_inbound == {direct_chat: new_inbound}
+    assert adapter._inbox.full_sync_state()["through_sequence"] == "42"
+    assert adapter._inbox.load_full_snapshot()[0]["chat"]["id"] == direct_chat
+    adapter._inbox.close()
+
+
+def test_full_sync_fails_closed_before_checkpoint_on_unreconcilable_chat(
+    plugin,
+    tmp_path,
+):
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox.open()
+
+    class InvalidFullSyncClient:
+        async def fetch_full_snapshot(self):
+            return [{
+                "chat": {
+                    "id": "01993d50-ef7b-7b37-886b-23fd80c7ec10",
+                },
+                "messages": [],
+            }]
+
+    adapter._client = InvalidFullSyncClient()
+    with pytest.raises(plugin.RelayFullSyncError, match="cannot safely"):
+        asyncio.run(adapter._on_full_sync(
+            "42",
+            "checkpoint_outside_retention",
+        ))
+    assert adapter._inbox.full_sync_state() is None
+    adapter._inbox.close()
+
+
 def test_bubble_chunking_uses_utf16_and_preserves_code_fences(plugin):
     assert plugin._bubble_chunks("one\n\n```\na\n\nb\n```\n\ntwo") == [
         "one",

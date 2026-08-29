@@ -68,6 +68,7 @@ from .relay_api import (
     InboundMessage,
     RelayApiError,
     RelayClient,
+    RelayFullSyncError,
     RelayWebSocketDisconnect,
     RelayWebSocketError,
     mentions_agent,
@@ -307,6 +308,7 @@ class RelayAdapter(BasePlatformAdapter):
             # The durable sink must be available before this adapter switches
             # the Agent Contact from webhooks to WebSocket delivery.
             self._inbox.open()
+            self._apply_full_snapshot(self._inbox.load_full_snapshot())
             self._client = RelayClient(self._token, self._base_url)
             self._client.open()
             settings = await self._client.get_websocket_settings()
@@ -381,6 +383,7 @@ class RelayAdapter(BasePlatformAdapter):
                 client=self._client,
                 inbox=self._inbox,
                 on_accepted=self._inbox_wake.set,
+                on_full_sync=self._on_full_sync,
                 should_continue=lambda: self._running,
                 log=lambda line: logger.warning("[%s] %s", self.name, line),
             )
@@ -398,7 +401,14 @@ class RelayAdapter(BasePlatformAdapter):
                     "relay_websocket_terminal",
                     f"Relay WebSocket stopped: {error}",
                     retryable=False,
-                )
+            )
+            self._running = False
+        except RelayFullSyncError as error:
+            self._set_fatal_error(
+                "relay_full_sync_failed",
+                f"Relay FULL sync stopped safely: {error}",
+                retryable=False,
+            )
             self._running = False
         except RelayWebSocketDisconnect as error:
             self._set_fatal_error(
@@ -422,6 +432,104 @@ class RelayAdapter(BasePlatformAdapter):
             )
         finally:
             self._inbox_wake.set()
+
+    async def _on_full_sync(
+        self,
+        through_sequence: str,
+        reason: str,
+    ) -> None:
+        """Replace durable Relay state before confirming a required FULL sync."""
+
+        if reason != "checkpoint_outside_retention":
+            raise RelayFullSyncError(
+                f"unsupported Relay FULL sync reason {reason!r}"
+            )
+        client = self._client
+        if client is None:
+            raise RelayFullSyncError(
+                "Relay client is unavailable during FULL sync."
+            )
+        snapshot = await client.fetch_full_snapshot()
+        try:
+            groups, directs, latest_inbound = self._snapshot_indexes(snapshot)
+            self._inbox.replace_full_snapshot(
+                through_sequence,
+                snapshot,
+            )
+            self._group_convs = groups
+            self._direct_convs = directs
+            self._last_inbound = latest_inbound
+        except RelayFullSyncError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise RelayFullSyncError(
+                f"the REST snapshot could not be reconciled: {exc}"
+            ) from exc
+
+    def _apply_full_snapshot(
+        self,
+        snapshot: List[Dict[str, Any]],
+    ) -> None:
+        """Rebuild the adapter's Chat and latest-inbound indexes."""
+
+        groups, directs, latest_inbound = self._snapshot_indexes(snapshot)
+        self._group_convs = groups
+        self._direct_convs = directs
+        self._last_inbound = latest_inbound
+
+    @staticmethod
+    def _snapshot_indexes(
+        snapshot: List[Dict[str, Any]],
+    ) -> Tuple[set[str], set[str], Dict[str, str]]:
+        """Validate a complete snapshot before changing live adapter state."""
+
+        groups: set[str] = set()
+        directs: set[str] = set()
+        latest_inbound: Dict[str, str] = {}
+        for entry in snapshot:
+            chat = entry.get("chat") if isinstance(entry, dict) else None
+            messages = entry.get("messages") if isinstance(entry, dict) else None
+            chat_id = chat.get("id") if isinstance(chat, dict) else None
+            is_group = chat.get("is_group") if isinstance(chat, dict) else None
+            if (
+                not isinstance(chat_id, str)
+                or not chat_id
+                or not isinstance(is_group, bool)
+                or not isinstance(messages, list)
+            ):
+                raise RelayFullSyncError(
+                    "Relay REST snapshot contains a Chat the Hermes adapter "
+                    "cannot safely reconcile."
+                )
+            (groups if is_group else directs).add(chat_id)
+            inbound: List[Tuple[str, str]] = []
+            for message in messages:
+                message_id = (
+                    message.get("id") if isinstance(message, dict) else None
+                )
+                if (
+                    not isinstance(message, dict)
+                    or not isinstance(message_id, str)
+                    or message.get("chat_id") != chat_id
+                    or not isinstance(message.get("is_from_me"), bool)
+                ):
+                    raise RelayFullSyncError(
+                        "Relay REST snapshot contains a Message the Hermes "
+                        "adapter cannot safely reconcile."
+                    )
+                if (
+                    message["is_from_me"] is False
+                    and message.get("is_system_message") is not True
+                ):
+                    created_at = message.get("created_at")
+                    inbound.append((
+                        created_at if isinstance(created_at, str) else "",
+                        message_id,
+                    ))
+            if inbound:
+                latest_inbound[chat_id] = max(inbound)[1]
+
+        return groups, directs, latest_inbound
 
     async def _process_inbox(self) -> None:
         # Hermes installs the handler after connect returns. Durable events stay
@@ -948,7 +1056,7 @@ class RelayAdapter(BasePlatformAdapter):
                 return caption_result
         return result
 
-    # Hermes calls these hooks, but Relay v1 has no typing endpoint.
+    # Hermes calls these hooks. Typing transport is not implemented here yet.
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         return None

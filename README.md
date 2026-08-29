@@ -10,7 +10,7 @@ transport.
 
 For every WebSocket event, the plugin:
 
-1. commits the complete envelope and `event_id` to a FULL-sync SQLite inbox;
+1. commits the complete envelope and `event_id` to a durable SQLite inbox;
 2. sends a cumulative ACK only after that commit;
 3. processes the inbox after acceptance;
 4. deduplicates replayed `event_id` values;
@@ -19,6 +19,20 @@ For every WebSocket event, the plugin:
 
 The inbox survives a gateway restart. A processing failure returns the row to
 `pending`; it does not move Relay's ACK backward or lose the event.
+
+When Relay reports that the saved checkpoint is outside retention, the plugin:
+
+1. does not ACK any event;
+2. paginates through every visible Chat and every page of its Messages;
+3. validates Chat ids, Message ids, ownership, and pagination continuity;
+4. atomically replaces a deterministic SQLite snapshot and saves the
+   `full_sync_through` checkpoint in the same transaction;
+5. sends `full_sync_complete` only after SQLite commits.
+
+The snapshot rebuilds the adapter's Chat kind and latest-inbound indexes. It
+does not turn old history into new agent turns. If the REST snapshot cannot be
+safely reconciled, the plugin stops with `relay_full_sync_failed` and sends no
+false completion.
 
 ## Setup
 
@@ -47,8 +61,15 @@ PUT /v1/websocket
 {"enabled":true}
 ```
 
-It requests one-use tickets from `POST /v1/websocket-connections` and connects
-with the `relay.v1.json` subprotocol.
+It derives `wss://.../v1/websocket` from `RELAY_BASE_URL` and sends the
+long-lived Agent Token only in the WebSocket upgrade header:
+
+```http
+Authorization: Bearer <Agent Token>
+```
+
+The token is never placed in the URL or a cookie. Relay uses no required
+WebSocket subprotocol.
 
 Relay reconnects after `heartbeat_timeout`, `restart`, close codes `1011`,
 `1012`, or `4408`, and retryable `ack_failed`/`delivery_failed` errors. It
@@ -81,7 +102,7 @@ to disable WebSocket delivery while any event remains unacknowledged.
 - voice memos use `POST /v1/chats/{chatId}/voicememo`;
 - attachments are allocated with JSON, then uploaded by raw `PUT`.
 
-Hermes' typing callbacks are no-ops because Relay v1 has no typing endpoint.
+Hermes' typing callbacks are currently no-ops in this plugin.
 
 ## Development
 
@@ -91,6 +112,8 @@ python -m venv .venv
 HERMES_AGENT_SRC=/path/to/hermes-agent .venv/bin/python -m pytest
 ```
 
-The tests cover exact REST paths and bodies, current event parsing, WebSocket
-commit-before-ACK ordering, replay deduplication, durable recovery, and the
-real Hermes adapter and plugin registration surfaces.
+The tests cover exact REST paths and bodies, paginated FULL sync, deterministic
+snapshot recovery, direct upgrade-header authentication with no query
+credential or subprotocol, commit-before-ACK ordering, replay deduplication,
+reconnect backoff, and the real Hermes adapter and plugin registration
+surfaces.

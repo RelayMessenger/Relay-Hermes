@@ -16,6 +16,36 @@ def payload(event_id: str):
     }
 
 
+def snapshot():
+    return [
+        {
+            "chat": {
+                "id": "01993d50-ef7b-7b37-886b-23fd80c7ec10",
+                "is_group": False,
+            },
+            "messages": [
+                {
+                    "id": "01993d50-ef7b-7b37-886b-23fd80c7ec12",
+                    "chat_id": "01993d50-ef7b-7b37-886b-23fd80c7ec10",
+                    "is_from_me": True,
+                },
+                {
+                    "id": "01993d50-ef7b-7b37-886b-23fd80c7ec11",
+                    "chat_id": "01993d50-ef7b-7b37-886b-23fd80c7ec10",
+                    "is_from_me": False,
+                },
+            ],
+        },
+        {
+            "chat": {
+                "id": "01993d50-ef7b-7b37-886b-23fd80c7ec20",
+                "is_group": True,
+            },
+            "messages": [],
+        },
+    ]
+
+
 def test_accept_is_durable_and_deduplicates_event_id(tmp_path):
     path = tmp_path / "relay" / "inbox.sqlite3"
     inbox = RelayInbox(path).open()
@@ -71,6 +101,63 @@ def test_sequence_and_event_id_are_validated(tmp_path):
     with pytest.raises(ValueError, match="different event_id"):
         inbox.accept("1", payload("event-2"))
     assert inbox.event_count() == 1
+    inbox.close()
+
+
+def test_full_snapshot_and_checkpoint_are_atomic_durable_and_deterministic(
+    tmp_path,
+):
+    path = tmp_path / "inbox.sqlite3"
+    inbox = RelayInbox(path).open()
+    first = snapshot()
+    digest = inbox.replace_full_snapshot("42", first)
+    assert inbox.full_sync_state() == {
+        "through_sequence": "42",
+        "snapshot_sha256": digest,
+        "chat_count": 2,
+        "message_count": 2,
+    }
+
+    reordered = [first[1], {
+        "chat": first[0]["chat"],
+        "messages": list(reversed(first[0]["messages"])),
+    }]
+    assert inbox.replace_full_snapshot("43", reordered) == digest
+    inbox.close()
+
+    reopened = RelayInbox(path).open()
+    restored = reopened.load_full_snapshot()
+    assert [entry["chat"]["id"] for entry in restored] == sorted(
+        entry["chat"]["id"] for entry in first
+    )
+    assert [
+        message["id"] for message in restored[0]["messages"]
+    ] == sorted(message["id"] for message in first[0]["messages"])
+    assert reopened.full_sync_state()["through_sequence"] == "43"
+    reopened.close()
+
+
+def test_invalid_full_snapshot_does_not_replace_last_good_checkpoint(tmp_path):
+    inbox = RelayInbox(tmp_path / "inbox.sqlite3").open()
+    expected = snapshot()
+    inbox.replace_full_snapshot("9", expected)
+    invalid = snapshot()
+    invalid[0]["messages"][0]["chat_id"] = "wrong-chat"
+
+    with pytest.raises(ValueError, match="invalid Message"):
+        inbox.replace_full_snapshot("10", invalid)
+
+    assert inbox.full_sync_state()["through_sequence"] == "9"
+    assert inbox.load_full_snapshot() == [
+        {
+            "chat": expected[0]["chat"],
+            "messages": sorted(
+                expected[0]["messages"],
+                key=lambda message: message["id"],
+            ),
+        },
+        expected[1],
+    ]
     inbox.close()
 
 

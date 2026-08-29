@@ -11,7 +11,7 @@ import random as _random
 import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
     import httpx
@@ -54,6 +54,8 @@ _WEBHOOK_EVENT_TYPES = {
     "chat.created",
     "chat.group_name_updated",
     "chat.group_icon_updated",
+    "chat.typing_indicator.started",
+    "chat.typing_indicator.stopped",
 }
 _DISCONNECT_REASONS = {
     "disabled",
@@ -68,6 +70,8 @@ _WEBSOCKET_ERROR_CODES = {
     "stale_connection",
     "ack_failed",
     "delivery_failed",
+    "full_sync_required",
+    "full_sync_mismatch",
 }
 
 
@@ -115,7 +119,7 @@ class RelayWebSocketError(Exception):
     @property
     def terminal(self) -> bool:
         # fatal means the current connection cannot continue. retryable is
-        # the authority for whether a fresh ticket/connection may resume.
+        # the authority for whether a fresh direct connection may resume.
         return not self.retryable
 
 
@@ -136,7 +140,11 @@ class RelayWebSocketClosed(Exception):
 
 
 class RelayWebSocketProtocolError(RuntimeError):
-    """A frame or connection ticket violated the canonical Relay schema."""
+    """A frame violated the canonical Relay WebSocket schema."""
+
+
+class RelayFullSyncError(RuntimeError):
+    """The adapter cannot safely reconcile a required Relay FULL sync."""
 
 
 def classify_status(status: int) -> str:
@@ -175,6 +183,20 @@ def normalize_base_url(raw: Optional[str]) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def websocket_url(base_url: str) -> str:
+    """Derive the credential-free Relay WebSocket URL from an API origin."""
+
+    normalized = normalize_base_url(base_url)
+    parts = urlsplit(normalized)
+    return urlunsplit((
+        "wss" if parts.scheme == "https" else "ws",
+        parts.netloc,
+        "/v1/websocket",
+        "",
+        "",
+    ))
+
+
 def reply_idempotency_key(
     event_id: str,
     ordinal: int = 0,
@@ -197,6 +219,37 @@ class RelayResponse:
 
 
 Transport = Callable[..., Awaitable[RelayResponse]]
+
+
+def _full_sync_page(
+    body: Dict[str, Any],
+    *,
+    collection: str,
+    item_id: str,
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    items = body.get(collection)
+    cursor = body.get("next_cursor")
+    if not isinstance(items, list):
+        raise RelayFullSyncError(
+            f"Relay FULL sync response is missing a {collection} array."
+        )
+    if cursor is not None and (not isinstance(cursor, str) or not cursor):
+        raise RelayFullSyncError(
+            f"Relay FULL sync returned an invalid {collection} cursor."
+        )
+    validated: List[Dict[str, Any]] = []
+    for item in items:
+        identifier = item.get(item_id) if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or not isinstance(identifier, str)
+            or _UUID_PATTERN.fullmatch(identifier) is None
+        ):
+            raise RelayFullSyncError(
+                f"Relay FULL sync returned an invalid {collection} item."
+            )
+        validated.append(item)
+    return validated, cursor
 
 
 class RelayClient:
@@ -339,11 +392,109 @@ class RelayClient:
         )
         return response.body if isinstance(response.body, dict) else {}
 
-    async def create_websocket_connection(self) -> Dict[str, Any]:
+    async def list_chats(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
         response = await self._request(
-            "POST", "/v1/websocket-connections", body={}
+            "GET",
+            "/v1/chats",
+            query={"cursor": cursor, "limit": limit},
         )
         return response.body if isinstance(response.body, dict) else {}
+
+    async def list_messages(
+        self,
+        chat_id: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        response = await self._request(
+            "GET",
+            f"/v1/chats/{quote(chat_id, safe='')}/messages",
+            query={"cursor": cursor, "limit": limit},
+        )
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def fetch_full_snapshot(self) -> List[Dict[str, Any]]:
+        """Fetch every visible Chat and Message with defensive pagination.
+
+        The returned list is deliberately plain JSON so the SQLite layer can
+        canonicalize and atomically replace its durable snapshot.
+        """
+
+        chats: List[Dict[str, Any]] = []
+        chat_ids: set[str] = set()
+        chat_cursors: set[str] = set()
+        cursor: Optional[str] = None
+        while True:
+            page = await self.list_chats(cursor=cursor, limit=100)
+            page_chats, next_cursor = _full_sync_page(
+                page,
+                collection="chats",
+                item_id="id",
+            )
+            for chat in page_chats:
+                chat_id = str(chat["id"])
+                if chat_id in chat_ids:
+                    raise RelayFullSyncError(
+                        f"Relay FULL sync returned Chat {chat_id} more than once."
+                    )
+                chat_ids.add(chat_id)
+                chats.append({"chat": chat, "messages": []})
+            if next_cursor is None:
+                break
+            if next_cursor in chat_cursors:
+                raise RelayFullSyncError(
+                    "Relay FULL sync repeated a Chats pagination cursor."
+                )
+            chat_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        message_ids: set[str] = set()
+        for entry in chats:
+            chat = entry["chat"]
+            chat_id = str(chat["id"])
+            message_cursors: set[str] = set()
+            cursor = None
+            while True:
+                page = await self.list_messages(
+                    chat_id,
+                    cursor=cursor,
+                    limit=100,
+                )
+                messages, next_cursor = _full_sync_page(
+                    page,
+                    collection="messages",
+                    item_id="id",
+                )
+                for message in messages:
+                    message_id = str(message["id"])
+                    if message.get("chat_id") != chat_id:
+                        raise RelayFullSyncError(
+                            f"Relay FULL sync Message {message_id} belongs to "
+                            f"{message.get('chat_id')!r}, not Chat {chat_id}."
+                        )
+                    if message_id in message_ids:
+                        raise RelayFullSyncError(
+                            f"Relay FULL sync returned Message {message_id} "
+                            "more than once."
+                        )
+                    message_ids.add(message_id)
+                    entry["messages"].append(message)
+                if next_cursor is None:
+                    break
+                if next_cursor in message_cursors:
+                    raise RelayFullSyncError(
+                        f"Relay FULL sync repeated a Messages cursor for "
+                        f"Chat {chat_id}."
+                    )
+                message_cursors.add(next_cursor)
+                cursor = next_cursor
+        return chats
 
     async def send_message(
         self,
@@ -474,17 +625,23 @@ class DurableInbox(Protocol):
     def accept(self, sequence: str, event: Dict[str, Any]) -> bool: ...
 
 
+FullSyncHandler = Callable[[str, str], Awaitable[None]]
+
+
 async def consume_websocket(
     socket: Any,
     *,
     inbox: DurableInbox,
     on_accepted: Callable[[], Any] = lambda: None,
     on_ready: Callable[[], Any] = lambda: None,
+    on_full_sync: Optional[FullSyncHandler] = None,
 ) -> None:
     """Consume one connection, commit before cumulative ACK, and never process."""
 
     ready = False
     accepted_through: Optional[int] = None
+    full_sync_through: Optional[int] = None
+    full_sync_pending = False
     async for raw in socket:
         if not isinstance(raw, str):
             raise RelayWebSocketProtocolError(
@@ -499,17 +656,30 @@ async def consume_websocket(
         frame_type = frame.get("type") if isinstance(frame, dict) else None
         if frame_type == "ready":
             checkpoint = frame.get("acked_through")
+            requires_full_sync = frame.get("full_sync_required")
+            required_through = frame.get("full_sync_through")
             if (
                 ready
                 or set(frame) != {
                     "type",
                     "connection_id",
                     "acked_through",
+                    "full_sync_required",
+                    "full_sync_through",
                     "heartbeat_interval_ms",
                     "max_in_flight",
                 }
                 or not isinstance(checkpoint, str)
                 or _SEQUENCE_PATTERN.fullmatch(checkpoint) is None
+                or not isinstance(requires_full_sync, bool)
+                or (
+                    requires_full_sync
+                    and (
+                        not isinstance(required_through, str)
+                        or _SEQUENCE_PATTERN.fullmatch(required_through) is None
+                    )
+                )
+                or (not requires_full_sync and required_through is not None)
                 or not isinstance(frame.get("connection_id"), str)
                 or _UUID_PATTERN.fullmatch(frame["connection_id"]) is None
                 or isinstance(frame.get("heartbeat_interval_ms"), bool)
@@ -523,6 +693,10 @@ async def consume_websocket(
                     "Relay WebSocket received an invalid ready frame"
                 )
             accepted_through = int(checkpoint)
+            full_sync_pending = requires_full_sync
+            full_sync_through = (
+                int(required_through) if requires_full_sync else None
+            )
             ready = True
             result = on_ready()
             if asyncio.iscoroutine(result):
@@ -562,6 +736,39 @@ async def consume_websocket(
                 code=code,
                 fatal=fatal,
                 retryable=retryable,
+            )
+        if frame_type == "full_sync":
+            through = frame.get("through_sequence")
+            reason = frame.get("reason")
+            if (
+                set(frame) != {"type", "through_sequence", "reason"}
+                or not ready
+                or not full_sync_pending
+                or not isinstance(through, str)
+                or _SEQUENCE_PATTERN.fullmatch(through) is None
+                or int(through) != full_sync_through
+                or reason != "checkpoint_outside_retention"
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid FULL sync frame"
+                )
+            if on_full_sync is None:
+                raise RelayFullSyncError(
+                    "Relay requires a FULL sync, but this consumer has no "
+                    "safe snapshot reconciler."
+                )
+            await on_full_sync(through, reason)
+            await socket.send(json.dumps({
+                "type": "full_sync_complete",
+                "through_sequence": through,
+            }, separators=(",", ":")))
+            accepted_through = int(through)
+            full_sync_pending = False
+            full_sync_through = None
+            continue
+        if full_sync_pending and frame_type == "event":
+            raise RelayWebSocketProtocolError(
+                "Relay WebSocket received an event while FULL sync was pending"
             )
         if (
             frame_type != "event"
@@ -618,6 +825,7 @@ async def run_websocket_loop(
     client: RelayClient,
     inbox: DurableInbox,
     on_accepted: Callable[[], Any] = lambda: None,
+    on_full_sync: Optional[FullSyncHandler] = None,
     should_continue: Callable[[], bool] = lambda: True,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     random_fn: Callable[[], float] = _random.random,
@@ -629,28 +837,16 @@ async def run_websocket_loop(
     connector = connect_factory or websocket_connect
     if connector is None:
         raise RuntimeError("relay: websockets is required")
+    url = websocket_url(client.base_url)
     attempt = 0
     while should_continue():
         try:
-            ticket = await client.create_websocket_connection()
-            url = ticket.get("url")
-            expires_at = ticket.get("expires_at")
-            protocol = ticket.get("subprotocol")
-            parsed_url = urlsplit(url) if isinstance(url, str) else None
-            if (
-                set(ticket) != {"url", "expires_at", "subprotocol"}
-                or parsed_url is None
-                or parsed_url.scheme not in ("ws", "wss")
-                or not parsed_url.hostname
-                or parsed_url.username is not None
-                or parsed_url.password is not None
-                or not isinstance(expires_at, str)
-                or protocol != "relay.v1.json"
-            ):
-                raise RelayWebSocketProtocolError(
-                    "Relay returned an invalid WebSocket ticket"
-                )
-            async with connector(url, subprotocols=[protocol]) as socket:
+            async with connector(
+                url,
+                additional_headers={
+                    "Authorization": f"Bearer {client._token}",  # noqa: SLF001
+                },
+            ) as socket:
                 def mark_ready() -> None:
                     nonlocal attempt
                     attempt = 0
@@ -660,6 +856,7 @@ async def run_websocket_loop(
                     inbox=inbox,
                     on_accepted=on_accepted,
                     on_ready=mark_ready,
+                    on_full_sync=on_full_sync,
                 )
         except asyncio.CancelledError:
             raise
@@ -685,6 +882,8 @@ async def run_websocket_loop(
             log(f"WebSocket reconnect in {delay:.2f}s: {error}")
             await sleep(delay)
         except RelayWebSocketProtocolError:
+            raise
+        except RelayFullSyncError:
             raise
         except Exception as error:
             if not should_continue():

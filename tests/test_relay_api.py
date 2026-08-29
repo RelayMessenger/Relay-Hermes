@@ -9,6 +9,7 @@ from hermes_relay_plugin.state import RelayInbox
 
 from hermes_relay_plugin.relay_api import (
     RelayClient,
+    RelayFullSyncError,
     RelayResponse,
     RelayWebSocketClosed,
     RelayWebSocketDisconnect,
@@ -25,12 +26,15 @@ from hermes_relay_plugin.relay_api import (
     split_paragraphs,
     transient_delay_seconds,
     utf16_len,
+    websocket_url,
 )
 
 TOKEN = "relay-test-token"
 CHAT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
 MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
 EVENT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
+CHAT_ID_2 = "01993d50-ef7b-7b37-886b-23fd80c7ec20"
+MESSAGE_ID_2 = "01993d50-ef7b-7b37-886b-23fd80c7ec21"
 
 
 class FakeTransport:
@@ -79,6 +83,21 @@ def event(*, group: bool = False, mention: bool = False) -> Dict[str, Any]:
             "parts": [text],
             "sent_at": "2026-08-29T00:00:00Z",
         },
+    }
+
+
+def ready(
+    acked_through: str = "0",
+    full_sync_through: str | None = None,
+) -> Dict[str, Any]:
+    return {
+        "type": "ready",
+        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
+        "acked_through": acked_through,
+        "full_sync_required": full_sync_through is not None,
+        "full_sync_through": full_sync_through,
+        "heartbeat_interval_ms": 30_000,
+        "max_in_flight": 64,
     }
 
 
@@ -202,27 +221,87 @@ def test_attachment_allocates_with_json_then_puts_raw_bytes():
     }]
 
 
-def test_websocket_settings_and_ticket_routes():
+def test_websocket_settings_have_no_connection_ticket_route():
     transport = FakeTransport([
-        RelayResponse(200, {"enabled": False, "acked_through": "0"}),
-        RelayResponse(200, {"enabled": True, "acked_through": "0"}),
         RelayResponse(200, {
-            "url": "wss://events.example/ticket",
-            "expires_at": "2026-08-29T00:01:00Z",
-            "subprotocol": "relay.v1.json",
+            "enabled": False,
+            "acked_through": "0",
+            "full_sync_through": None,
+        }),
+        RelayResponse(200, {
+            "enabled": True,
+            "acked_through": "0",
+            "full_sync_through": None,
         }),
     ])
     client = RelayClient(TOKEN, transport=transport)
     asyncio.run(client.get_websocket_settings())
     asyncio.run(client.update_websocket(True))
-    asyncio.run(client.create_websocket_connection())
     assert [call["path"] for call in transport.calls] == [
         "/v1/websocket",
         "/v1/websocket",
-        "/v1/websocket-connections",
     ]
     assert transport.calls[1]["body"] == {"enabled": True}
-    assert transport.calls[2]["body"] == {}
+
+
+def test_full_snapshot_fetches_every_chat_and_message_page():
+    chat_one = {"id": CHAT_ID, "is_group": False}
+    chat_two = {"id": CHAT_ID_2, "is_group": True}
+    message_one = {
+        "id": MESSAGE_ID,
+        "chat_id": CHAT_ID,
+        "is_from_me": False,
+    }
+    message_two = {
+        "id": MESSAGE_ID_2,
+        "chat_id": CHAT_ID,
+        "is_from_me": True,
+    }
+    transport = FakeTransport([
+        RelayResponse(200, {"chats": [chat_one], "next_cursor": "chats-2"}),
+        RelayResponse(200, {"chats": [chat_two], "next_cursor": None}),
+        RelayResponse(200, {
+            "messages": [message_one],
+            "next_cursor": "messages-2",
+        }),
+        RelayResponse(200, {
+            "messages": [message_two],
+            "next_cursor": None,
+        }),
+        RelayResponse(200, {"messages": [], "next_cursor": None}),
+    ])
+    client = RelayClient(TOKEN, transport=transport)
+
+    assert asyncio.run(client.fetch_full_snapshot()) == [
+        {"chat": chat_one, "messages": [message_one, message_two]},
+        {"chat": chat_two, "messages": []},
+    ]
+    assert [(call["path"], call["query"]) for call in transport.calls] == [
+        ("/v1/chats", {"cursor": None, "limit": 100}),
+        ("/v1/chats", {"cursor": "chats-2", "limit": 100}),
+        (
+            f"/v1/chats/{CHAT_ID}/messages",
+            {"cursor": None, "limit": 100},
+        ),
+        (
+            f"/v1/chats/{CHAT_ID}/messages",
+            {"cursor": "messages-2", "limit": 100},
+        ),
+        (
+            f"/v1/chats/{CHAT_ID_2}/messages",
+            {"cursor": None, "limit": 100},
+        ),
+    ]
+
+
+def test_full_snapshot_fails_closed_on_repeated_cursor():
+    transport = FakeTransport([
+        RelayResponse(200, {"chats": [], "next_cursor": "same"}),
+        RelayResponse(200, {"chats": [], "next_cursor": "same"}),
+    ])
+    client = RelayClient(TOKEN, transport=transport)
+    with pytest.raises(RelayFullSyncError, match="repeated"):
+        asyncio.run(client.fetch_full_snapshot())
 
 
 class OrderedInbox:
@@ -250,20 +329,15 @@ class FakeSocket:
 
     async def send(self, raw: str) -> None:
         frame = json.loads(raw)
-        self.order.append(f"ack:{frame['through_sequence']}")
+        label = "ack" if frame["type"] == "ack" else frame["type"]
+        self.order.append(f"{label}:{frame['through_sequence']}")
         self.sent.append(frame)
 
 
 def test_websocket_commits_before_cumulative_ack():
     order: List[str] = []
     socket = FakeSocket([
-        {
-            "type": "ready",
-            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-            "acked_through": "40",
-            "heartbeat_interval_ms": 30_000,
-            "max_in_flight": 64,
-        },
+        ready("40"),
         {"type": "event", "sequence": "41", "event": event()},
     ], order)
     inbox = OrderedInbox(order)
@@ -276,13 +350,7 @@ def test_websocket_commits_before_cumulative_ack():
 def test_websocket_refuses_to_ack_over_a_sequence_gap():
     order: List[str] = []
     socket = FakeSocket([
-        {
-            "type": "ready",
-            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-            "acked_through": "40",
-            "heartbeat_interval_ms": 30_000,
-            "max_in_flight": 64,
-        },
+        ready("40"),
         {"type": "event", "sequence": "42", "event": event()},
     ], order)
     with pytest.raises(RuntimeError, match="not contiguous"):
@@ -294,13 +362,7 @@ def test_websocket_refuses_to_ack_over_a_sequence_gap():
 def test_websocket_rejects_noncanonical_decimal_sequences(value):
     order: List[str] = []
     socket = FakeSocket([
-        {
-            "type": "ready",
-            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-            "acked_through": "0",
-            "heartbeat_interval_ms": 30_000,
-            "max_in_flight": 64,
-        },
+        ready(),
         {"type": "event", "sequence": value, "event": event()},
     ], order)
     with pytest.raises(RuntimeError, match="invalid sequence"):
@@ -309,15 +371,9 @@ def test_websocket_rejects_noncanonical_decimal_sequences(value):
 
 
 def test_websocket_honors_error_and_disconnect_frames():
-    ready = {
-        "type": "ready",
-        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-        "acked_through": "0",
-        "heartbeat_interval_ms": 30_000,
-        "max_in_flight": 64,
-    }
+    ready_frame = ready()
     retryable = FakeSocket([
-        ready,
+        ready_frame,
         {
             "type": "error",
             "code": "delivery_failed",
@@ -339,7 +395,7 @@ def test_websocket_honors_error_and_disconnect_frames():
         "restart",
     ):
         disconnected = FakeSocket([
-            ready,
+            ready_frame,
             {"type": "disconnect", "reason": reason},
         ], [])
         with pytest.raises(RelayWebSocketDisconnect) as raised:
@@ -350,7 +406,7 @@ def test_websocket_honors_error_and_disconnect_frames():
         )
 
     unknown_error = FakeSocket([
-        ready,
+        ready_frame,
         {
             "type": "error",
             "code": "unknown",
@@ -375,13 +431,8 @@ def test_websocket_requires_ready_exact_keys_and_complete_envelopes():
             inbox=OrderedInbox([]),
         ))
 
-    invalid_ready = {
-        "type": "ready",
-        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-        "acked_through": "0",
-        "heartbeat_interval_ms": True,
-        "max_in_flight": 64,
-    }
+    invalid_ready = ready()
+    invalid_ready["heartbeat_interval_ms"] = True
     with pytest.raises(RuntimeError, match="invalid ready"):
         asyncio.run(consume_websocket(
             FakeSocket([invalid_ready], []),
@@ -390,13 +441,7 @@ def test_websocket_requires_ready_exact_keys_and_complete_envelopes():
 
     extra = event()
     frames = [
-        {
-            "type": "ready",
-            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-            "acked_through": "0",
-            "heartbeat_interval_ms": 30_000,
-            "max_in_flight": 64,
-        },
+        ready(),
         {"type": "event", "sequence": "1", "event": extra, "unexpected": True},
     ]
     with pytest.raises(RuntimeError, match="invalid frame"):
@@ -417,47 +462,33 @@ class FakeConnectionContext:
         return None
 
 
-def test_websocket_loop_reconnects_heartbeat_with_fresh_ticket_then_stops_disabled():
-    ready = {
-        "type": "ready",
-        "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-        "acked_through": "0",
-        "heartbeat_interval_ms": 30_000,
-        "max_in_flight": 64,
-    }
+def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
+    ready_frame = ready()
     sockets = [
         FakeSocket([
-            ready,
+            ready_frame,
             {"type": "disconnect", "reason": "heartbeat_timeout"},
         ], []),
         FakeSocket([
-            ready,
+            ready_frame,
             {"type": "disconnect", "reason": "restart"},
         ], []),
         FakeSocket([
-            ready,
+            ready_frame,
             {"type": "disconnect", "reason": "disabled"},
         ], []),
     ]
 
-    class Client:
-        def __init__(self):
-            self.calls = 0
-
-        async def create_websocket_connection(self):
-            self.calls += 1
-            return {
-                "url": f"wss://relay.test/v1/websocket?ticket={self.calls}",
-                "expires_at": "2026-08-29T00:01:00Z",
-                "subprotocol": "relay.v1.json",
-            }
-
-    client = Client()
+    client = RelayClient(
+        TOKEN,
+        "https://relay.test",
+        transport=FakeTransport([]),
+    )
     connections = []
     sleeps = []
 
-    def connect(url, *, subprotocols):
-        connections.append((url, subprotocols))
+    def connect(url, *, additional_headers):
+        connections.append((url, additional_headers))
         return FakeConnectionContext(sockets[len(connections) - 1])
 
     async def sleep(delay):
@@ -473,52 +504,51 @@ def test_websocket_loop_reconnects_heartbeat_with_fresh_ticket_then_stops_disabl
         ))
 
     assert raised.value.reason == "disabled"
-    assert client.calls == 3
-    assert [entry[1] for entry in connections] == [
-        ["relay.v1.json"],
-        ["relay.v1.json"],
-        ["relay.v1.json"],
+    assert [entry[0] for entry in connections] == [
+        "wss://relay.test/v1/websocket",
+        "wss://relay.test/v1/websocket",
+        "wss://relay.test/v1/websocket",
     ]
+    assert [entry[1] for entry in connections] == [
+        {"Authorization": f"Bearer {TOKEN}"},
+        {"Authorization": f"Bearer {TOKEN}"},
+        {"Authorization": f"Bearer {TOKEN}"},
+    ]
+    assert all("?" not in entry[0] for entry in connections)
     assert sleeps == [0.5, 0.5]
 
 
-def test_websocket_loop_stops_on_protocol_violation_without_ticket_churn():
+def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():
     socket = FakeSocket([
         {"type": "event", "sequence": "1", "event": event()},
     ], [])
 
-    class Client:
-        def __init__(self):
-            self.calls = 0
+    client = RelayClient(
+        TOKEN,
+        "https://relay.test",
+        transport=FakeTransport([]),
+    )
+    connections = []
 
-        async def create_websocket_connection(self):
-            self.calls += 1
-            return {
-                "url": "wss://relay.test/v1/websocket?ticket=one",
-                "expires_at": "2026-08-29T00:01:00Z",
-                "subprotocol": "relay.v1.json",
-            }
+    def connect(url, *, additional_headers):
+        connections.append((url, additional_headers))
+        return FakeConnectionContext(socket)
 
-    client = Client()
     with pytest.raises(RelayWebSocketProtocolError):
         asyncio.run(run_websocket_loop(
             client=client,
             inbox=OrderedInbox([]),
-            connect_factory=lambda *_args, **_kwargs: FakeConnectionContext(socket),
-            sleep=lambda _delay: None,
+            connect_factory=connect,
         ))
-    assert client.calls == 1
+    assert connections == [(
+        "wss://relay.test/v1/websocket",
+        {"Authorization": f"Bearer {TOKEN}"},
+    )]
 
 
 def test_websocket_replay_is_deduplicated_but_acknowledged_again(tmp_path):
     frames = [
-        {
-            "type": "ready",
-            "connection_id": "01993d50-ef7b-7b37-886b-23fd80c7ec17",
-            "acked_through": "0",
-            "heartbeat_interval_ms": 30_000,
-            "max_in_flight": 64,
-        },
+        ready(),
         {"type": "event", "sequence": "1", "event": event()},
     ]
     inbox = RelayInbox(tmp_path / "inbox.sqlite3").open()
@@ -534,9 +564,106 @@ def test_websocket_replay_is_deduplicated_but_acknowledged_again(tmp_path):
     inbox.close()
 
 
+def test_full_sync_commits_before_completion_and_events_ack_afterward(tmp_path):
+    order: List[str] = []
+    socket = FakeSocket([
+        ready("7", "42"),
+        {
+            "type": "full_sync",
+            "through_sequence": "42",
+            "reason": "checkpoint_outside_retention",
+        },
+        {"type": "event", "sequence": "43", "event": event()},
+    ], order)
+    class TrackingInbox(RelayInbox):
+        def accept(self, sequence, payload):
+            result = super().accept(sequence, payload)
+            order.append(f"commit:{sequence}")
+            return result
+
+    inbox = TrackingInbox(tmp_path / "inbox.sqlite3").open()
+    chat = {
+        "id": CHAT_ID,
+        "is_group": False,
+    }
+    message = {
+        "id": MESSAGE_ID,
+        "chat_id": CHAT_ID,
+        "is_from_me": False,
+    }
+
+    async def full_sync(through: str, reason: str) -> None:
+        assert reason == "checkpoint_outside_retention"
+        inbox.replace_full_snapshot(
+            through,
+            [{"chat": chat, "messages": [message]}],
+        )
+        order.append(f"snapshot:{through}")
+
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=inbox,
+            on_full_sync=full_sync,
+        ))
+
+    assert order == [
+        "snapshot:42",
+        "full_sync_complete:42",
+        "commit:43",
+        "ack:43",
+    ]
+    assert socket.sent == [
+        {"type": "full_sync_complete", "through_sequence": "42"},
+        {"type": "ack", "through_sequence": "43"},
+    ]
+    assert inbox.full_sync_state()["through_sequence"] == "42"
+    inbox.close()
+
+
+def test_full_sync_fails_closed_without_a_safe_reconciler():
+    socket = FakeSocket([
+        ready("0", "8"),
+        {
+            "type": "full_sync",
+            "through_sequence": "8",
+            "reason": "checkpoint_outside_retention",
+        },
+    ], [])
+    with pytest.raises(RelayFullSyncError, match="no safe snapshot"):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox([]),
+        ))
+    assert socket.sent == []
+
+
+def test_websocket_rejects_event_while_full_sync_is_pending():
+    socket = FakeSocket([
+        ready("0", "8"),
+        {"type": "event", "sequence": "1", "event": event()},
+    ], [])
+    with pytest.raises(
+        RelayWebSocketProtocolError,
+        match="while FULL sync was pending",
+    ):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox([]),
+            on_full_sync=lambda *_args: None,
+        ))
+    assert socket.sent == []
+
+
 def test_base_url_idempotency_and_errors():
     assert normalize_base_url(None) == "https://api.relayapp.im"
     assert normalize_base_url("http://localhost:8790") == "http://localhost:8790"
+    assert websocket_url("https://api.relayapp.im") == (
+        "wss://api.relayapp.im/v1/websocket"
+    )
+    assert websocket_url("http://localhost:8790") == (
+        "ws://localhost:8790/v1/websocket"
+    )
     with pytest.raises(ValueError):
         normalize_base_url("http://api.relayapp.im")
     assert reply_idempotency_key(EVENT_ID, 2) == f"reply-{EVENT_ID}-2"
