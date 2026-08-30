@@ -1,16 +1,14 @@
 # hermes-relay-plugin
 
-A Relay platform adapter for
-[Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Connect [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Relay
+as an always-on agent.
 
-Hermes is an always-on gateway, so the plugin connects to Relay by WebSocket.
-The Agent must have no Webhook subscriptions. If it has one, Relay rejects the
-upgrade with HTTP 409 and the plugin stops with a clear
-`relay_webhook_configured` error.
+The plugin receives agent events from Relay over WebSocket and sends replies
+through Relay API v1.
 
 ## Reliability
 
-For every WebSocket event, the plugin:
+For every event, the plugin:
 
 1. commits the complete envelope and `event_id` to a durable SQLite inbox;
 2. sends a cumulative ACK only after that commit;
@@ -38,6 +36,9 @@ false completion.
 
 ## Setup
 
+Create an agent and Agent Token in
+[Relay Console](https://console.relayapp.im).
+
 ```sh
 git clone https://github.com/relaymessenger/hermes-relay-plugin \
   ~/.hermes/plugins/relay
@@ -50,30 +51,36 @@ Set the Agent Token:
 RELAY_AGENT_TOKEN=your_agent_token
 ```
 
+The agent must have no saved webhook subscriptions. Relay returns HTTP `409`
+when a webhook subscription exists. Delete the subscriptions before starting
+Hermes with this plugin.
+
 Then start Hermes:
 
 ```sh
 hermes gateway start
 ```
 
-It derives `wss://.../v1/websocket` from `RELAY_BASE_URL` and sends the
-long-lived Agent Token only in the WebSocket upgrade header:
+The plugin connects to `wss://api.relayapp.im/v1/websocket`. It derives the
+WebSocket URL from `RELAY_BASE_URL` and authenticates the upgrade with:
 
 ```http
 Authorization: Bearer <Agent Token>
 ```
 
-The token is never placed in the URL or a cookie. Relay uses no required
-WebSocket subprotocol.
+## Connection handling
 
-Relay reconnects after `heartbeat_timeout`, `restart`, close codes `1011`,
-`1012`, or `4408`, and retryable `ack_failed`/`delivery_failed` errors. It
-stops on `revoked`, HTTP 409, the dedicated Webhook-configured close code
-`4410`, or any other Relay server-policy close code.
+The plugin replies to Relay heartbeat pings with `pong`. Heartbeats check the
+connection; cumulative ACKs advance event delivery.
 
-The saved configuration is the path: at least one Webhook subscription means
-Webhook; none means WebSocket. The two paths carry the same event envelope, so
-the durable handler does not change when an Agent moves between them.
+| Condition | Behavior |
+| --- | --- |
+| `heartbeat_timeout` or `restart` | Reconnect with exponential backoff and jitter |
+| Retryable `ack_failed` or `delivery_failed` | Reconnect with backoff |
+| Close code `1011`, `1012`, or `4408` | Reconnect with backoff |
+| `revoked` or close code `4401` | Stop and require a valid Agent Token |
+| HTTP `409`, `webhook_configured`, or close code `4410` | Stop until every webhook subscription is removed |
+| Any other Relay policy close code | Stop and report the close reason |
 
 ## Configuration
 
@@ -100,11 +107,9 @@ export RELAY_STATE_DIR="$HOME/.hermes/relay-staging"
 ./scripts/run-staging.sh
 ```
 
-The same command works on macOS and Linux, including a Daytona workspace.
-
 ## Current Relay contract
 
-- inbound Message data is the webhook `data` object;
+- incoming Message data is the event's `data` object;
 - Chat id is `data.chat.id`;
 - sender is `data.sender_handle`;
 - text is `part.value`;
@@ -113,8 +118,6 @@ The same command works on macOS and Linux, including a Daytona workspace.
 - replies use `POST /v1/chats/{chatId}/messages`;
 - voice memos use `POST /v1/chats/{chatId}/voicememo`;
 - attachments are allocated with JSON, then uploaded by raw `PUT`.
-
-Hermes' typing callbacks are currently no-ops in this plugin.
 
 ## Development
 
@@ -125,7 +128,6 @@ HERMES_AGENT_SRC=/path/to/hermes-agent .venv/bin/python -m pytest
 ```
 
 The tests cover exact REST paths and bodies, paginated FULL sync, deterministic
-snapshot recovery, direct upgrade-header authentication with no query
-credential or subprotocol, commit-before-ACK ordering, replay deduplication,
-reconnect backoff, and the real Hermes adapter and plugin registration
-surfaces.
+snapshot recovery, WebSocket authentication, commit-before-ACK ordering,
+replay deduplication, heartbeat handling, reconnect behavior, and the real
+Hermes adapter and plugin registration surfaces.

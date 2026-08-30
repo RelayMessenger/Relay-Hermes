@@ -3,10 +3,10 @@ label: Relay
 kind: platform
 version: 1.0.0
 description: >
-  Relay messenger platform adapter for Hermes Agent. The always-on Hermes
-  gateway receives events through Relay WebSocket. It commits each complete
-  event to a durable SQLite inbox before cumulative ACK, deduplicates event_id,
-  processes after acceptance, and replies through idempotent v1 REST.
+  Connect Hermes Agent to Relay as an always-on agent. The plugin receives
+  Relay events over WebSocket, commits each event to a durable SQLite inbox
+  before cumulative ACK, deduplicates event_id, and sends idempotent replies
+  through Relay API v1.
 author: Companion, Inc.
 homepage: https://github.com/relaymessenger/hermes-relay-plugin
 license: MIT

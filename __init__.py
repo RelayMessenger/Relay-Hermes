@@ -1,4 +1,4 @@
-"""Relay messenger platform plugin for Hermes Agent.
+"""Relay plugin for Hermes Agent.
 
 Deliberately import-light. Platform plugins are deferred: the adapter module
 and its imports load only when the platform registry is first asked for the

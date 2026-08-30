@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [staging]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HERMES_AGENT_COMMIT: aff5125f8edf5095aef5d3d79bbbb101c95b9413
+  HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@v7
+
+      - name: Check out the pinned Hermes source
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_AGENT_COMMIT }}
+          path: _hermes-agent
+          persist-credentials: false
+
+      - name: Verify the Hermes source
+        run: |
+          test "$(git -C "$HERMES_AGENT_SRC" rev-parse HEAD)" = "$HERMES_AGENT_COMMIT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m pip install -e ".[dev]"
+          python -m pip check
+
+      - name: Run tests against Hermes
+        run: python -m pytest -q
+
+      - name: Build and install the wheel
+        run: |
+          python -m build
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python -c "import hermes_relay_plugin; from importlib.metadata import version; assert version('hermes-relay-plugin') == '1.0.0'"
