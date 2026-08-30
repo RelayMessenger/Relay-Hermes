@@ -22,11 +22,12 @@ except ImportError:  # pragma: no cover
 
 try:
     from websockets.asyncio.client import connect as websocket_connect
-    from websockets.exceptions import ConnectionClosed
+    from websockets.exceptions import ConnectionClosed, InvalidStatus
     WEBSOCKETS_AVAILABLE = True
 except ImportError:  # pragma: no cover
     websocket_connect = None  # type: ignore[assignment]
     ConnectionClosed = None  # type: ignore[assignment,misc]
+    InvalidStatus = None  # type: ignore[assignment,misc]
     WEBSOCKETS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ MAX_TEXT_PART_UNITS = 10_000
 MAX_PARTS_PER_MESSAGE = 100
 TRANSIENT_BASE_DELAY_MS = 500
 TRANSIENT_MAX_DELAY_MS = 30_000
+HEARTBEAT_PING_INTERVAL_SECONDS = 30.0
+HEARTBEAT_PONG_TIMEOUT_SECONDS = 60.0
+WEBSOCKET_WEBHOOK_CONFIGURED_CLOSE_CODE = 4410
 _SEQUENCE_PATTERN = re.compile(r"^(0|[1-9][0-9]*)$")
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -58,11 +62,10 @@ _WEBHOOK_EVENT_TYPES = {
     "chat.typing_indicator.stopped",
 }
 _DISCONNECT_REASONS = {
-    "disabled",
-    "replaced",
     "revoked",
     "heartbeat_timeout",
     "restart",
+    "webhook_configured",
 }
 _WEBSOCKET_ERROR_CODES = {
     "invalid_frame",
@@ -147,6 +150,29 @@ class RelayFullSyncError(RuntimeError):
     """The adapter cannot safely reconcile a required Relay FULL sync."""
 
 
+class RelayWebhookConfiguredError(RelayApiError):
+    """The Agent has a Webhook subscription, so Relay rejected its socket."""
+
+    def __init__(
+        self,
+        message: str = (
+            "This Agent delivers by webhook; delete its webhook subscription "
+            "to use the WebSocket."
+        ),
+        *,
+        trace_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            kind="conflict",
+            status=409,
+            code="webhook_configured",
+            details=details,
+        )
+        self.trace_id = trace_id
+
+
 def classify_status(status: int) -> str:
     if status == 401:
         return "auth"
@@ -155,6 +181,52 @@ def classify_status(status: int) -> str:
     if status in (408, 429) or status >= 500:
         return "retryable"
     return "rejected"
+
+
+def _upgrade_error(error: Any) -> RelayApiError:
+    response = getattr(error, "response", None)
+    status = int(getattr(response, "status_code", 0) or 0)
+    raw = bytes(getattr(response, "body", b"") or b"")
+    parsed: Any = None
+    message = ""
+    trace_id: Optional[str] = None
+    if raw:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            parsed = raw.decode("utf-8", errors="replace")
+    if isinstance(parsed, dict):
+        trace = parsed.get("trace_id")
+        if isinstance(trace, str):
+            trace_id = trace
+        body_error = parsed.get("error")
+        if (
+            isinstance(body_error, dict)
+            and isinstance(body_error.get("message"), str)
+        ):
+            message = body_error["message"]
+        elif isinstance(parsed.get("message"), str):
+            message = parsed["message"]
+    if status == 409:
+        return RelayWebhookConfiguredError(
+            message or (
+                "This Agent delivers by webhook; delete its webhook "
+                "subscription to use the WebSocket."
+            ),
+            trace_id=trace_id,
+            details={"body": parsed},
+        )
+    fallback = (
+        f"Relay WebSocket upgrade failed with HTTP {status}"
+        if status
+        else "Relay WebSocket upgrade failed before receiving an HTTP status"
+    )
+    return RelayApiError(
+        message or fallback,
+        kind=classify_status(status) if status else "retryable",
+        status=status or None,
+        details={"body": parsed},
+    )
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -381,16 +453,6 @@ class RelayClient:
             code=code,
             details=details,
         )
-
-    async def get_websocket_settings(self) -> Dict[str, Any]:
-        response = await self._request("GET", "/v1/websocket")
-        return response.body if isinstance(response.body, dict) else {}
-
-    async def update_websocket(self, enabled: bool) -> Dict[str, Any]:
-        response = await self._request(
-            "PUT", "/v1/websocket", body={"enabled": enabled}
-        )
-        return response.body if isinstance(response.body, dict) else {}
 
     async def list_chats(
         self,
@@ -709,6 +771,20 @@ async def consume_websocket(
                     "Relay WebSocket received an invalid disconnect frame"
                 )
             raise RelayWebSocketDisconnect(reason)
+        if frame_type == "ping":
+            if (
+                set(frame) != {"type", "sent_at"}
+                or not ready
+                or not isinstance(frame.get("sent_at"), str)
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid ping frame"
+                )
+            await socket.send(json.dumps(
+                {"type": "pong"},
+                separators=(",", ":"),
+            ))
+            continue
         if frame_type == "error":
             code = frame.get("code")
             message = frame.get("message")
@@ -846,6 +922,8 @@ async def run_websocket_loop(
                 additional_headers={
                     "Authorization": f"Bearer {client._token}",  # noqa: SLF001
                 },
+                ping_interval=HEARTBEAT_PING_INTERVAL_SECONDS,
+                ping_timeout=HEARTBEAT_PONG_TIMEOUT_SECONDS,
             ) as socket:
                 def mark_ready() -> None:
                     nonlocal attempt
@@ -888,15 +966,47 @@ async def run_websocket_loop(
         except Exception as error:
             if not should_continue():
                 return
+            if InvalidStatus is not None and isinstance(error, InvalidStatus):
+                upgrade_error = _upgrade_error(error)
+                if upgrade_error.terminal:
+                    raise upgrade_error from error
+                attempt += 1
+                delay = transient_delay_seconds(attempt, random_fn)
+                log(f"WebSocket reconnect in {delay:.2f}s: {upgrade_error}")
+                await sleep(delay)
+                continue
             if (
                 ConnectionClosed is not None
                 and isinstance(error, ConnectionClosed)
-                and (
-                    getattr(error, "code", None)
-                    or getattr(getattr(error, "rcvd", None), "code", None)
-                ) == 4409
             ):
-                raise RelayWebSocketDisconnect("replaced") from error
+                code = (
+                    getattr(getattr(error, "rcvd", None), "code", None)
+                    or getattr(error, "code", None)
+                )
+                reason = (
+                    getattr(getattr(error, "rcvd", None), "reason", None)
+                    or getattr(error, "reason", None)
+                    or "server policy changed"
+                )
+                if (
+                    isinstance(code, int)
+                    and 4400 <= code <= 4499
+                    and code != 4408
+                ):
+                    if code == WEBSOCKET_WEBHOOK_CONFIGURED_CLOSE_CODE:
+                        raise RelayWebhookConfiguredError(
+                            (
+                                "This Agent now delivers by webhook; remove "
+                                "every webhook subscription before reconnecting."
+                            ),
+                            details={
+                                "close_code": code,
+                                "close_reason": reason,
+                            },
+                        ) from error
+                    raise RelayWebSocketDisconnect(
+                        f"server_policy_{code}: {reason}"
+                    ) from error
             attempt += 1
             delay = transient_delay_seconds(attempt, random_fn)
             log(f"WebSocket reconnect in {delay:.2f}s: {error}")

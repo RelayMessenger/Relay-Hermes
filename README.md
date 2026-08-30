@@ -3,8 +3,10 @@
 A Relay platform adapter for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Hermes is an always-on gateway, so this plugin uses Relay's optional WebSocket
-transport.
+Hermes is an always-on gateway, so the plugin connects to Relay by WebSocket.
+The Agent must have no Webhook subscriptions. If it has one, Relay rejects the
+upgrade with HTTP 409 and the plugin stops with a clear
+`relay_webhook_configured` error.
 
 ## Reliability
 
@@ -54,13 +56,6 @@ Then start Hermes:
 hermes gateway start
 ```
 
-On its first connection, the plugin enables:
-
-```http
-PUT /v1/websocket
-{"enabled":true}
-```
-
 It derives `wss://.../v1/websocket` from `RELAY_BASE_URL` and sends the
 long-lived Agent Token only in the WebSocket upgrade header:
 
@@ -73,9 +68,12 @@ WebSocket subprotocol.
 
 Relay reconnects after `heartbeat_timeout`, `restart`, close codes `1011`,
 `1012`, or `4408`, and retryable `ack_failed`/`delivery_failed` errors. It
-stops on `disabled`, `replaced`, or `revoked` so two consumers do not fight for
-one Agent Contact and an operator action is not silently undone. Relay refuses
-to disable WebSocket delivery while any event remains unacknowledged.
+stops on `revoked`, HTTP 409, the dedicated Webhook-configured close code
+`4410`, or any other Relay server-policy close code.
+
+The saved configuration is the path: at least one Webhook subscription means
+Webhook; none means WebSocket. The two paths carry the same event envelope, so
+the durable handler does not change when an Agent moves between them.
 
 ## Configuration
 
@@ -89,6 +87,20 @@ to disable WebSocket delivery while any event remains unacknowledged.
 | `RELAY_GROUP_REPLY_POLICY` | no | `mentions` | `mentions` or `all` |
 | `RELAY_HOME_CHANNEL` | no | | Chat id for cron delivery |
 | `RELAY_HOME_CHANNEL_NAME` | no | | Human label for that Chat |
+
+### Isolated staging
+
+Use a staging Agent Token, a staging API origin, and a separate SQLite
+directory. Never reuse a production token or checkpoint database:
+
+```sh
+export RELAY_AGENT_TOKEN='staging-agent-token'
+export RELAY_BASE_URL='https://api.staging.relayapp.im'
+export RELAY_STATE_DIR="$HOME/.hermes/relay-staging"
+./scripts/run-staging.sh
+```
+
+The same command works on macOS and Linux, including a Daytona workspace.
 
 ## Current Relay contract
 

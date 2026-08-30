@@ -6,11 +6,16 @@ from typing import Any, Dict, List
 
 import pytest
 from hermes_relay_plugin.state import RelayInbox
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosedError, InvalidStatus
+from websockets.frames import Close
+from websockets.http11 import Response
 
 from hermes_relay_plugin.relay_api import (
     RelayClient,
     RelayFullSyncError,
     RelayResponse,
+    RelayWebhookConfiguredError,
     RelayWebSocketClosed,
     RelayWebSocketDisconnect,
     RelayWebSocketError,
@@ -221,27 +226,10 @@ def test_attachment_allocates_with_json_then_puts_raw_bytes():
     }]
 
 
-def test_websocket_settings_have_no_connection_ticket_route():
-    transport = FakeTransport([
-        RelayResponse(200, {
-            "enabled": False,
-            "acked_through": "0",
-            "full_sync_through": None,
-        }),
-        RelayResponse(200, {
-            "enabled": True,
-            "acked_through": "0",
-            "full_sync_through": None,
-        }),
-    ])
-    client = RelayClient(TOKEN, transport=transport)
-    asyncio.run(client.get_websocket_settings())
-    asyncio.run(client.update_websocket(True))
-    assert [call["path"] for call in transport.calls] == [
-        "/v1/websocket",
-        "/v1/websocket",
-    ]
-    assert transport.calls[1]["body"] == {"enabled": True}
+def test_client_has_no_websocket_mode_or_enable_api():
+    client = RelayClient(TOKEN, transport=FakeTransport([]))
+    assert not hasattr(client, "get_websocket_settings")
+    assert not hasattr(client, "update_websocket")
 
 
 def test_full_snapshot_fetches_every_chat_and_message_page():
@@ -329,8 +317,11 @@ class FakeSocket:
 
     async def send(self, raw: str) -> None:
         frame = json.loads(raw)
-        label = "ack" if frame["type"] == "ack" else frame["type"]
-        self.order.append(f"{label}:{frame['through_sequence']}")
+        label = frame["type"]
+        if "through_sequence" in frame:
+            self.order.append(f"{label}:{frame['through_sequence']}")
+        else:
+            self.order.append(label)
         self.sent.append(frame)
 
 
@@ -344,6 +335,7 @@ def test_websocket_commits_before_cumulative_ack():
     with pytest.raises(RelayWebSocketClosed):
         asyncio.run(consume_websocket(socket, inbox=inbox))
     assert order == ["commit:41", "ack:41"]
+    assert inbox.events == [event()]
     assert socket.sent == [{"type": "ack", "through_sequence": "41"}]
 
 
@@ -388,11 +380,10 @@ def test_websocket_honors_error_and_disconnect_frames():
     assert raised.value.terminal is False
 
     for reason in (
-        "disabled",
-        "replaced",
         "revoked",
         "heartbeat_timeout",
         "restart",
+        "webhook_configured",
     ):
         disconnected = FakeSocket([
             ready_frame,
@@ -451,6 +442,25 @@ def test_websocket_requires_ready_exact_keys_and_complete_envelopes():
         ))
 
 
+def test_websocket_replies_to_application_ping_without_moving_checkpoint():
+    order: List[str] = []
+    socket = FakeSocket([
+        ready("40"),
+        {"type": "ping", "sent_at": "2026-08-29T00:00:30Z"},
+        {"type": "event", "sequence": "41", "event": event()},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox(order),
+        ))
+    assert order == ["pong", "commit:41", "ack:41"]
+    assert socket.sent == [
+        {"type": "pong"},
+        {"type": "ack", "through_sequence": "41"},
+    ]
+
+
 class FakeConnectionContext:
     def __init__(self, socket):
         self.socket = socket
@@ -462,7 +472,7 @@ class FakeConnectionContext:
         return None
 
 
-def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
+def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
     ready_frame = ready()
     sockets = [
         FakeSocket([
@@ -475,7 +485,7 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
         ], []),
         FakeSocket([
             ready_frame,
-            {"type": "disconnect", "reason": "disabled"},
+            {"type": "disconnect", "reason": "revoked"},
         ], []),
     ]
 
@@ -487,8 +497,19 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
     connections = []
     sleeps = []
 
-    def connect(url, *, additional_headers):
-        connections.append((url, additional_headers))
+    def connect(
+        url,
+        *,
+        additional_headers,
+        ping_interval,
+        ping_timeout,
+    ):
+        connections.append((
+            url,
+            additional_headers,
+            ping_interval,
+            ping_timeout,
+        ))
         return FakeConnectionContext(sockets[len(connections) - 1])
 
     async def sleep(delay):
@@ -503,7 +524,7 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
             random_fn=lambda: 1.0,
         ))
 
-    assert raised.value.reason == "disabled"
+    assert raised.value.reason == "revoked"
     assert [entry[0] for entry in connections] == [
         "wss://relay.test/v1/websocket",
         "wss://relay.test/v1/websocket",
@@ -515,6 +536,11 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_disabled():
         {"Authorization": f"Bearer {TOKEN}"},
     ]
     assert all("?" not in entry[0] for entry in connections)
+    assert [(entry[2], entry[3]) for entry in connections] == [
+        (30.0, 60.0),
+        (30.0, 60.0),
+        (30.0, 60.0),
+    ]
     assert sleeps == [0.5, 0.5]
 
 
@@ -530,8 +556,19 @@ def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():
     )
     connections = []
 
-    def connect(url, *, additional_headers):
-        connections.append((url, additional_headers))
+    def connect(
+        url,
+        *,
+        additional_headers,
+        ping_interval,
+        ping_timeout,
+    ):
+        connections.append((
+            url,
+            additional_headers,
+            ping_interval,
+            ping_timeout,
+        ))
         return FakeConnectionContext(socket)
 
     with pytest.raises(RelayWebSocketProtocolError):
@@ -543,7 +580,109 @@ def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():
     assert connections == [(
         "wss://relay.test/v1/websocket",
         {"Authorization": f"Bearer {TOKEN}"},
+        30.0,
+        60.0,
     )]
+
+
+def test_websocket_loop_surfaces_webhook_configured_http_409_once():
+    body = json.dumps({
+        "error": {
+            "message": (
+                "This Agent delivers by webhook; delete its webhook "
+                "subscription to use the WebSocket."
+            ),
+        },
+        "trace_id": "trace-webhook-conflict",
+    }).encode()
+    connections = []
+
+    def connect(url, **options):
+        connections.append((url, options))
+        raise InvalidStatus(Response(
+            409,
+            "Conflict",
+            headers=Headers(),
+            body=body,
+        ))
+
+    client = RelayClient(
+        TOKEN,
+        "https://relay.test",
+        transport=FakeTransport([]),
+    )
+    with pytest.raises(RelayWebhookConfiguredError) as raised:
+        asyncio.run(run_websocket_loop(
+            client=client,
+            inbox=OrderedInbox([]),
+            connect_factory=connect,
+        ))
+    assert raised.value.status == 409
+    assert raised.value.trace_id == "trace-webhook-conflict"
+    assert "delete its webhook subscription" in str(raised.value)
+    assert len(connections) == 1
+
+
+def test_websocket_loop_treats_unknown_server_policy_close_as_terminal():
+    class PolicyCloseSocket(FakeSocket):
+        def __aiter__(self):
+            async def iterator():
+                yield json.dumps(ready())
+                raise ConnectionClosedError(
+                    Close(4499, "webhook delivery is now configured"),
+                    None,
+                    None,
+                )
+            return iterator()
+
+    def connect(_url, **_options):
+        return FakeConnectionContext(PolicyCloseSocket([], []))
+
+    client = RelayClient(
+        TOKEN,
+        "https://relay.test",
+        transport=FakeTransport([]),
+    )
+    with pytest.raises(RelayWebSocketDisconnect) as raised:
+        asyncio.run(run_websocket_loop(
+            client=client,
+            inbox=OrderedInbox([]),
+            connect_factory=connect,
+        ))
+    assert raised.value.terminal is True
+    assert "4499" in raised.value.reason
+    assert "webhook delivery is now configured" in raised.value.reason
+
+
+def test_websocket_loop_maps_dedicated_webhook_close_to_clear_error():
+    class WebhookCloseSocket(FakeSocket):
+        def __aiter__(self):
+            async def iterator():
+                yield json.dumps(ready())
+                raise ConnectionClosedError(
+                    Close(4410, "webhook delivery is now configured"),
+                    None,
+                    None,
+                )
+            return iterator()
+
+    def connect(_url, **_options):
+        return FakeConnectionContext(WebhookCloseSocket([], []))
+
+    client = RelayClient(
+        TOKEN,
+        "https://relay.test",
+        transport=FakeTransport([]),
+    )
+    with pytest.raises(RelayWebhookConfiguredError) as raised:
+        asyncio.run(run_websocket_loop(
+            client=client,
+            inbox=OrderedInbox([]),
+            connect_factory=connect,
+        ))
+    assert raised.value.status == 409
+    assert raised.value.details["close_code"] == 4410
+    assert "remove every webhook subscription" in str(raised.value)
 
 
 def test_websocket_replay_is_deduplicated_but_acknowledged_again(tmp_path):

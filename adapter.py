@@ -69,6 +69,7 @@ from .relay_api import (
     RelayApiError,
     RelayClient,
     RelayFullSyncError,
+    RelayWebhookConfiguredError,
     RelayWebSocketDisconnect,
     RelayWebSocketError,
     mentions_agent,
@@ -293,7 +294,7 @@ class RelayAdapter(BasePlatformAdapter):
     # -- Connection lifecycle ----------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """Enable WebSocket delivery and start receive plus inbox processing."""
+        """Connect when this Agent has no Webhook subscription."""
         if not HTTPX_AVAILABLE:
             logger.warning("[%s] httpx is not installed", self.name)
             return False
@@ -305,15 +306,22 @@ class RelayAdapter(BasePlatformAdapter):
             return False
 
         try:
-            # The durable sink must be available before this adapter switches
-            # the Agent Contact from webhooks to WebSocket delivery.
+            # The durable sink must be available before Relay can send an event
+            # that this adapter will cumulatively acknowledge.
             self._inbox.open()
             self._apply_full_snapshot(self._inbox.load_full_snapshot())
             self._client = RelayClient(self._token, self._base_url)
             self._client.open()
-            settings = await self._client.get_websocket_settings()
-            if settings.get("enabled") is not True:
-                await self._client.update_websocket(True)
+        except RelayWebhookConfiguredError as error:
+            self._set_fatal_error(
+                "relay_webhook_configured",
+                str(error),
+                retryable=False,
+            )
+            logger.error("[%s] %s", self.name, error)
+            await self._close_client()
+            self._inbox.close()
+            return False
         except RelayApiError as error:
             if error.kind == "auth":
                 self._set_fatal_error(
@@ -390,7 +398,13 @@ class RelayAdapter(BasePlatformAdapter):
         except asyncio.CancelledError:
             return
         except RelayApiError as error:
-            if error.kind == "auth":
+            if isinstance(error, RelayWebhookConfiguredError):
+                self._set_fatal_error(
+                    "relay_webhook_configured",
+                    str(error),
+                    retryable=False,
+                )
+            elif error.kind == "auth":
                 self._set_fatal_error(
                     "relay_unauthorized",
                     "Relay rejected the Agent Token (401). Check RELAY_AGENT_TOKEN.",
@@ -411,11 +425,21 @@ class RelayAdapter(BasePlatformAdapter):
             )
             self._running = False
         except RelayWebSocketDisconnect as error:
-            self._set_fatal_error(
-                f"relay_websocket_{error.reason}",
-                str(error),
-                retryable=False,
-            )
+            if error.reason == "webhook_configured":
+                self._set_fatal_error(
+                    "relay_webhook_configured",
+                    (
+                        "This Agent now delivers by webhook; remove every "
+                        "webhook subscription before reconnecting."
+                    ),
+                    retryable=False,
+                )
+            else:
+                self._set_fatal_error(
+                    f"relay_websocket_{error.reason}",
+                    str(error),
+                    retryable=False,
+                )
             self._running = False
         except RelayWebSocketError as error:
             self._set_fatal_error(
