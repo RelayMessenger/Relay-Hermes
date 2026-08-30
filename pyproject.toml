@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-relay-plugin"
 version = "1.0.0"
-description = "Relay messenger platform adapter for Hermes Agent"
+description = "Connect Hermes Agent to Relay as an always-on agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
 authors = [{ name = "Companion, Inc." }]
-keywords = ["hermes", "hermes-agent", "relay", "relayapp", "messaging", "agent"]
+keywords = ["hermes", "hermes-agent", "relay", "messaging", "agent", "websocket"]
 classifiers = [
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3.11",
