@@ -58,7 +58,7 @@ def event(*, group: bool = False, mention: bool = False) -> Dict[str, Any]:
         text.update({"mention": "helper", "mention_range": [0, 7]})
     return {
         "api_version": "v1",
-        "webhook_version": "2026-02-03",
+        "webhook_version": "2026-08-30",
         "event_id": EVENT_ID,
         "event_type": "message.received",
         "created_at": "2026-08-29T00:00:00Z",

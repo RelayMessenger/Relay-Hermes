@@ -101,7 +101,7 @@ class FakeClient:
 def relay_event(event_id: str = "event-id") -> Dict[str, Any]:
     return {
         "api_version": "v1",
-        "webhook_version": "2026-02-03",
+        "webhook_version": "2026-08-30",
         "event_type": "message.received",
         "event_id": event_id,
         "created_at": "2026-08-29T00:00:00Z",
