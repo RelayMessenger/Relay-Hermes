@@ -20,6 +20,10 @@ For every event, the plugin:
 The inbox survives a gateway restart. A processing failure returns the row to
 `pending`; it does not move Relay's ACK backward or lose the event.
 
+A cumulative WebSocket ACK, like a webhook HTTP 2xx, acknowledges transport
+only. It never marks a Chat as read. The plugin calls Read only from Hermes's
+processing-start hook for a turn Hermes actually begins.
+
 When Relay reports that the saved checkpoint is outside retention, the plugin:
 
 1. does not ACK any event;
@@ -109,6 +113,7 @@ export RELAY_STATE_DIR="$HOME/.hermes/relay-staging"
 
 ## Current Relay contract
 
+- event envelopes use `api_version: v1` and `webhook_version: 2026-08-30`;
 - incoming Message data is the event's `data` object;
 - Chat id is `data.chat.id`;
 - sender is `data.sender_handle`;

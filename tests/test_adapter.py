@@ -53,6 +53,11 @@ class FakeClient:
         self.calls: List[Dict[str, Any]] = []
         self.uploads: List[Dict[str, Any]] = []
         self.voice_memos: List[Dict[str, str]] = []
+        self.reads: List[str] = []
+        self._transfer_http = None
+
+    async def mark_read(self, chat_id: str) -> None:
+        self.reads.append(chat_id)
 
     async def send_message(
         self,
@@ -224,6 +229,28 @@ def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path
     adapter._inbox.close()
 
 
+def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
+    api = importlib.import_module("hermes_relay_plugin.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    inbound = api.parse_inbound(relay_event("event-read"))
+    assert inbound is not None
+
+    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    assert len(dispatched) == 1
+    assert client.reads == []
+
+    asyncio.run(adapter.on_processing_start(dispatched[0]))
+    assert client.reads == [inbound.chat_id]
+
+
 def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
     plugin,
     tmp_path,
@@ -377,6 +404,8 @@ def test_audio_file_uses_attachment_upload_then_voice_memo_route(
 def test_unmentioned_group_event_is_not_dispatched(plugin, tmp_path):
     api = importlib.import_module("hermes_relay_plugin.relay_api")
     adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
     payload = relay_event()
     payload["data"]["chat"] = {
         "id": payload["data"]["chat"]["id"],
@@ -392,6 +421,7 @@ def test_unmentioned_group_event_is_not_dispatched(plugin, tmp_path):
     inbound = api.parse_inbound(payload)
     assert inbound is not None
     assert asyncio.run(adapter._on_inbound(inbound)) is False
+    assert client.reads == []
 
 
 def test_register_loads_as_a_hermes_platform_plugin(plugin):

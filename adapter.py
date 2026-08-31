@@ -622,12 +622,6 @@ class RelayAdapter(BasePlatformAdapter):
             )
             return False
 
-        if self._client is not None:
-            try:
-                await self._client.mark_read(chat_id)
-            except RelayApiError as exc:
-                logger.debug("[%s] Read receipt failed: %s", self.name, exc)
-
         text = render_text(inbound.message)
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
@@ -662,11 +656,17 @@ class RelayAdapter(BasePlatformAdapter):
         return True
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Bind outbound idempotency to the event Hermes is actually running."""
+        """Bind the turn and send Read when Hermes actually starts processing."""
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
         _TURN_EVENT.set((event_id, 0) if event_id else None)
+        chat_id = str(event.source.chat_id or "")
+        if self._client is not None and chat_id:
+            try:
+                await self._client.mark_read(chat_id)
+            except RelayApiError as exc:
+                logger.debug("[%s] Read receipt failed: %s", self.name, exc)
 
     async def on_processing_complete(
         self,

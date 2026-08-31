@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -15,6 +16,8 @@ from hermes_relay_plugin.relay_api import (
     RelayClient,
     RelayFullSyncError,
     RelayResponse,
+    RELAY_API_VERSION,
+    RELAY_WEBHOOK_VERSION,
     RelayWebhookConfiguredError,
     RelayWebSocketClosed,
     RelayWebSocketDisconnect,
@@ -115,6 +118,14 @@ def test_current_event_parsing_and_mentions():
     assert inbound.agent_handle == "helper"
     assert inbound.sender_name == "Advait"
     assert mentions_agent(inbound.message, handle=inbound.agent_handle)
+
+
+def test_relay_contract_versions_and_product_paths_stay_current():
+    assert RELAY_API_VERSION == "v1"
+    assert RELAY_WEBHOOK_VERSION == "2026-08-30"
+    root = Path(__file__).resolve().parents[1]
+    for name in ("relay_api.py", "adapter.py", "README.md", "plugin.yaml"):
+        assert "/v3" not in (root / name).read_text(encoding="utf-8"), name
 
 
 def test_visible_at_text_is_not_a_structured_mention():
@@ -440,6 +451,31 @@ def test_websocket_requires_ready_exact_keys_and_complete_envelopes():
             FakeSocket(frames, []),
             inbox=OrderedInbox([]),
         ))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("api_version", "v3"),
+        ("webhook_version", "2026-08-31"),
+    ],
+)
+def test_websocket_rejects_noncurrent_event_contract(field, value):
+    invalid = event()
+    invalid[field] = value
+    order: List[str] = []
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": invalid},
+    ], order)
+
+    with pytest.raises(RelayWebSocketProtocolError, match="invalid event"):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox(order),
+        ))
+    assert order == []
+    assert socket.sent == []
 
 
 def test_websocket_replies_to_application_ping_without_moving_checkpoint():
