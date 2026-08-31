@@ -33,6 +33,8 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.relayapp.im"
+RELAY_API_VERSION = "v1"
+RELAY_WEBHOOK_VERSION = "2026-08-30"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
 MAX_PARTS_PER_MESSAGE = 100
@@ -698,7 +700,7 @@ async def consume_websocket(
     on_ready: Callable[[], Any] = lambda: None,
     on_full_sync: Optional[FullSyncHandler] = None,
 ) -> None:
-    """Consume one connection, commit before cumulative ACK, and never process."""
+    """Commit before cumulative ACK; transport ACK never processes or Reads."""
 
     ready = False
     accepted_through: Optional[int] = None
@@ -865,8 +867,8 @@ async def consume_websocket(
             )
         if (
             not isinstance(event, dict)
-            or event.get("api_version") != "v1"
-            or not isinstance(event.get("webhook_version"), str)
+            or event.get("api_version") != RELAY_API_VERSION
+            or event.get("webhook_version") != RELAY_WEBHOOK_VERSION
             or event.get("event_type") not in _WEBHOOK_EVENT_TYPES
             or not isinstance(event.get("event_id"), str)
             or _UUID_PATTERN.fullmatch(event["event_id"]) is None
