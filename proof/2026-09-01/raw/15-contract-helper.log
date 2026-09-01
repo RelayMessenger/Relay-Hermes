@@ -1,0 +1,7 @@
+openapi_contract=pass commit=9b4d5bb32cc749c6fd271969948c385300d404d6 sha256=f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5 required_paths=5 websocket_frames=9
+scripts/run-staging.sh: 4: RELAY_AGENT_TOKEN: Set a staging RELAY_AGENT_TOKEN first.
+Refusing to start: RELAY_BASE_URL must be https://api.staging.relayapp.im
+staging_helper=pass no_token_rc=2 wrong_origin_rc=2
+workflow_static=pass file=.github/workflows/ci.yml
+workflow_static=pass file=.github/workflows/publish-rc.yml
+release_chain_static=pass canonical_repo=RelayMessenger/Relay-Hermes

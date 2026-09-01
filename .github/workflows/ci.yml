@@ -4,15 +4,23 @@ on:
   pull_request:
   push:
     branches: [main, staging]
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: Exact commit to validate; defaults to the event SHA
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.commit_sha || github.ref }}
   cancel-in-progress: true
 
 env:
+  SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
   HERMES_AGENT_COMMIT: 04224b2f82aabbe89525451089eb2677edfae179
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
   EXPECTED_PACKAGE_VERSION: 1.0.0rc1
@@ -21,7 +29,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
     strategy:
@@ -30,8 +38,22 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
-      - name: Check out the plugin
+      - name: Check out the exact plugin source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the exact source SHA
+        run: |
+          case "$SOURCE_SHA" in
+            (""|*[!0-9a-f]*)
+              echo "SOURCE_SHA must be a lowercase hexadecimal commit SHA" >&2
+              exit 2
+              ;;
+          esac
+          test "${#SOURCE_SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Check out the pinned Hermes source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -52,23 +74,106 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install the package and test dependencies
+      - name: Install package and validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build
+          python -m pip install "build==1.3.0" "PyYAML==6.0.3" "rich==15.0.0"
           python -m pip install -e ".[dev]"
           python -m pip check
 
-      - name: Run tests against Hermes
+      - name: Run the full Hermes integration suite
         run: python -m pytest -q
 
-      - name: Build and install the wheel
+      - name: Run Hermes Plugin Doctor
+        run: |
+          cd "$HERMES_AGENT_SRC"
+          PYTHONPATH="$HERMES_AGENT_SRC" python - <<'PY'
+          import os
+          from hermes_cli.plugins_cmd import cmd_plugin_doctor
+
+          cmd_plugin_doctor(os.environ["GITHUB_WORKSPACE"], ci=True)
+          PY
+
+      - name: Test the staging helper fail-closed guards
+        run: |
+          sh -n scripts/run-staging.sh
+          set +e
+          env -u RELAY_AGENT_TOKEN sh scripts/run-staging.sh >"$RUNNER_TEMP/no-token.log" 2>&1
+          no_token_rc=$?
+          RELAY_AGENT_TOKEN=dummy RELAY_BASE_URL=https://api.relayapp.im sh scripts/run-staging.sh >"$RUNNER_TEMP/wrong-origin.log" 2>&1
+          wrong_origin_rc=$?
+          set -e
+          test "$no_token_rc" -ne 0
+          test "$wrong_origin_rc" -eq 2
+
+      - name: Build wheel and sdist
         run: |
           python -m build
           test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
           test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
-          clean_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
-          python -m venv "$clean_venv"
-          "$clean_venv/bin/python" -m pip install "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
-          "$clean_venv/bin/python" -m pip check
-          "$clean_venv/bin/python" -c "import os; from importlib.metadata import version; assert version('relay-hermes') == os.environ['EXPECTED_PACKAGE_VERSION']"
+          tar -tzf "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz" |
+            grep "/scripts/check-openapi.py$"
+
+      - name: Clean-install wheel and sdist
+        run: |
+          wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
+          sdist_venv="${RUNNER_TEMP}/relay-hermes-sdist-${MATRIX_PYTHON_VERSION}"
+          python -m venv "$wheel_venv"
+          python -m venv "$sdist_venv"
+          "$wheel_venv/bin/python" -m pip install \
+            "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl" \
+            "PyYAML==6.0.3" "rich==15.0.0" "requests>=2"
+          "$sdist_venv/bin/python" -m pip install \
+            "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
+          "$wheel_venv/bin/python" -m pip check
+          "$sdist_venv/bin/python" -m pip check
+          for clean_venv in "$wheel_venv" "$sdist_venv"; do
+            (
+              cd "$RUNNER_TEMP"
+              "$clean_venv/bin/python" - <<'PY'
+          import os
+          from importlib.metadata import entry_points, version
+
+          installed = version("relay-hermes")
+          assert installed == os.environ["EXPECTED_PACKAGE_VERSION"]
+          entrypoint = next(
+              item
+              for item in entry_points().select(group="hermes_agent.plugins")
+              if item.name == "relay-hermes"
+          )
+          assert entrypoint.value == "relay_hermes"
+          assert callable(entrypoint.load().register)
+          PY
+            )
+          done
+
+      - name: Run Hermes against the clean wheel
+        run: |
+          wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
+          hermes_home="${RUNNER_TEMP}/hermes-wheel-home-${MATRIX_PYTHON_VERSION}"
+          mkdir -p "$hermes_home"
+          printf 'plugins:\n  enabled:\n    - relay-hermes\n' > "$hermes_home/config.yaml"
+          cd "$HERMES_AGENT_SRC"
+          HERMES_HOME="$hermes_home" \
+          RELAY_AGENT_TOKEN=relay-test-token \
+          RELAY_BASE_URL=https://api.staging.relayapp.im \
+          RELAY_STATE_DIR="$hermes_home/relay-state" \
+          PYTHONPATH="$HERMES_AGENT_SRC" \
+          "$wheel_venv/bin/python" - <<'PY'
+          from gateway.platform_registry import platform_registry
+          from hermes_cli.plugins import PluginManager
+
+          manager = PluginManager()
+          manager.discover_and_load()
+          plugin = next(
+              item
+              for item in manager.list_plugins()
+              if item["name"] == "relay-hermes"
+              and item["source"] == "entrypoint"
+          )
+          entry = platform_registry.get("relayapp")
+          assert plugin["enabled"] is True
+          assert plugin["error"] is None
+          assert entry is not None
+          assert entry.required_env == ["RELAY_AGENT_TOKEN"]
+          PY

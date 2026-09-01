@@ -9,6 +9,7 @@ import pytest
 
 from relay_hermes.state import (
     STATE_BINDING_FILENAME,
+    STATE_DIRECTORY_MODE,
     RelayInbox,
     RelayStateBinding,
     RelayStateBindingError,
@@ -182,8 +183,87 @@ def test_invalid_full_snapshot_does_not_replace_last_good_checkpoint(tmp_path):
 def test_inbox_is_owner_only(tmp_path):
     path = tmp_path / "inbox.sqlite3"
     open_inbox(path).close()
+    assert os.stat(path.parent).st_mode & 0o777 == STATE_DIRECTORY_MODE
     assert os.stat(path).st_mode & 0o777 == 0o600
     assert os.stat(path.parent / STATE_BINDING_FILENAME).st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode")
+def test_preexisting_permissive_state_directory_is_forced_to_owner_only(tmp_path):
+    state_dir = tmp_path / "relay"
+    path = state_dir / "inbox.sqlite3"
+    open_inbox(path).close()
+    os.chmod(state_dir, 0o777)
+
+    open_inbox(path).close()
+
+    assert os.stat(state_dir).st_mode & 0o777 == STATE_DIRECTORY_MODE
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow directory open")
+def test_state_directory_symlink_is_refused_without_chmodding_target(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    os.chmod(target, 0o777)
+    state_dir = tmp_path / "relay"
+    state_dir.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RelayStateBindingError, match="real directory"):
+        open_inbox(state_dir / "inbox.sqlite3")
+
+    assert os.stat(target).st_mode & 0o777 == 0o777
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor identity")
+def test_replacement_during_directory_chmod_is_detected_without_touching_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir = tmp_path / "relay"
+    state_dir.mkdir()
+    os.chmod(state_dir, 0o777)
+    displaced = tmp_path / "relay-displaced"
+    real_fchmod = os.fchmod
+    replaced = False
+
+    def replace_after_fchmod(descriptor, mode):
+        nonlocal replaced
+        real_fchmod(descriptor, mode)
+        if mode == STATE_DIRECTORY_MODE and not replaced:
+            replaced = True
+            state_dir.rename(displaced)
+            state_dir.mkdir()
+            os.chmod(state_dir, 0o777)
+
+    monkeypatch.setattr(os, "fchmod", replace_after_fchmod)
+
+    with pytest.raises(RelayStateBindingError, match="replaced during use"):
+        open_inbox(state_dir / "inbox.sqlite3")
+
+    assert os.stat(displaced).st_mode & 0o777 == STATE_DIRECTORY_MODE
+    assert os.stat(state_dir).st_mode & 0o777 == 0o777
+    assert list(state_dir.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor identity")
+def test_replacement_after_open_blocks_state_access(tmp_path):
+    state_dir = tmp_path / "relay"
+    path = state_dir / "inbox.sqlite3"
+    inbox = open_inbox(path)
+    displaced = tmp_path / "relay-displaced"
+    state_dir.rename(displaced)
+    state_dir.mkdir()
+    os.chmod(state_dir, 0o777)
+
+    with pytest.raises(RelayStateBindingError, match="replaced during use"):
+        inbox.event_count()
+
+    assert not (state_dir / STATE_BINDING_FILENAME).exists()
+    assert not path.exists()
+    assert (displaced / STATE_BINDING_FILENAME).exists()
+    assert (displaced / "inbox.sqlite3").exists()
+    inbox.close()
 
 
 def test_directory_and_database_store_only_non_secret_account_binding(tmp_path):

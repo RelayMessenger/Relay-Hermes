@@ -89,6 +89,17 @@ def test_public_repository_metadata_is_canonical(manifest):
     assert manifest["homepage"] == canonical
     assert canonical in (root / "README.md").read_text(encoding="utf-8")
     assert canonical in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "RelayMessenger/Relay-Hermes" in (
+        root / ".github" / "workflows" / "publish-rc.yml"
+    ).read_text(encoding="utf-8")
+    public_files = [
+        root / "README.md",
+        root / "plugin.yaml",
+        root / "pyproject.toml",
+        *sorted((root / ".github" / "workflows").glob("*.yml")),
+    ]
+    for path in public_files:
+        assert "hermes-relay-plugin" not in path.read_text(encoding="utf-8")
 
 
 def test_pip_entrypoint_uses_current_hermes_module_convention():
@@ -120,7 +131,11 @@ def test_hosted_workflows_pin_every_external_action_to_a_sha():
         text = path.read_text(encoding="utf-8")
         uses = uses_pattern.findall(text)
         assert uses, path.name
-        assert all(sha_pattern.fullmatch(value) for value in uses), path.name
+        external = [value for value in uses if not value.startswith("./")]
+        assert all(
+            sha_pattern.fullmatch(value)
+            for value in external
+        ), path.name
         parsed = yaml.safe_load(text)
         for job in parsed["jobs"].values():
             for step in job.get("steps", []):
@@ -130,13 +145,38 @@ def test_hosted_workflows_pin_every_external_action_to_a_sha():
 def test_rc_publish_is_manual_exact_sha_staging_only():
     path = MANIFEST.parent / ".github" / "workflows" / "publish-rc.yml"
     text = path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(text)
+    jobs = parsed["jobs"]
     assert "workflow_dispatch:" in text
     assert "github.ref == 'refs/heads/staging'" in text
+    assert "github.repository == 'RelayMessenger/Relay-Hermes'" in text
     assert 'environment: pypi-rc' in text
     assert 'test "$EXPECTED_SHA" = "$EVENT_SHA"' in text
     assert "id-token: write" in text
     assert "attest-build-provenance@" in text
     assert "password:" not in text
+    assert jobs["validate"]["needs"] == "preflight"
+    assert jobs["validate"]["uses"] == "./.github/workflows/ci.yml"
+    assert jobs["contract"]["needs"] == "validate"
+    assert jobs["build"]["needs"] == "contract"
+    assert jobs["publish"]["needs"] == "build"
+    assert "RELAY_CONTRACT_READ_TOKEN" in text
+    assert "scripts/check-openapi.py" in text
+    assert text.count("environment: release-candidate") == 2
+    assert 'case "$EXPECTED_SHA" in' in text
+    assert 'test "${#EXPECTED_SHA}" -eq 40' in text
+
+
+def test_reusable_ci_covers_full_release_compatibility():
+    path = MANIFEST.parent / ".github" / "workflows" / "ci.yml"
+    text = path.read_text(encoding="utf-8")
+    assert "workflow_call:" in text
+    assert 'python-version: ["3.11", "3.12", "3.13"]' in text
+    assert "Run the full Hermes integration suite" in text
+    assert "Run Hermes Plugin Doctor" in text
+    assert "Test the staging helper fail-closed guards" in text
+    assert "Clean-install wheel and sdist" in text
+    assert "Run Hermes against the clean wheel" in text
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])

@@ -1,0 +1,272 @@
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=68
+* Getting build dependencies for sdist...
+running egg_info
+creating relay_hermes.egg-info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+* Building sdist...
+running sdist
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+running check
+creating relay_hermes-1.0.0rc1
+creating relay_hermes-1.0.0rc1/relay_hermes.egg-info
+creating relay_hermes-1.0.0rc1/scripts
+creating relay_hermes-1.0.0rc1/tests
+copying files to relay_hermes-1.0.0rc1...
+copying LICENSE -> relay_hermes-1.0.0rc1
+copying MANIFEST.in -> relay_hermes-1.0.0rc1
+copying README.md -> relay_hermes-1.0.0rc1
+copying __init__.py -> relay_hermes-1.0.0rc1
+copying adapter.py -> relay_hermes-1.0.0rc1
+copying plugin.yaml -> relay_hermes-1.0.0rc1
+copying pyproject.toml -> relay_hermes-1.0.0rc1
+copying relay_api.py -> relay_hermes-1.0.0rc1
+copying state.py -> relay_hermes-1.0.0rc1
+copying relay_hermes.egg-info/PKG-INFO -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/SOURCES.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/dependency_links.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/entry_points.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/requires.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/top_level.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying scripts/check-openapi.py -> relay_hermes-1.0.0rc1/scripts
+copying scripts/run-staging.sh -> relay_hermes-1.0.0rc1/scripts
+copying tests/conftest.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_adapter.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_hermes_runtime.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_plugin_manifest.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_relay_api.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_state.py -> relay_hermes-1.0.0rc1/tests
+Writing relay_hermes-1.0.0rc1/setup.cfg
+Creating tar archive
+removing 'relay_hermes-1.0.0rc1' (and everything under it)
+* Building wheel from sdist
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=68
+* Getting build dependencies for wheel...
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+* Building wheel...
+running bdist_wheel
+running build
+running build_py
+creating build/lib/relay_hermes
+copying ./__init__.py -> build/lib/relay_hermes
+copying ./adapter.py -> build/lib/relay_hermes
+copying ./relay_api.py -> build/lib/relay_hermes
+copying ./state.py -> build/lib/relay_hermes
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+copying ./plugin.yaml -> build/lib/relay_hermes
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64/wheel
+creating build/bdist.linux-x86_64/wheel/relay_hermes
+copying build/lib/relay_hermes/__init__.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/adapter.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/relay_api.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/state.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/plugin.yaml -> build/bdist.linux-x86_64/wheel/./relay_hermes
+running install_egg_info
+Copying relay_hermes.egg-info to build/bdist.linux-x86_64/wheel/./relay_hermes-1.0.0rc1-py3.13.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/relay_hermes-1.0.0rc1.dist-info/WHEEL
+creating '/home/daytona/relay-hermes/dist/.tmp-6dtypb0a/relay_hermes-1.0.0rc1-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'relay_hermes/__init__.py'
+adding 'relay_hermes/adapter.py'
+adding 'relay_hermes/plugin.yaml'
+adding 'relay_hermes/relay_api.py'
+adding 'relay_hermes/state.py'
+adding 'relay_hermes-1.0.0rc1.dist-info/licenses/LICENSE'
+adding 'relay_hermes-1.0.0rc1.dist-info/METADATA'
+adding 'relay_hermes-1.0.0rc1.dist-info/WHEEL'
+adding 'relay_hermes-1.0.0rc1.dist-info/entry_points.txt'
+adding 'relay_hermes-1.0.0rc1.dist-info/top_level.txt'
+adding 'relay_hermes-1.0.0rc1.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
+Successfully built relay_hermes-1.0.0rc1.tar.gz and relay_hermes-1.0.0rc1-py3-none-any.whl
+f9aaade72ea13bf999bcb8e520c606307c990a207eac912ec91c7a143e9c3dc5  dist/relay_hermes-1.0.0rc1-py3-none-any.whl
+2514c1cce2be390da4a332e521a919378bd6dff5cdf0724f58ae4a747cb96999  dist/relay_hermes-1.0.0rc1.tar.gz
+     1803  2026-09-01 08:15   relay_hermes/plugin.yaml
+relay_hermes-1.0.0rc1/plugin.yaml
+relay_hermes-1.0.0rc1/scripts/check-openapi.py
+relay_hermes-1.0.0rc1/scripts/run-staging.sh
+relay_hermes-1.0.0rc1/tests/conftest.py
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/final-wheel-3.11
+Activate with: source /home/daytona/final-wheel-3.11/bin/activate
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/final-sdist-3.11
+Activate with: source /home/daytona/final-sdist-3.11/bin/activate
+Using Python 3.11.14 environment at: /home/daytona/final-wheel-3.11
+Resolved 17 packages in 34ms
+Prepared 4 packages in 11ms
+Installed 17 packages in 15ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/final-sdist-3.11
+Resolved 9 packages in 7ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1.tar.gz
+      Built relay-hermes @ file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1.tar.gz
+Prepared 1 package in 489ms
+Installed 9 packages in 5ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/final-wheel-3.11
+Checked 17 packages in 28ms
+All installed packages are compatible
+Using Python 3.11.14 environment at: /home/daytona/final-sdist-3.11
+Checked 9 packages in 28ms
+All installed packages are compatible
+clean_install=pass python=3.11.14 version=1.0.0rc1
+clean_install=pass python=3.11.14 version=1.0.0rc1
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/final-wheel-3.12
+Activate with: source /home/daytona/final-wheel-3.12/bin/activate
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/final-sdist-3.12
+Activate with: source /home/daytona/final-sdist-3.12/bin/activate
+Using Python 3.12.12 environment at: /home/daytona/final-wheel-3.12
+Resolved 17 packages in 14ms
+Prepared 1 package in 7ms
+Installed 17 packages in 14ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/final-sdist-3.12
+Resolved 9 packages in 3ms
+Installed 9 packages in 5ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/final-wheel-3.12
+Checked 17 packages in 23ms
+All installed packages are compatible
+Using Python 3.12.12 environment at: /home/daytona/final-sdist-3.12
+Checked 9 packages in 20ms
+All installed packages are compatible
+clean_install=pass python=3.12.12 version=1.0.0rc1
+clean_install=pass python=3.12.12 version=1.0.0rc1
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/final-wheel-3.13
+Activate with: source /home/daytona/final-wheel-3.13/bin/activate
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/final-sdist-3.13
+Activate with: source /home/daytona/final-sdist-3.13/bin/activate
+Using Python 3.13.11 environment at: /home/daytona/final-wheel-3.13
+Resolved 16 packages in 11ms
+Prepared 1 package in 7ms
+Installed 16 packages in 12ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/final-sdist-3.13
+Resolved 8 packages in 3ms
+Installed 8 packages in 6ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/final-wheel-3.13
+Checked 16 packages in 20ms
+All installed packages are compatible
+Using Python 3.13.11 environment at: /home/daytona/final-sdist-3.13
+Checked 8 packages in 26ms
+All installed packages are compatible
+clean_install=pass python=3.13.11 version=1.0.0rc1
+clean_install=pass python=3.13.11 version=1.0.0rc1

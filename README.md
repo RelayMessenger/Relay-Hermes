@@ -34,6 +34,8 @@ The state directory and SQLite database are bound to one Relay account using
 the normalized API origin and a one-way Agent Token fingerprint. The token is
 never written to state. Changing the token or API origin while reusing a state
 directory fails before startup requeues work or reads a FULL-sync snapshot.
+On POSIX systems the directory is forced to mode `0700`, including when it
+already exists; symlinks and directory replacement during use are refused.
 Use a separate `RELAY_STATE_DIR` for every staging or production Agent.
 Pre-binding databases are not adopted automatically; move one aside only after
 accounting for its pending work.

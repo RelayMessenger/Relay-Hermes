@@ -1,0 +1,120 @@
+Linux e4ebee80-2d36-473a-851b-a98d6b59f057 6.8.0-85-generic #85-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep 18 15:26:59 UTC 2025 x86_64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.5
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+architecture=x86_64
+6e90826169291e53fb875998f79196520877216419644dac0f61eebfe3b00478  /home/daytona/relay-hermes-source.tar.gz
+f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5  /home/daytona/relay-openapi.yaml
+Cloning into '/home/daytona/hermes-agent'...
+From https://github.com/NousResearch/hermes-agent
+ * branch                04224b2f82aabbe89525451089eb2677edfae179 -> FETCH_HEAD
+HEAD is now at 04224b2f8 fmt(js): `npm run fix` on merge (#100096)
+Downloading cpython-3.13.11-linux-x86_64-gnu (download) (33.4MiB)
+Downloading cpython-3.11.14-linux-x86_64-gnu (download) (29.8MiB)
+Downloading cpython-3.12.12-linux-x86_64-gnu (download) (32.3MiB)
+ Downloaded cpython-3.12.12-linux-x86_64-gnu (download)
+ Downloaded cpython-3.13.11-linux-x86_64-gnu (download)
+ Downloaded cpython-3.11.14-linux-x86_64-gnu (download)
+Installed 3 versions in 1.56s
+ + cpython-3.11.14-linux-x86_64-gnu (python3.11)
+ + cpython-3.12.12-linux-x86_64-gnu (python3.12)
+ + cpython-3.13.11-linux-x86_64-gnu (python3.13)
+warning: `/home/daytona/.local/bin` is not on your PATH. To use installed Python executables, run `export PATH="/home/daytona/.local/bin:$PATH"` or `uv python update-shell`.
+Using CPython 3.11.14
+Creating virtual environment at: relay-hermes/.venv-3.11
+Activate with: source relay-hermes/.venv-3.11/bin/activate
+Using Python 3.11.14 environment at: relay-hermes/.venv-3.11
+Resolved 20 packages in 78ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes
+Downloading pygments (1.2MiB)
+ Downloaded pygments
+      Built relay-hermes @ file:///home/daytona/relay-hermes
+Prepared 20 packages in 868ms
+Installed 20 packages in 75ms
+ + anyio==4.14.2
+ + build==1.3.0
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + iniconfig==2.3.0
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + packaging==26.3
+ + pluggy==1.6.0
+ + pygments==2.21.0
+ + pyproject-hooks==1.2.0
+ + pytest==9.1.1
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes)
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Python 3.11.14
+Using CPython 3.12.12
+Creating virtual environment at: relay-hermes/.venv-3.12
+Activate with: source relay-hermes/.venv-3.12/bin/activate
+Using Python 3.12.12 environment at: relay-hermes/.venv-3.12
+Resolved 20 packages in 21ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes
+      Built relay-hermes @ file:///home/daytona/relay-hermes
+Prepared 3 packages in 794ms
+Installed 20 packages in 19ms
+ + anyio==4.14.2
+ + build==1.3.0
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + iniconfig==2.3.0
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + packaging==26.3
+ + pluggy==1.6.0
+ + pygments==2.21.0
+ + pyproject-hooks==1.2.0
+ + pytest==9.1.1
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes)
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Python 3.12.12
+Using CPython 3.13.11
+Creating virtual environment at: relay-hermes/.venv-3.13
+Activate with: source relay-hermes/.venv-3.13/bin/activate
+Using Python 3.13.11 environment at: relay-hermes/.venv-3.13
+Resolved 19 packages in 12ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes
+      Built relay-hermes @ file:///home/daytona/relay-hermes
+Prepared 3 packages in 802ms
+Installed 19 packages in 20ms
+ + anyio==4.14.2
+ + build==1.3.0
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + iniconfig==2.3.0
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + packaging==26.3
+ + pluggy==1.6.0
+ + pygments==2.21.0
+ + pyproject-hooks==1.2.0
+ + pytest==9.1.1
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes)
+ + rich==15.0.0
+ + websockets==17.1
+Python 3.13.11

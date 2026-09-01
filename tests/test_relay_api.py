@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import runpy
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -130,6 +131,11 @@ def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_OPENAPI_SHA256 == (
         "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5"
     )
+    contract_harness = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
+    )
+    assert contract_harness["RELAY_OPENAPI_COMMIT"] == RELAY_OPENAPI_COMMIT
+    assert contract_harness["RELAY_OPENAPI_SHA256"] == RELAY_OPENAPI_SHA256
     root = Path(__file__).resolve().parents[1]
     shipped = ("relay_api.py", "adapter.py", "README.md", "plugin.yaml")
     for name in shipped:

@@ -18,6 +18,8 @@ DEFAULT_STATE_DIR = "~/.hermes/relay"
 STATE_FILENAME = "inbox.sqlite3"
 STATE_BINDING_FILENAME = ".relay-account.json"
 STATE_BINDING_SCHEMA = "relay-hermes-state-account/v1"
+STATE_DIRECTORY_MODE = 0o700
+STATE_FILE_MODE = 0o600
 
 
 class RelayStateBindingError(RuntimeError):
@@ -146,30 +148,39 @@ class RelayInbox:
         *,
         binding: Optional[RelayStateBinding],
     ) -> None:
-        self.path = path
-        self.binding_path = path.parent / STATE_BINDING_FILENAME
+        self.path = Path(os.path.abspath(os.fspath(path)))
+        self.binding_path = self.path.parent / STATE_BINDING_FILENAME
         self._binding = binding
         self._db: Optional[sqlite3.Connection] = None
+        self._directory_fd: Optional[int] = None
 
     def open(self) -> "RelayInbox":
         if self._db is not None:
+            self._assert_bound()
             return self
         if self._binding is None:
             raise RelayStateBindingError(
                 "Relay state requires RELAY_AGENT_TOKEN account binding"
             )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        directory_binding = self._read_directory_binding()
-        if (
-            directory_binding is not None
-            and not self._binding.matches(directory_binding)
-        ):
-            self._raise_mismatch()
-
-        db = sqlite3.connect(self.path)
-        if os.name != "nt":
-            os.chmod(self.path, 0o600)
+        self.path.parent.mkdir(
+            mode=STATE_DIRECTORY_MODE,
+            parents=True,
+            exist_ok=True,
+        )
+        self._open_state_directory()
+        db: Optional[sqlite3.Connection] = None
         try:
+            directory_binding = self._read_directory_binding()
+            if (
+                directory_binding is not None
+                and not self._binding.matches(directory_binding)
+            ):
+                self._raise_mismatch()
+
+            self._assert_state_directory()
+            db = sqlite3.connect(self.path)
+            self._assert_state_directory()
+            self._chmod_state_file(STATE_FILENAME, STATE_FILE_MODE)
             db.execute("PRAGMA foreign_keys=ON")
             database_binding, database_objects = self._read_database_binding(db)
             if (
@@ -188,6 +199,7 @@ class RelayInbox:
                 if not self._binding.matches(directory_binding):
                     self._raise_mismatch()
 
+            self._assert_state_directory()
             with db:
                 db.execute(
                     """
@@ -214,6 +226,7 @@ class RelayInbox:
                         self._binding.account_fingerprint,
                     ),
                 )
+                self._assert_state_directory()
 
             database_binding, _ = self._read_database_binding(db)
             if (
@@ -222,10 +235,13 @@ class RelayInbox:
             ):
                 self._raise_mismatch()
 
+            self._assert_state_directory()
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=FULL")
             with db:
+                self._assert_state_directory()
                 self._create_schema(db)
+                self._assert_state_directory()
                 # A previous gateway process cannot still own its in-memory
                 # Hermes task. Identity checks must happen before this requeue.
                 db.execute(
@@ -235,16 +251,112 @@ class RelayInbox:
                     WHERE status IN ('processing', 'dispatched')
                     """
                 )
+                self._assert_state_directory()
+            self._assert_state_directory()
             self._db = db
             self._assert_bound()
             if os.name != "nt":
-                os.chmod(self.path, 0o600)
-                os.chmod(self.binding_path, 0o600)
+                self._chmod_state_file(STATE_FILENAME, STATE_FILE_MODE)
+                self._chmod_state_file(
+                    STATE_BINDING_FILENAME,
+                    STATE_FILE_MODE,
+                )
             return self
         except Exception:
-            db.close()
+            if db is not None:
+                db.close()
             self._db = None
+            self._close_state_directory()
             raise
+
+    def _open_state_directory(self) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path.parent, flags)
+        except OSError as exc:
+            raise RelayStateBindingError(
+                "Relay state directory must be a real directory"
+            ) from exc
+        self._directory_fd = descriptor
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RelayStateBindingError(
+                    "Relay state directory must be a real directory"
+                )
+            os.fchmod(descriptor, STATE_DIRECTORY_MODE)
+            self._assert_state_directory()
+        except Exception:
+            self._close_state_directory()
+            raise
+
+    def _close_state_directory(self) -> None:
+        if self._directory_fd is not None:
+            os.close(self._directory_fd)
+            self._directory_fd = None
+
+    def _assert_state_directory(self) -> None:
+        if os.name == "nt":
+            return
+        descriptor = self._directory_fd
+        if descriptor is None:
+            raise RelayStateBindingError("Relay state directory is not open")
+        try:
+            opened = os.fstat(descriptor)
+            current = os.stat(self.path.parent, follow_symlinks=False)
+        except OSError as exc:
+            raise RelayStateBindingError(
+                "Relay state directory was replaced during use"
+            ) from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            raise RelayStateBindingError(
+                "Relay state directory was replaced during use"
+            )
+        if stat.S_IMODE(opened.st_mode) != STATE_DIRECTORY_MODE:
+            raise RelayStateBindingError(
+                "Relay state directory permissions changed during use"
+            )
+
+    def _state_file_open_args(self, filename: str) -> Tuple[Any, Dict[str, Any]]:
+        if os.name != "nt" and self._directory_fd is not None:
+            return filename, {"dir_fd": self._directory_fd}
+        return self.path.parent / filename, {}
+
+    def _chmod_state_file(self, filename: str, mode: int) -> None:
+        if os.name == "nt":
+            return
+        self._assert_state_directory()
+        target, options = self._state_file_open_args(filename)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(target, flags, **options)
+        except OSError as exc:
+            raise RelayStateBindingError(
+                f"Relay state file {filename!r} cannot be opened safely"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RelayStateBindingError(
+                    f"Relay state file {filename!r} is not regular"
+                )
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+        self._assert_state_directory()
 
     @staticmethod
     def _create_schema(db: sqlite3.Connection) -> None:
@@ -308,11 +420,13 @@ class RelayInbox:
         )
 
     def _read_directory_binding(self) -> Optional[RelayStateBinding]:
+        self._assert_state_directory()
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        target, options = self._state_file_open_args(STATE_BINDING_FILENAME)
         try:
-            descriptor = os.open(self.binding_path, flags)
+            descriptor = os.open(target, flags, **options)
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -320,20 +434,26 @@ class RelayInbox:
                 "Relay state account binding cannot be read safely"
             ) from exc
         try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
+                    raise RelayStateBindingError(
+                        "Relay state account binding is malformed"
+                    )
+                with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                    descriptor = -1
+                    raw = handle.read(16_385)
+            except UnicodeError as exc:
                 raise RelayStateBindingError(
                     "Relay state account binding is malformed"
-                )
-            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                descriptor = -1
-                raw = handle.read(16_385)
+                ) from exc
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+        self._assert_state_directory()
         try:
             parsed = json.loads(raw)
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             raise RelayStateBindingError(
                 "Relay state account binding is malformed"
             ) from exc
@@ -358,8 +478,15 @@ class RelayInbox:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        self._assert_state_directory()
+        target, options = self._state_file_open_args(STATE_BINDING_FILENAME)
         try:
-            descriptor = os.open(self.binding_path, flags, 0o600)
+            descriptor = os.open(
+                target,
+                flags,
+                STATE_FILE_MODE,
+                **options,
+            )
         except FileExistsError:
             raced = self._read_directory_binding()
             if raced is None:  # pragma: no cover - concurrent unlink
@@ -376,6 +503,7 @@ class RelayInbox:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+        self._assert_state_directory()
         return binding
 
     @staticmethod
@@ -433,6 +561,7 @@ class RelayInbox:
             raise RuntimeError("Relay inbox is not open")
         if binding is None:  # pragma: no cover - open() rejects this
             raise RelayStateBindingError("Relay state account binding is required")
+        self._assert_state_directory()
         directory_binding = self._read_directory_binding()
         database_binding, _ = self._read_database_binding(db)
         if (
@@ -447,6 +576,7 @@ class RelayInbox:
         if self._db is not None:
             self._db.close()
             self._db = None
+        self._close_state_directory()
 
     def _connection(self) -> sqlite3.Connection:
         if self._db is None:
