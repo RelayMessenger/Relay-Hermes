@@ -4,4 +4,4 @@ Refusing to start: RELAY_BASE_URL must be https://api.staging.relayapp.im
 staging_helper=pass no_token_rc=2 wrong_origin_rc=2
 workflow_static=pass file=.github/workflows/ci.yml
 workflow_static=pass file=.github/workflows/publish-rc.yml
-release_chain_static=pass canonical_repo=RelayMessenger/Relay-Hermes
+artifact_lineage_static=pass one_build=true exact_download_rehash_publish=true

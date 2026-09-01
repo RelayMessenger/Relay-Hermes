@@ -15,7 +15,6 @@ case "$RELAY_BASE_URL" in
     ;;
 esac
 
-mkdir -p "$RELAY_STATE_DIR"
-chmod 700 "$RELAY_STATE_DIR"
-
+# RelayInbox owns state-directory creation, no-follow validation, account
+# binding, and mode enforcement after Hermes loads the adapter.
 exec hermes gateway run

@@ -1,31 +1,31 @@
-# Relay-Hermes follow-up audit evidence (2026-09-01)
+# Relay-Hermes final audit-correction evidence (2026-09-01)
 
-This README and `receipt.json` are **derived summaries**, not raw logs. The
-authoritative evidence is under `raw/`, and the exact built wheel and sdist are
-under `artifacts/`.
+This README and `receipt.json` are derived summaries. Raw commands and logs are
+under `raw/`; the one wheel/sdist pair built before all artifact validation is
+retained under `artifacts/`.
 
 All claimed final-source Linux validation ran in fresh private Daytona sandbox
-`e4ebee80-2d36-473a-851b-a98d6b59f057`
-(`relay-hermes-followup-final-20260901`, Debian 13 x86_64,
-`daytona-large`). The sandbox finished in state `archived`.
+`d64bc9d6-8cae-4e86-9fa2-2ca454f34fd5`
+(`relay-hermes-final-corrections-20260901`, Debian 13 x86_64,
+`daytona-large`). Its final state is `archived`.
 
 No hosted Relay environment, production endpoint, deployment, publication,
 Relay credential, publication credential, protected workflow secret, or
 hosted GitHub Actions run was used.
 
-## Source identity
+## Exact source
 
-The tested archive contained the 20 final source files outside `proof/`.
-Excluding `proof/` avoids a self-referential receipt while allowing the source
+The tested archive contained the 21 final source files outside `proof/`.
+Excluding `proof/` avoids source-receipt self-reference while allowing the
 manifest to be reproduced from the final commit.
 
 - Source manifest: `raw/source.sha256`
 - Source-manifest SHA-256:
-  `255afdf444bc7e96af86b9b64379d657d73581c597ad07a0af3a76ed2d80efae`
+  `a4107525372c4fccef190be5185bea91ab86972e39f7af5a479bd78e28e69306`
 - Transferred source archive SHA-256:
-  `f6bde9187cb80f9d89357fcc726475b7575ec423f9f54ee80320a6b2c2acd6df`
+  `f21b327721124287517290ab9b7d2d8f6921d6152d60680dff1a03fd36997ece`
 - Base commit:
-  `9babd64a8fbecdb233a021a27c0b4703a675ff86`
+  `cf99be34efb0b5527a6a9c8838423b462d282c34`
 - Hermes commit:
   `04224b2f82aabbe89525451089eb2677edfae179`
 - Relay Server OpenAPI commit:
@@ -33,54 +33,51 @@ manifest to be reproduced from the final commit.
 - OpenAPI SHA-256:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
 
-`raw/03-setup.*` records environment setup. `raw/08-final-source.*` records
-the exact final-source overlay and manifest check. Every claimed test or build
-is in `raw/09-*` or later.
-
 ## Results derived from raw logs
 
 | Validation | Raw result |
 | --- | --- |
-| CPython 3.11.14 | `85 passed in 3.19s` |
-| CPython 3.12.12 | `85 passed in 3.15s` |
-| CPython 3.13.11 | `85 passed in 3.21s` |
-| POSIX state-directory mode/symlink/replacement suite | 5 named tests passed |
-| Wheel and sdist build | passed for `1.0.0rc1` |
-| Clean wheel installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
-| Clean sdist installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
-| Hermes Plugin Doctor | passed on 3.11, 3.12, and 3.13 |
-| Hermes clean-wheel runtime | passed on 3.11, 3.12, and 3.13 |
-| Locked OpenAPI harness | passed; 5 paths and 9 WebSocket frames |
-| Staging helper guards | passed; missing token and production origin returned 2 |
-| Workflow static checks | passed; canonical repository, SHA pins, no expressions in `run:` |
+| CPython 3.11.14 | `88 passed in 2.81s` |
+| CPython 3.12.12 | `88 passed in 2.93s` |
+| CPython 3.13.11 | `88 passed in 2.90s` |
+| Wrapper delegation plus state no-follow/replacement suite | 8 named tests passed |
+| Build backend | `setuptools==84.0.0` |
+| Build frontend | `build==1.3.0` |
+| One wheel/sdist build | passed for `1.0.0rc1` |
+| Exact wheel clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
+| Exact sdist clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
+| Plugin Doctor on exact extracted sdist | passed on 3.11, 3.12, and 3.13 |
+| Hermes runtime from exact wheel | passed on 3.11, 3.12, and 3.13 |
+| Locked OpenAPI/helper checks | passed |
+| Artifact-lineage workflow checks | one build; exact download, rehash, attest, and publish path |
 | Hosted workflow execution | not run |
 
-The RC workflow itself was not dispatched. Static assertions verify that its
-canonical staging preflight gates a reusable exact-SHA three-version CI,
-protected contract checkout, protected provenance build, artifact checksums,
-and PyPI trusted publishing in dependency order.
+`raw/07-build-once.*` built the only distribution pair.
+`raw/08-exact-artifacts.*` then used those same bytes for all six clean
+installs, three sdist Plugin Doctor runs, and three clean-wheel Hermes runtime
+runs. `raw/10-contract-workflow.*` verifies that publication contains no build
+step and downloads and rehashes the same retained CI artifact.
 
-## Retained artifacts
+## Retained exact artifacts
 
 - `artifacts/relay_hermes-1.0.0rc1-py3-none-any.whl`
   - SHA-256:
-    `f9aaade72ea13bf999bcb8e520c606307c990a207eac912ec91c7a143e9c3dc5`
+    `6d868840cb31848c38684da3f06866c97d48e52ad49e7ff25df3ce38bb45a86a`
 - `artifacts/relay_hermes-1.0.0rc1.tar.gz`
   - SHA-256:
-    `2514c1cce2be390da4a332e521a919378bd6dff5cdf0724f58ae4a747cb96999`
+    `bb51b743e64199ab8a86eeb3f43b184b9906bb362157fef2fc5245d228823f3e`
 
-`raw/13-package.command.sh` and `raw/13-package.log` are the complete build,
-contents, six clean-install, metadata, and compatibility receipt.
+## Mechanically closed evidence
 
-## Evidence integrity
+`raw/evidence.sha256` covers `raw/**` and `artifacts/**`, excluding only itself.
+It does **not** claim to cover this README or `receipt.json`.
 
-`raw/evidence.sha256` covers every other retained raw command, raw log, JSON
-receipt, source manifest, artifact hash list, wheel, and sdist. Its own
-SHA-256 is:
+`proof-manifest.sha256` is the separate top-level closure manifest. It hashes:
 
-`2a089eff704ee467e7356dfa46395d558051c9a720ee5aef93948299cece9abd`
+- this README;
+- `receipt.json`; and
+- `raw/evidence.sha256`, which transitively closes every raw command, log,
+  JSON sandbox receipt, source manifest, artifact hash list, wheel, and sdist.
 
-The `*.command.sh` files are the exact shell payloads executed in Daytona using
-the repository's SDK command runner; their matching `*.log` files are raw
-combined stdout/stderr. Lifecycle `*.command.txt` files are exact local Daytona
-CLI commands.
+`proof-manifest.sha256` deliberately does not hash itself, so there is no
+self-reference.

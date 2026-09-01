@@ -1,5 +1,6 @@
 set -euo pipefail
 .venv-3.13/bin/python -m pytest -vv \
+  tests/test_staging_wrapper.py \
   tests/test_state.py::test_inbox_is_owner_only \
   tests/test_state.py::test_preexisting_permissive_state_directory_is_forced_to_owner_only \
   tests/test_state.py::test_state_directory_symlink_is_refused_without_chmodding_target \

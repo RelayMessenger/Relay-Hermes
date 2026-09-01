@@ -1,84 +1,83 @@
 {
-  "schema": "relay-hermes-validation/v3",
+  "schema": "relay-hermes-validation/v4",
   "summary_kind": "derived_from_retained_raw_evidence",
   "status": "pass",
   "date": "2026-09-01",
   "branch": "codex/relay-hermes-20260901",
-  "base_commit": "9babd64a8fbecdb233a021a27c0b4703a675ff86",
-  "authoritative_evidence": {
-    "directory": "raw",
+  "base_commit": "cf99be34efb0b5527a6a9c8838423b462d282c34",
+  "closure": {
+    "manifest": "proof-manifest.sha256",
+    "manifest_includes_itself": false,
+    "covered_summary_files": ["README.md", "receipt.json"],
+    "covered_evidence_root": "raw/evidence.sha256"
+  },
+  "authoritative_raw_evidence": {
     "manifest": "raw/evidence.sha256",
-    "manifest_sha256": "2a089eff704ee467e7356dfa46395d558051c9a720ee5aef93948299cece9abd"
+    "scope": "raw/** and artifacts/** except raw/evidence.sha256 itself",
+    "manifest_sha256": "2e7e6747ca83cfcd1bb0c1afe911a4fbf29a84446aecf99372ac68bb3a9bc6cc",
+    "covers_this_receipt": false
   },
   "exact_head_source": {
-    "scope": "all 20 final-head files outside proof/",
+    "scope": "all 21 final-head files outside proof/",
     "manifest": "raw/source.sha256",
-    "manifest_sha256": "255afdf444bc7e96af86b9b64379d657d73581c597ad07a0af3a76ed2d80efae",
-    "archive_sha256": "f6bde9187cb80f9d89357fcc726475b7575ec423f9f54ee80320a6b2c2acd6df",
-    "final_source_setup_log": "raw/08-final-source.log"
+    "manifest_sha256": "a4107525372c4fccef190be5185bea91ab86972e39f7af5a479bd78e28e69306",
+    "archive_sha256": "f21b327721124287517290ab9b7d2d8f6921d6152d60680dff1a03fd36997ece",
+    "setup_log": "raw/03-setup.log"
   },
   "versions": {
     "package": "1.0.0rc1",
-    "manifest": "1.0.0-rc.1"
+    "manifest": "1.0.0-rc.1",
+    "setuptools_backend": "84.0.0",
+    "build_frontend": "1.3.0"
   },
   "pytest": [
-    {"python": "3.11.14", "passed": 85, "failed": 0, "log": "raw/09-py311.log"},
-    {"python": "3.12.12", "passed": 85, "failed": 0, "log": "raw/10-py312.log"},
-    {"python": "3.13.11", "passed": 85, "failed": 0, "log": "raw/11-py313.log"}
+    {"python": "3.11.14", "passed": 88, "failed": 0, "log": "raw/04-py311.log"},
+    {"python": "3.12.12", "passed": 88, "failed": 0, "log": "raw/05-py312.log"},
+    {"python": "3.13.11", "passed": 88, "failed": 0, "log": "raw/06-py313.log"}
   ],
-  "state_directory": {
-    "mode": "0700",
-    "named_tests_passed": 5,
-    "covers": [
-      "new directory mode",
-      "pre-existing permissive directory repair",
-      "symlink refusal",
-      "replacement during chmod",
-      "replacement after open"
-    ],
-    "log": "raw/16-state-directory.log"
+  "wrapper_and_state_paths": {
+    "named_tests_passed": 8,
+    "wrapper_creates_or_chmods_state_path": false,
+    "relay_inbox_owns_directory_validation": true,
+    "log": "raw/09-wrapper-state.log"
   },
   "packages": {
+    "build_count": 1,
     "wheel": {
       "path": "artifacts/relay_hermes-1.0.0rc1-py3-none-any.whl",
-      "sha256": "f9aaade72ea13bf999bcb8e520c606307c990a207eac912ec91c7a143e9c3dc5"
+      "sha256": "6d868840cb31848c38684da3f06866c97d48e52ad49e7ff25df3ce38bb45a86a"
     },
     "sdist": {
       "path": "artifacts/relay_hermes-1.0.0rc1.tar.gz",
-      "sha256": "2514c1cce2be390da4a332e521a919378bd6dff5cdf0724f58ae4a747cb96999"
+      "sha256": "bb51b743e64199ab8a86eeb3f43b184b9906bb362157fef2fc5245d228823f3e"
     },
     "clean_wheel_install_python": ["3.11.14", "3.12.12", "3.13.11"],
     "clean_sdist_install_python": ["3.11.14", "3.12.12", "3.13.11"],
-    "pip_check": "pass",
-    "log": "raw/13-package.log"
-  },
-  "hermes": {
-    "commit": "04224b2f82aabbe89525451089eb2677edfae179",
-    "plugin_doctor_python": ["3.11.14", "3.12.12", "3.13.11"],
+    "sdist_plugin_doctor_python": ["3.11.14", "3.12.12", "3.13.11"],
     "wheel_runtime_python": ["3.11.14", "3.12.12", "3.13.11"],
-    "status": "pass",
-    "log": "raw/14-hermes.log"
-  },
-  "relay_openapi": {
-    "server_commit": "9b4d5bb32cc749c6fd271969948c385300d404d6",
-    "sha256": "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5",
-    "assertions": "pass",
-    "log": "raw/15-contract-helper.log"
+    "pip_check": "pass",
+    "build_log": "raw/07-build-once.log",
+    "validation_log": "raw/08-exact-artifacts.log"
   },
   "workflows": {
-    "canonical_repository": "RelayMessenger/Relay-Hermes",
-    "static_assertions": "pass",
+    "ci_builds_once": true,
+    "ci_retains_before_validation": true,
+    "matrix_downloads_same_artifact": true,
+    "publish_rebuilds": false,
+    "provenance_downloads_and_rehashes": true,
+    "publish_downloads_and_rehashes": true,
     "hosted_github_actions_run": false,
-    "publication_attempted": false
+    "publication_attempted": false,
+    "log": "raw/10-contract-workflow.log"
   },
   "daytona": {
-    "id": "e4ebee80-2d36-473a-851b-a98d6b59f057",
-    "name": "relay-hermes-followup-final-20260901",
+    "id": "d64bc9d6-8cae-4e86-9fa2-2ca454f34fd5",
+    "name": "relay-hermes-final-corrections-20260901",
     "snapshot": "daytona-large",
     "os": "Debian GNU/Linux 13 (trixie)",
     "architecture": "x86_64",
     "final_state": "archived",
-    "log": "raw/19-daytona-final.json"
+    "log": "raw/13-daytona-final.json"
   },
   "hosted_relay_used": false,
   "production_touched": false,

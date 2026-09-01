@@ -24,10 +24,76 @@ env:
   HERMES_AGENT_COMMIT: 04224b2f82aabbe89525451089eb2677edfae179
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
   EXPECTED_PACKAGE_VERSION: 1.0.0rc1
+  VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
 jobs:
+  build:
+    name: Build exact distributions once
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the exact source SHA
+        run: |
+          case "$SOURCE_SHA" in
+            (""|*[!0-9a-f]*)
+              echo "SOURCE_SHA must be a lowercase hexadecimal commit SHA" >&2
+              exit 2
+              ;;
+          esac
+          test "${#SOURCE_SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up build Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build pinned wheel and sdist
+        run: |
+          python -m pip install --disable-pip-version-check "build==1.3.0" "PyYAML==6.0.3"
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          import yaml
+
+          metadata = tomllib.loads(Path("pyproject.toml").read_text())
+          manifest = yaml.safe_load(Path("plugin.yaml").read_text())
+          assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
+          assert metadata["project"]["version"] == os.environ["EXPECTED_PACKAGE_VERSION"]
+          assert manifest["version"] == "1.0.0-rc.1"
+          PY
+          mkdir -p release/dist release/provenance
+          python -m build --outdir release/dist
+          test -f "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
+          test -f "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
+          tar -tzf "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz" |
+            grep "/scripts/check-openapi.py$"
+          (
+            cd release
+            sha256sum dist/* > provenance/SHA256SUMS
+            sha256sum --check provenance/SHA256SUMS
+          )
+
+      - name: Retain the distributions before validation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.VALIDATED_ARTIFACT_NAME }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
   test:
-    name: Python ${{ matrix.python-version }}
+    name: Validate exact distributions on Python ${{ matrix.python-version }}
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -46,13 +112,6 @@ jobs:
 
       - name: Verify the exact source SHA
         run: |
-          case "$SOURCE_SHA" in
-            (""|*[!0-9a-f]*)
-              echo "SOURCE_SHA must be a lowercase hexadecimal commit SHA" >&2
-              exit 2
-              ;;
-          esac
-          test "${#SOURCE_SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Check out the pinned Hermes source
@@ -74,25 +133,30 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install package and validation dependencies
+      - name: Install source validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "build==1.3.0" "PyYAML==6.0.3" "rich==15.0.0"
+          python -m pip install "PyYAML==6.0.3" "rich==15.0.0" "requests>=2"
           python -m pip install -e ".[dev]"
           python -m pip check
 
+      - name: Download the one CI-built distribution pair
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ env.VALIDATED_ARTIFACT_NAME }}
+          path: release
+
+      - name: Verify the exact distribution bytes
+        run: |
+          (
+            cd release
+            sha256sum --check provenance/SHA256SUMS
+          )
+          test -f "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
+          test -f "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
+
       - name: Run the full Hermes integration suite
         run: python -m pytest -q
-
-      - name: Run Hermes Plugin Doctor
-        run: |
-          cd "$HERMES_AGENT_SRC"
-          PYTHONPATH="$HERMES_AGENT_SRC" python - <<'PY'
-          import os
-          from hermes_cli.plugins_cmd import cmd_plugin_doctor
-
-          cmd_plugin_doctor(os.environ["GITHUB_WORKSPACE"], ci=True)
-          PY
 
       - name: Test the staging helper fail-closed guards
         run: |
@@ -106,25 +170,33 @@ jobs:
           test "$no_token_rc" -ne 0
           test "$wrong_origin_rc" -eq 2
 
-      - name: Build wheel and sdist
+      - name: Run Hermes Plugin Doctor on the exact sdist
         run: |
-          python -m build
-          test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
-          test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
-          tar -tzf "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz" |
-            grep "/scripts/check-openapi.py$"
+          doctor_root="${RUNNER_TEMP}/relay-hermes-doctor-${MATRIX_PYTHON_VERSION}"
+          mkdir -p "$doctor_root"
+          tar -xzf "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz" \
+            -C "$doctor_root"
+          plugin_dir="${doctor_root}/relay_hermes-${EXPECTED_PACKAGE_VERSION}"
+          test -d "$plugin_dir"
+          cd "$HERMES_AGENT_SRC"
+          SDIST_PLUGIN_DIR="$plugin_dir" PYTHONPATH="$HERMES_AGENT_SRC" python - <<'PY'
+          import os
+          from hermes_cli.plugins_cmd import cmd_plugin_doctor
 
-      - name: Clean-install wheel and sdist
+          cmd_plugin_doctor(os.environ["SDIST_PLUGIN_DIR"], ci=True)
+          PY
+
+      - name: Clean-install the exact wheel and sdist
         run: |
           wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
           sdist_venv="${RUNNER_TEMP}/relay-hermes-sdist-${MATRIX_PYTHON_VERSION}"
           python -m venv "$wheel_venv"
           python -m venv "$sdist_venv"
           "$wheel_venv/bin/python" -m pip install \
-            "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl" \
+            "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl" \
             "PyYAML==6.0.3" "rich==15.0.0" "requests>=2"
           "$sdist_venv/bin/python" -m pip install \
-            "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
+            "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
           "$wheel_venv/bin/python" -m pip check
           "$sdist_venv/bin/python" -m pip check
           for clean_venv in "$wheel_venv" "$sdist_venv"; do
@@ -147,7 +219,7 @@ jobs:
             )
           done
 
-      - name: Run Hermes against the clean wheel
+      - name: Run Hermes against the exact clean wheel
         run: |
           wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
           hermes_home="${RUNNER_TEMP}/hermes-wheel-home-${MATRIX_PYTHON_VERSION}"

@@ -120,6 +120,7 @@ def test_staging_package_and_manifest_versions_match(manifest):
         (MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8")
     )
     assert metadata["project"]["version"] == "1.0.0rc1"
+    assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
     assert manifest["version"] == "1.0.0-rc.1"
 
 
@@ -158,13 +159,16 @@ def test_rc_publish_is_manual_exact_sha_staging_only():
     assert jobs["validate"]["needs"] == "preflight"
     assert jobs["validate"]["uses"] == "./.github/workflows/ci.yml"
     assert jobs["contract"]["needs"] == "validate"
-    assert jobs["build"]["needs"] == "contract"
-    assert jobs["publish"]["needs"] == "build"
+    assert jobs["provenance"]["needs"] == "contract"
+    assert jobs["publish"]["needs"] == "provenance"
     assert "RELAY_CONTRACT_READ_TOKEN" in text
     assert "scripts/check-openapi.py" in text
     assert text.count("environment: release-candidate") == 2
     assert 'case "$EXPECTED_SHA" in' in text
     assert 'test "${#EXPECTED_SHA}" -eq 40' in text
+    assert "python -m build" not in text
+    assert text.count("relay-hermes-validated-rc") == 1
+    assert text.count("sha256sum --check provenance/SHA256SUMS") == 2
 
 
 def test_reusable_ci_covers_full_release_compatibility():
@@ -172,11 +176,16 @@ def test_reusable_ci_covers_full_release_compatibility():
     text = path.read_text(encoding="utf-8")
     assert "workflow_call:" in text
     assert 'python-version: ["3.11", "3.12", "3.13"]' in text
+    assert text.count("python -m build --outdir release/dist") == 1
+    assert "Retain the distributions before validation" in text
+    assert "Download the one CI-built distribution pair" in text
     assert "Run the full Hermes integration suite" in text
-    assert "Run Hermes Plugin Doctor" in text
+    assert "Run Hermes Plugin Doctor on the exact sdist" in text
     assert "Test the staging helper fail-closed guards" in text
-    assert "Clean-install wheel and sdist" in text
-    assert "Run Hermes against the clean wheel" in text
+    assert "Clean-install the exact wheel and sdist" in text
+    assert "Run Hermes against the exact clean wheel" in text
+    assert "setuptools==84.0.0" in text
+    assert "build==1.3.0" in text
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])

@@ -1,0 +1,159 @@
+dist/relay_hermes-1.0.0rc1-py3-none-any.whl: OK
+dist/relay_hermes-1.0.0rc1.tar.gz: OK
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/exact-wheel-3.11
+Activate with: source /home/daytona/exact-wheel-3.11/bin/activate
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/exact-sdist-3.11
+Activate with: source /home/daytona/exact-sdist-3.11/bin/activate
+Using Python 3.11.14 environment at: /home/daytona/exact-wheel-3.11
+Resolved 17 packages in 4ms
+Prepared 1 package in 2ms
+Installed 17 packages in 20ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/exact-sdist-3.11
+Resolved 9 packages in 7ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz
+      Built relay-hermes @ file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz
+Prepared 1 package in 661ms
+Installed 9 packages in 9ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/exact-wheel-3.11
+Checked 17 packages in 20ms
+All installed packages are compatible
+Using Python 3.11.14 environment at: /home/daytona/exact-sdist-3.11
+Checked 9 packages in 23ms
+All installed packages are compatible
+clean_install=pass python=3.11.14 version=1.0.0rc1
+clean_install=pass python=3.11.14 version=1.0.0rc1
+Plugin Doctor: /home/daytona/exact-doctor-3.11/relay_hermes-1.0.0rc1
+  manifest: relay-hermes 1.0.0-rc.1 (platform)
+  OK: runtime discovery, manifest parsing, import, and registration passed
+  registrations: 0 tool(s), 0 hook(s)
+exact_wheel_runtime=pass python=3.11.14
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/exact-wheel-3.12
+Activate with: source /home/daytona/exact-wheel-3.12/bin/activate
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/exact-sdist-3.12
+Activate with: source /home/daytona/exact-sdist-3.12/bin/activate
+Using Python 3.12.12 environment at: /home/daytona/exact-wheel-3.12
+Resolved 17 packages in 4ms
+Installed 17 packages in 22ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/exact-sdist-3.12
+Resolved 9 packages in 3ms
+Installed 9 packages in 15ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/exact-wheel-3.12
+Checked 17 packages in 23ms
+All installed packages are compatible
+Using Python 3.12.12 environment at: /home/daytona/exact-sdist-3.12
+Checked 9 packages in 26ms
+All installed packages are compatible
+clean_install=pass python=3.12.12 version=1.0.0rc1
+clean_install=pass python=3.12.12 version=1.0.0rc1
+Plugin Doctor: /home/daytona/exact-doctor-3.12/relay_hermes-1.0.0rc1
+  manifest: relay-hermes 1.0.0-rc.1 (platform)
+  OK: runtime discovery, manifest parsing, import, and registration passed
+  registrations: 0 tool(s), 0 hook(s)
+exact_wheel_runtime=pass python=3.12.12
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/exact-wheel-3.13
+Activate with: source /home/daytona/exact-wheel-3.13/bin/activate
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/exact-sdist-3.13
+Activate with: source /home/daytona/exact-sdist-3.13/bin/activate
+Using Python 3.13.11 environment at: /home/daytona/exact-wheel-3.13
+Resolved 16 packages in 4ms
+Installed 16 packages in 17ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/exact-sdist-3.13
+Resolved 8 packages in 4ms
+Installed 8 packages in 9ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/exact-wheel-3.13
+Checked 16 packages in 19ms
+All installed packages are compatible
+Using Python 3.13.11 environment at: /home/daytona/exact-sdist-3.13
+Checked 8 packages in 24ms
+All installed packages are compatible
+clean_install=pass python=3.13.11 version=1.0.0rc1
+clean_install=pass python=3.13.11 version=1.0.0rc1
+Plugin Doctor: /home/daytona/exact-doctor-3.13/relay_hermes-1.0.0rc1
+  manifest: relay-hermes 1.0.0-rc.1 (platform)
+  OK: runtime discovery, manifest parsing, import, and registration passed
+  registrations: 0 tool(s), 0 hook(s)
+exact_wheel_runtime=pass python=3.13.11
+6d868840cb31848c38684da3f06866c97d48e52ad49e7ff25df3ce38bb45a86a  release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl
+bb51b743e64199ab8a86eeb3f43b184b9906bb362157fef2fc5245d228823f3e  release/dist/relay_hermes-1.0.0rc1.tar.gz
