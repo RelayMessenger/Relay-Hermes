@@ -36,7 +36,7 @@ def plugin():
                 check_fn=lambda: True,
             )
         )
-    return importlib.import_module("hermes_relay_plugin.adapter")
+    return importlib.import_module("relay_hermes.adapter")
 
 
 def make_adapter(plugin, tmp_path):
@@ -52,7 +52,6 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls: List[Dict[str, Any]] = []
         self.uploads: List[Dict[str, Any]] = []
-        self.voice_memos: List[Dict[str, str]] = []
         self.reads: List[str] = []
         self._transfer_http = None
 
@@ -90,18 +89,6 @@ class FakeClient:
             "data": data,
         })
         return "01993d50-ef7b-7b37-886b-23fd80c7ec16"
-
-    async def send_voice_memo(
-        self,
-        chat_id: str,
-        attachment_id: str,
-    ) -> Dict[str, Any]:
-        self.voice_memos.append({
-            "chat_id": chat_id,
-            "attachment_id": attachment_id,
-        })
-        return {"voice_memo": {"id": "voice-message-id"}}
-
 
 def relay_event(event_id: str = "event-id") -> Dict[str, Any]:
     return {
@@ -230,7 +217,7 @@ def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path
 
 
 def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
-    api = importlib.import_module("hermes_relay_plugin.relay_api")
+    api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)
     client = FakeClient()
     adapter._client = client
@@ -297,8 +284,8 @@ def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
         "checkpoint_outside_retention",
     ))
 
-    assert adapter._direct_convs == {direct_chat}
-    assert adapter._group_convs == {group_chat}
+    assert adapter._direct_chats == {direct_chat}
+    assert adapter._group_chats == {group_chat}
     assert adapter._last_inbound == {direct_chat: new_inbound}
     assert adapter._inbox.full_sync_state()["through_sequence"] == "42"
     assert adapter._inbox.load_full_snapshot()[0]["chat"]["id"] == direct_chat
@@ -375,7 +362,7 @@ def test_hosted_image_batch_is_one_ordered_message(plugin, tmp_path):
     ]
 
 
-def test_audio_file_uses_attachment_upload_then_voice_memo_route(
+def test_audio_file_uses_attachment_upload_then_idempotent_message_route(
     plugin,
     tmp_path,
     monkeypatch,
@@ -387,22 +374,34 @@ def test_audio_file_uses_attachment_upload_then_voice_memo_route(
     audio.write_bytes(b"audio")
     monkeypatch.setattr(adapter, "validate_media_delivery_path", lambda path: path)
 
-    result = asyncio.run(adapter.send_voice("chat-id", str(audio)))
+    event = message_event(plugin, adapter, "event-audio")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter.send_voice("chat-id", str(audio))
+
+    result = asyncio.run(run())
     assert result.success is True
-    assert result.message_id == "voice-message-id"
+    assert result.message_id == "message-id"
     assert client.uploads == [{
         "filename": "memo.mp3",
         "content_type": "audio/mpeg",
         "data": b"audio",
     }]
-    assert client.voice_memos == [{
+    assert client.calls == [{
         "chat_id": "chat-id",
-        "attachment_id": "01993d50-ef7b-7b37-886b-23fd80c7ec16",
+        "parts": [{
+            "type": "media",
+            "attachment_id": "01993d50-ef7b-7b37-886b-23fd80c7ec16",
+        }],
+        "idempotency_key": "reply-event-audio-0",
+        "reply_to": None,
+        "timeout": None,
     }]
 
 
 def test_unmentioned_group_event_is_not_dispatched(plugin, tmp_path):
-    api = importlib.import_module("hermes_relay_plugin.relay_api")
+    api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)
     client = FakeClient()
     adapter._client = client
@@ -437,14 +436,25 @@ def test_register_loads_as_a_hermes_platform_plugin(plugin):
     assert calls[0]["required_env"] == ["RELAY_AGENT_TOKEN"]
 
 
-def test_env_enablement_preserves_the_operator_allowlist(
+def test_env_enablement_preserves_the_operator_contact_allowlist(
     plugin,
     monkeypatch,
 ):
     monkeypatch.setenv("RELAY_AGENT_TOKEN", "relay-test-token")
-    monkeypatch.setattr(plugin, "_OPERATOR_ALLOWED_USERS", "contact-one,contact-two")
+    monkeypatch.setattr(plugin, "_OPERATOR_ALLOWED_CONTACTS", "contact-one,contact-two")
     first = plugin._env_enablement()
     second = plugin._env_enablement()
-    assert first["allowed_users"] == "contact-one,contact-two"
-    assert second["allowed_users"] == "contact-one,contact-two"
-    assert os.environ["RELAY_ALLOW_ALL_USERS"] == "true"
+    assert first["allowed_contacts"] == "contact-one,contact-two"
+    assert second["allowed_contacts"] == "contact-one,contact-two"
+    assert os.environ["RELAY_ALLOW_ALL_CONTACTS"] == "true"
+
+
+def test_yaml_contact_allowlist_accepts_current_list_vocabulary(plugin, tmp_path):
+    from gateway.config import PlatformConfig
+
+    adapter = plugin.RelayAdapter(PlatformConfig(extra={
+        "token": "relay-test-token",
+        "state_dir": str(tmp_path),
+        "allowed_contacts": ["contact-one", "contact-two"],
+    }))
+    assert adapter._allowed_contacts == {"contact-one", "contact-two"}

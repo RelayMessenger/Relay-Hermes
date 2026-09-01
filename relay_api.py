@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import ipaddress
 import json
 import logging
@@ -35,6 +34,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.relayapp.im"
 RELAY_API_VERSION = "v1"
 RELAY_WEBHOOK_VERSION = "2026-08-30"
+RELAY_OPENAPI_COMMIT = "9b4d5bb32cc749c6fd271969948c385300d404d6"
+RELAY_OPENAPI_SHA256 = (
+    "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5"
+)
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
 MAX_PARTS_PER_MESSAGE = 100
@@ -62,6 +65,8 @@ _WEBHOOK_EVENT_TYPES = {
     "chat.group_icon_updated",
     "chat.typing_indicator.started",
     "chat.typing_indicator.stopped",
+    "contact.added",
+    "contact.removed",
 }
 _DISCONNECT_REASONS = {
     "revoked",
@@ -274,15 +279,10 @@ def websocket_url(base_url: str) -> str:
 def reply_idempotency_key(
     event_id: str,
     ordinal: int = 0,
-    content: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Derive one stable key from the event and logical request body."""
+    """Derive one retry-stable key from a Relay event and send ordinal."""
 
-    if content is None:
-        return f"reply-{event_id}-{ordinal}"
-    canonical = json.dumps(content, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-    return f"reply-{event_id}-{ordinal}-{digest}"
+    return f"reply-{event_id}-{ordinal}"
 
 
 @dataclass
@@ -569,6 +569,13 @@ class RelayClient:
         reply_to: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = 30.0,
     ) -> Dict[str, Any]:
+        idempotency_key = (idempotency_key or "").strip()
+        if not idempotency_key or len(idempotency_key) > 255:
+            raise ValueError(
+                "relay: Idempotency-Key must contain 1 to 255 characters"
+            )
+        if not parts:
+            raise ValueError("relay: a Message must contain at least one part")
         message: Dict[str, Any] = {"parts": parts}
         if reply_to:
             message["reply_to"] = reply_to
@@ -576,7 +583,7 @@ class RelayClient:
             "POST",
             f"/v1/chats/{quote(chat_id, safe='')}/messages",
             body={"message": message},
-            headers={"idempotency-key": idempotency_key},
+            headers={"Idempotency-Key": idempotency_key},
             timeout=timeout,
         )
         return response.body if isinstance(response.body, dict) else {}
@@ -600,12 +607,6 @@ class RelayClient:
         await self._request(
             "POST", f"/v1/chats/{quote(chat_id, safe='')}/read"
         )
-
-    async def get_chat(self, chat_id: str) -> Dict[str, Any]:
-        response = await self._request(
-            "GET", f"/v1/chats/{quote(chat_id, safe='')}"
-        )
-        return response.body if isinstance(response.body, dict) else {}
 
     async def request_upload(
         self,
@@ -661,18 +662,6 @@ class RelayClient:
                 status=response.status_code,
             )
         return attachment_id
-
-    async def send_voice_memo(
-        self,
-        chat_id: str,
-        attachment_id: str,
-    ) -> Dict[str, Any]:
-        response = await self._request(
-            "POST",
-            f"/v1/chats/{quote(chat_id, safe='')}/voicememo",
-            body={"attachment_id": attachment_id},
-        )
-        return response.body if isinstance(response.body, dict) else {}
 
 
 def transient_delay_seconds(
@@ -1016,21 +1005,21 @@ async def run_websocket_loop(
 
 
 @dataclass
-class InboundMessage:
+class InboundRelayMessage:
     event: Dict[str, Any]
     event_id: str
     message: Dict[str, Any]
     chat_id: str
     message_id: str
-    sender_id: str
-    sender_kind: str
-    sender_name: str
+    sender_contact_id: str
+    sender_contact_kind: str
+    sender_contact_name: str
     agent_handle: str
     is_group: bool
     created_at: Optional[str]
 
 
-def parse_inbound(event: Dict[str, Any]) -> Optional[InboundMessage]:
+def parse_inbound(event: Dict[str, Any]) -> Optional[InboundRelayMessage]:
     if event.get("event_type") != "message.received":
         return None
     data = event.get("data")
@@ -1044,15 +1033,17 @@ def parse_inbound(event: Dict[str, Any]) -> Optional[InboundMessage]:
     if not isinstance(parts, list):
         return None
     owner = chat.get("owner_handle")
-    return InboundMessage(
+    return InboundRelayMessage(
         event=event,
         event_id=str(event.get("event_id") or ""),
         message=data,
         chat_id=str(chat.get("id") or ""),
         message_id=str(data.get("id") or ""),
-        sender_id=str(sender.get("id") or ""),
-        sender_kind=str(sender.get("kind") or ""),
-        sender_name=str(sender.get("display_name") or sender.get("handle") or ""),
+        sender_contact_id=str(sender.get("id") or ""),
+        sender_contact_kind=str(sender.get("kind") or ""),
+        sender_contact_name=str(
+            sender.get("display_name") or sender.get("handle") or ""
+        ),
         agent_handle=(
             str(owner.get("handle") or "") if isinstance(owner, dict) else ""
         ),

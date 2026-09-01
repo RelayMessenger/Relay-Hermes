@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-relay-plugin"
+name = "relay-hermes"
 version = "1.0.0"
 description = "Connect Hermes Agent to Relay as an always-on agent"
 readme = "README.md"
@@ -27,19 +27,23 @@ dependencies = [
 dev = ["pytest>=8", "pyyaml>=6"]
 
 [project.urls]
-Homepage = "https://github.com/relaymessenger/hermes-relay-plugin"
+Homepage = "https://github.com/RelayMessenger/Relay-Hermes"
 Documentation = "https://docs.relayapp.im"
-Issues = "https://github.com/relaymessenger/hermes-relay-plugin/issues"
+Issues = "https://github.com/RelayMessenger/Relay-Hermes/issues"
+Repository = "https://github.com/RelayMessenger/Relay-Hermes"
 
 # Hermes discovers a pip-installed plugin through this entry point; a
-# drop-in copy into ~/.hermes/plugins/relay is discovered by directory scan
+# drop-in copy into ~/.hermes/plugins/Relay-Hermes is discovered by directory scan
 # and needs no packaging at all.
 [project.entry-points."hermes_agent.plugins"]
-relayapp-platform = "hermes_relay_plugin:register"
+relay-hermes = "relay_hermes"
 
 [tool.setuptools]
-packages = ["hermes_relay_plugin"]
-package-dir = { hermes_relay_plugin = "." }
+packages = ["relay_hermes"]
+package-dir = { relay_hermes = "." }
+
+[tool.setuptools.package-data]
+relay_hermes = ["plugin.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -6,17 +6,19 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
-from hermes_relay_plugin.state import RelayInbox
+from relay_hermes.state import RelayInbox
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
 from websockets.http11 import Response
 
-from hermes_relay_plugin.relay_api import (
+from relay_hermes.relay_api import (
     RelayClient,
     RelayFullSyncError,
     RelayResponse,
     RELAY_API_VERSION,
+    RELAY_OPENAPI_COMMIT,
+    RELAY_OPENAPI_SHA256,
     RELAY_WEBHOOK_VERSION,
     RelayWebhookConfiguredError,
     RelayWebSocketClosed,
@@ -116,16 +118,27 @@ def test_current_event_parsing_and_mentions():
     assert inbound.message_id == MESSAGE_ID
     assert inbound.is_group is True
     assert inbound.agent_handle == "helper"
-    assert inbound.sender_name == "Advait"
+    assert inbound.sender_contact_name == "Advait"
     assert mentions_agent(inbound.message, handle=inbound.agent_handle)
 
 
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
+    assert RELAY_OPENAPI_COMMIT == "9b4d5bb32cc749c6fd271969948c385300d404d6"
+    assert RELAY_OPENAPI_SHA256 == (
+        "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5"
+    )
     root = Path(__file__).resolve().parents[1]
-    for name in ("relay_api.py", "adapter.py", "README.md", "plugin.yaml"):
-        assert "/v3" not in (root / name).read_text(encoding="utf-8"), name
+    shipped = ("relay_api.py", "adapter.py", "README.md", "plugin.yaml")
+    for name in shipped:
+        text = (root / name).read_text(encoding="utf-8")
+        assert "/v3" not in text, name
+        assert "/v1/events" not in text, name
+        assert "/v1/conversations" not in text, name
+    transport = (root / "relay_api.py").read_text(encoding="utf-8")
+    for message_effect_path in ("/reactions", "/typing", "/voicememo"):
+        assert message_effect_path not in transport
 
 
 def test_visible_at_text_is_not_a_structured_mention():
@@ -158,7 +171,7 @@ def test_send_message_uses_chat_route_and_current_body():
     assert result["message"]["id"] == MESSAGE_ID
     call = transport.calls[0]
     assert call["path"] == f"/v1/chats/{CHAT_ID}/messages"
-    assert call["headers"] == {"idempotency-key": "reply-key"}
+    assert call["headers"] == {"Idempotency-Key": "reply-key"}
     assert call["body"] == {
         "message": {
             "parts": [{"type": "text", "value": "hello"}],
@@ -167,25 +180,19 @@ def test_send_message_uses_chat_route_and_current_body():
     }
 
 
-def test_read_has_no_body_and_voice_has_dedicated_route():
-    transport = FakeTransport([
-        RelayResponse(204),
-        RelayResponse(202, {"voice_memo": {"id": MESSAGE_ID}}),
-    ])
+@pytest.mark.parametrize("key", ["", "x" * 256])
+def test_every_message_send_requires_a_valid_idempotency_key(key):
+    client = RelayClient(TOKEN, transport=FakeTransport([]))
+    with pytest.raises(ValueError, match="Idempotency-Key"):
+        asyncio.run(client.send_text(CHAT_ID, "hello", idempotency_key=key))
+
+
+def test_read_has_no_body():
+    transport = FakeTransport([RelayResponse(204)])
     client = RelayClient(TOKEN, transport=transport)
     asyncio.run(client.mark_read(CHAT_ID))
-    result = asyncio.run(client.send_voice_memo(
-        CHAT_ID,
-        "01993d50-ef7b-7b37-886b-23fd80c7ec16",
-    ))
-    assert result["voice_memo"]["id"] == MESSAGE_ID
     assert transport.calls[0]["path"] == f"/v1/chats/{CHAT_ID}/read"
     assert transport.calls[0]["body"] is None
-    assert transport.calls[1]["path"] == f"/v1/chats/{CHAT_ID}/voicememo"
-    assert transport.calls[1]["body"] == {
-        "attachment_id": "01993d50-ef7b-7b37-886b-23fd80c7ec16",
-    }
-    assert transport.calls[1]["headers"] == {}
 
 
 def test_attachment_allocates_with_json_then_puts_raw_bytes():
@@ -250,11 +257,15 @@ def test_full_snapshot_fetches_every_chat_and_message_page():
         "id": MESSAGE_ID,
         "chat_id": CHAT_ID,
         "is_from_me": False,
+        "is_system_message": False,
+        "created_at": "2026-08-29T01:00:00Z",
     }
     message_two = {
         "id": MESSAGE_ID_2,
         "chat_id": CHAT_ID,
         "is_from_me": True,
+        "is_system_message": False,
+        "created_at": "2026-08-29T02:00:00Z",
     }
     transport = FakeTransport([
         RelayResponse(200, {"chats": [chat_one], "next_cursor": "chats-2"}),
@@ -348,6 +359,27 @@ def test_websocket_commits_before_cumulative_ack():
     assert order == ["commit:41", "ack:41"]
     assert inbox.events == [event()]
     assert socket.sent == [{"type": "ack", "through_sequence": "41"}]
+
+
+@pytest.mark.parametrize("event_type", ["contact.added", "contact.removed"])
+def test_websocket_accepts_current_contact_events(event_type):
+    current = event()
+    current["event_type"] = event_type
+    current["data"] = {
+        "contact": {
+            "id": "01993d50-ef7b-7b37-886b-23fd80c7ec18",
+            "handle": "current-handle",
+            "display_name": "Current Contact",
+        }
+    }
+    order: List[str] = []
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": current},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == ["commit:1", "ack:1"]
 
 
 def test_websocket_refuses_to_ack_over_a_sequence_gap():
@@ -842,13 +874,7 @@ def test_base_url_idempotency_and_errors():
     with pytest.raises(ValueError):
         normalize_base_url("http://api.relayapp.im")
     assert reply_idempotency_key(EVENT_ID, 2) == f"reply-{EVENT_ID}-2"
-    first = reply_idempotency_key(EVENT_ID, 0, {"message": {"value": "one"}})
-    assert first == reply_idempotency_key(
-        EVENT_ID, 0, {"message": {"value": "one"}}
-    )
-    assert first != reply_idempotency_key(
-        EVENT_ID, 0, {"message": {"value": "two"}}
-    )
+    assert reply_idempotency_key(EVENT_ID) == f"reply-{EVENT_ID}-0"
     assert classify_status(401) == "auth"
     assert classify_status(429) == "retryable"
     assert classify_status(400) == "rejected"

@@ -18,4 +18,4 @@ esac
 mkdir -p "$RELAY_STATE_DIR"
 chmod 700 "$RELAY_STATE_DIR"
 
-exec hermes gateway start
+exec hermes gateway run

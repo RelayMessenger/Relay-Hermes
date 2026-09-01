@@ -1,0 +1,3 @@
+include plugin.yaml
+recursive-include scripts *.sh
+recursive-include tests *.py

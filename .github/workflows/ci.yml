@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [staging]
+    branches: [main, staging]
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HERMES_AGENT_COMMIT: aff5125f8edf5095aef5d3d79bbbb101c95b9413
+  HERMES_AGENT_COMMIT: 04224b2f82aabbe89525451089eb2677edfae179
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
 
 jobs:
@@ -63,4 +63,4 @@ jobs:
         run: |
           python -m build
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          python -c "import hermes_relay_plugin; from importlib.metadata import version; assert version('hermes-relay-plugin') == '1.0.0'"
+          python -c "import relay_hermes; from importlib.metadata import version; assert version('relay-hermes') == '1.0.0'"

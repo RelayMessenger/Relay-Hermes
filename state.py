@@ -114,7 +114,7 @@ class RelayInbox:
         return self._db
 
     def accept(self, sequence: str, event: Dict[str, Any]) -> bool:
-        """Commit a delivery and deduplicated event in one FULL-sync transaction.
+        """Commit a delivery and deduplicated event in one transaction.
 
         Returns true only when ``event_id`` created new pending work. The caller
         may ACK ``sequence`` after this method returns.

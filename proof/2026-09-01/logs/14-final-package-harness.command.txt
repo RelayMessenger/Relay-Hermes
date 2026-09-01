@@ -1,0 +1,37 @@
+set -euo pipefail
+cd /home/daytona/relay-hermes
+rm -rf build dist ./*.egg-info
+.venv-3.13/bin/python -m build
+sha256sum dist/*
+uv pip check --python .venv-3.13/bin/python
+rm -rf /home/daytona/wheel-venv /home/daytona/wheel-home
+uv venv --python 3.13 /home/daytona/wheel-venv
+uv pip install --python /home/daytona/wheel-venv/bin/python dist/*.whl pyyaml
+uv pip check --python /home/daytona/wheel-venv/bin/python
+/home/daytona/wheel-venv/bin/python - <<'PY'
+from importlib.metadata import entry_points, version
+assert version("relay-hermes") == "1.0.0"
+ep = next(ep for ep in entry_points().select(group="hermes_agent.plugins") if ep.name == "relay-hermes")
+assert ep.value == "relay_hermes"
+module = ep.load()
+assert callable(module.register)
+print(f"distribution=relay-hermes version={version('relay-hermes')} entrypoint={ep.name}:{ep.value}")
+PY
+mkdir -p /home/daytona/wheel-home
+printf 'plugins:\n  enabled:\n    - relay-hermes\n' > /home/daytona/wheel-home/config.yaml
+cd /home/daytona/hermes-agent
+HERMES_HOME=/home/daytona/wheel-home RELAY_AGENT_TOKEN=relay-test-token RELAY_STATE_DIR=/home/daytona/wheel-home/relay-state /home/daytona/wheel-venv/bin/python - <<'PY'
+from gateway.platform_registry import platform_registry
+from hermes_cli.plugins import PluginManager
+manager = PluginManager()
+manager.discover_and_load()
+plugin = next(item for item in manager.list_plugins() if item["name"] == "relay-hermes" and item["source"] == "entrypoint")
+entry = platform_registry.get("relayapp")
+assert plugin["enabled"] is True and plugin["error"] is None, plugin
+assert entry is not None and entry.required_env == ["RELAY_AGENT_TOKEN"]
+print(f"wheel_plugin={plugin['name']} source={plugin['source']} platform={entry.name}")
+PY
+cd /home/daytona/relay-hermes
+unzip -l dist/*.whl
+unzip -l dist/*.whl | grep 'relay_hermes/plugin.yaml'
+tar -tzf dist/*.tar.gz | grep -E '/(plugin.yaml|scripts/run-staging.sh|tests/conftest.py)$'

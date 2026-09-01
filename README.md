@@ -1,108 +1,114 @@
-# hermes-relay-plugin
+# Relay-Hermes
 
-Connect [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Relay
-as an always-on agent.
+[Relay-Hermes](https://github.com/RelayMessenger/Relay-Hermes) connects
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) to Relay as an
+always-on messaging platform.
 
-The plugin receives agent events from Relay over WebSocket and sends replies
-through Relay API v1.
+Relay events arrive over the Relay v1 acknowledged WebSocket. Hermes replies
+are sent through Relay's REST API.
 
-## Reliability
+## Delivery model
 
-For every event, the plugin:
+For each Relay event, the plugin:
 
 1. commits the complete envelope and `event_id` to a durable SQLite inbox;
-2. sends a cumulative ACK only after that commit;
-3. processes the inbox after acceptance;
-4. deduplicates replayed `event_id` values;
-5. replies through `POST /v1/chats/{chatId}/messages`;
-6. derives a stable `Idempotency-Key` from the triggering event.
+2. sends a cumulative WebSocket ACK only after the commit;
+3. deduplicates replayed `event_id` values;
+4. starts a Hermes turn only for an inbound `message.received` event;
+5. explicitly marks the Chat Read when Hermes starts processing the turn;
+6. sends each Message through `POST /v1/chats/{chatId}/messages` with an
+   `Idempotency-Key`.
 
-The inbox survives a gateway restart. A processing failure returns the row to
-`pending`; it does not move Relay's ACK backward or lose the event.
+Transport acknowledgement and Read are separate. A WebSocket ACK never marks
+a Chat Read.
 
-A cumulative WebSocket ACK, like a webhook HTTP 2xx, acknowledges transport
-only. It never marks a Chat as read. The plugin calls Read only from Hermes's
-processing-start hook for a turn Hermes actually begins.
+Relay-Hermes does not poll for events and does not expose a public HTTP server.
+It also does not add reactions, edits, typing indicators, or other Message
+effects.
 
-When Relay reports that the saved checkpoint is outside retention, the plugin:
+### Recovery
 
-1. does not ACK any event;
-2. paginates through every visible Chat and every page of its Messages;
-3. validates Chat ids, Message ids, ownership, and pagination continuity;
-4. atomically replaces a deterministic SQLite snapshot and saves the
-   `full_sync_through` checkpoint in the same transaction;
-5. sends `full_sync_complete` only after SQLite commits.
+The SQLite inbox survives gateway restarts. If processing fails, the event
+returns to `pending`; the durable transport checkpoint does not move backward.
 
-The snapshot rebuilds the adapter's Chat kind and latest-inbound indexes. It
-does not turn old history into new agent turns. If the REST snapshot cannot be
-safely reconciled, the plugin stops with `relay_full_sync_failed` and sends no
-false completion.
+If Relay reports that a checkpoint is outside retention, the plugin follows
+the WebSocket FULL-sync flow. It pages through visible Chats and Messages,
+validates the snapshot, atomically stores it with `full_sync_through`, and
+sends `full_sync_complete` only after the transaction commits. Historical
+Messages rebuild local indexes and never become new Hermes turns.
 
-## Setup
+## Install
 
-Create an agent and Agent Token in
-[Relay Console](https://console.relayapp.im).
+Hermes supports Git-installed directory plugins:
 
 ```sh
-git clone https://github.com/relaymessenger/hermes-relay-plugin \
-  ~/.hermes/plugins/relay
-hermes plugins enable relayapp-platform
+hermes plugins install RelayMessenger/Relay-Hermes --enable
 ```
 
-Set the Agent Token:
+The same repository can be installed as a Python package. Its
+`hermes_agent.plugins` entry point registers the identical platform adapter.
 
-```sh
+Create an Agent and copy its Agent Token from
+[Relay Console](https://console.relayapp.im), then save the token in
+`~/.hermes/.env`:
+
+```dotenv
 RELAY_AGENT_TOKEN=your_agent_token
 ```
 
-The agent must have no saved webhook subscriptions. Relay returns HTTP `409`
-when a webhook subscription exists. Delete the subscriptions before starting
-Hermes with this plugin.
+An Agent using this WebSocket must not have a saved webhook subscription.
+Relay rejects the WebSocket upgrade with HTTP `409` until those subscriptions
+are removed.
 
-Then start Hermes:
+Start Hermes in the foreground:
 
 ```sh
+hermes gateway run
+```
+
+For an always-on installation, use Hermes's service commands:
+
+```sh
+hermes gateway install
 hermes gateway start
 ```
 
-The plugin connects to `wss://api.relayapp.im/v1/websocket`. It derives the
-WebSocket URL from `RELAY_BASE_URL` and authenticates the upgrade with:
-
-```http
-Authorization: Bearer <Agent Token>
-```
-
-## Connection handling
-
-The plugin replies to Relay heartbeat pings with `pong`. Heartbeats check the
-connection; cumulative ACKs advance event delivery.
-
-| Condition | Behavior |
-| --- | --- |
-| `heartbeat_timeout` or `restart` | Reconnect with exponential backoff and jitter |
-| Retryable `ack_failed` or `delivery_failed` | Reconnect with backoff |
-| Close code `1011`, `1012`, or `4408` | Reconnect with backoff |
-| `revoked` or close code `4401` | Stop and require a valid Agent Token |
-| HTTP `409`, `webhook_configured`, or close code `4410` | Stop until every webhook subscription is removed |
-| Any other Relay policy close code | Stop and report the close reason |
+The Hermes platform id is `relayapp`. Hermes already reserves `relay` for its
+generic connector platform.
 
 ## Configuration
 
-| Variable | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `RELAY_AGENT_TOKEN` | yes | | Agent Token |
-| `RELAY_BASE_URL` | no | `https://api.relayapp.im` | Relay API origin |
-| `RELAY_ALLOWED_USERS` | no | | Comma-separated Contact ids; unset accepts all |
-| `RELAY_STATE_DIR` | no | `~/.hermes/relay` | SQLite inbox directory |
-| `RELAY_REPLY_TO_MODE` | no | `auto` | `off`, `first`, `all`, or `auto` |
-| `RELAY_GROUP_REPLY_POLICY` | no | `mentions` | `mentions` or `all` |
-| `RELAY_HOME_CHANNEL` | no | | Chat id for cron delivery |
-| `RELAY_HOME_CHANNEL_NAME` | no | | Human label for that Chat |
+`RELAY_AGENT_TOKEN` is the only required setting.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `RELAY_BASE_URL` | `https://api.relayapp.im` | Relay API origin |
+| `RELAY_ALLOWED_CONTACTS` | all reachable Contacts | Comma-separated Contact ids allowed to start turns |
+| `RELAY_STATE_DIR` | `~/.hermes/relay` | Durable SQLite inbox directory |
+| `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy: `off`, `first`, `all`, or `auto` |
+| `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
+| `RELAY_HOME_CHAT` | unset | Chat id for cron and direct `hermes send` delivery |
+| `RELAY_HOME_CHAT_NAME` | Chat id | Human label for the home Chat |
+
+Non-secret settings can instead be placed under
+`gateway.platforms.relayapp.extra` in `~/.hermes/config.yaml`; environment
+variables take precedence:
+
+```yaml
+gateway:
+  platforms:
+    relayapp:
+      enabled: true
+      extra:
+        allowed_contacts:
+          - 01993d50-ef7b-7b37-886b-23fd80c7ec12
+        group_chat_policy: mentions
+        reply_to_mode: auto
+```
 
 ### Isolated staging
 
-Use a staging Agent Token, a staging API origin, and a separate SQLite
-directory. Never reuse a production token or checkpoint database:
+Use a staging Agent Token, the staging API origin, and a separate inbox:
 
 ```sh
 export RELAY_AGENT_TOKEN='staging-agent-token'
@@ -111,28 +117,44 @@ export RELAY_STATE_DIR="$HOME/.hermes/relay-staging"
 ./scripts/run-staging.sh
 ```
 
-## Current Relay contract
+The staging helper refuses every other API origin.
 
-- event envelopes use `api_version: v1` and `webhook_version: 2026-08-30`;
-- incoming Message data is the event's `data` object;
-- Chat id is `data.chat.id`;
-- sender is `data.sender_handle`;
-- text is `part.value`;
-- mentions use `part.mention`;
-- Read is `POST /v1/chats/{chatId}/read` with no body;
-- replies use `POST /v1/chats/{chatId}/messages`;
-- voice memos use `POST /v1/chats/{chatId}/voicememo`;
-- attachments are allocated with JSON, then uploaded by raw `PUT`.
+## Locked Relay contract
+
+This version was audited against Relay Server developer OpenAPI commit
+`9b4d5bb32cc749c6fd271969948c385300d404d6`. The exact
+`contracts/developer/openapi.yaml` SHA-256 is
+`f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`.
+
+The runtime contract used here is:
+
+- `GET /v1/websocket` for acknowledged agent events;
+- `GET /v1/chats` and `GET /v1/chats/{chatId}/messages` only for a
+  server-directed FULL sync;
+- `POST /v1/chats/{chatId}/read` with no request body at processing start;
+- `POST /v1/attachments`, followed by the allocated raw `PUT`, for local
+  files;
+- `POST /v1/chats/{chatId}/messages` with `Idempotency-Key` for every Message
+  send;
+- event envelopes with `api_version: v1` and
+  `webhook_version: 2026-08-30`.
+
+Relay vocabulary in the adapter is Contact, Handle, Chat, Message, and
+Participant.
 
 ## Development
+
+Python 3.11 through 3.13 are supported.
 
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 HERMES_AGENT_SRC=/path/to/hermes-agent .venv/bin/python -m pytest
+python -m build
+hermes plugins doctor . --ci
 ```
 
-The tests cover exact REST paths and bodies, paginated FULL sync, deterministic
-snapshot recovery, WebSocket authentication, commit-before-ACK ordering,
-replay deduplication, heartbeat handling, reconnect behavior, and the real
-Hermes adapter and plugin registration surfaces.
+Tests cover REST paths and bodies, Message idempotency, explicit Read timing,
+FULL-sync recovery, WebSocket authentication and acknowledgement ordering,
+replay deduplication, heartbeat and reconnect behavior, package installation,
+and Hermes directory-plugin registration.

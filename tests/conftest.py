@@ -5,9 +5,9 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if "hermes_relay_plugin" not in sys.modules:
-    package = types.ModuleType("hermes_relay_plugin")
+if "relay_hermes" not in sys.modules:
+    package = types.ModuleType("relay_hermes")
     package.__path__ = [str(ROOT)]
-    sys.modules["hermes_relay_plugin"] = package
+    sys.modules["relay_hermes"] = package
 
 collect_ignore = ["../adapter.py"]

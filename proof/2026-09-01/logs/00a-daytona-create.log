@@ -1,0 +1,4 @@
+time="2026-09-01T03:56:47-04:00" level=warning msg="Version mismatch: Daytona CLI is on v0.190.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+ Sandbox 'relay-hermes-validation-20260901' created successfully
+ Connect via SSH:         daytona ssh relay-hermes-validation-20260901
+ Open the Web Terminal:   https://22222-7f66c025-9a3e-4010-873d-f9509e38ae02.daytonaproxy01.net

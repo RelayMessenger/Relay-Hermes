@@ -1,4 +1,5 @@
-name: relayapp-platform
+manifest_version: 1
+name: relay-hermes
 label: Relay
 kind: platform
 version: 1.0.0
@@ -8,8 +9,12 @@ description: >
   before cumulative ACK, deduplicates event_id, and sends idempotent replies
   through Relay API v1.
 author: Companion, Inc.
-homepage: https://github.com/relaymessenger/hermes-relay-plugin
+homepage: https://github.com/RelayMessenger/Relay-Hermes
 license: MIT
+tags:
+  - messaging
+  - relay
+  - websocket
 requires_env:
   - name: RELAY_AGENT_TOKEN
     description: "Relay Agent Token"
@@ -21,7 +26,7 @@ optional_env:
     description: "Relay API origin (default: https://api.relayapp.im). HTTPS is required except on loopback."
     prompt: "Relay API base URL"
     password: false
-  - name: RELAY_ALLOWED_USERS
+  - name: RELAY_ALLOWED_CONTACTS
     description: "Optional comma-separated Relay Contact ids allowed to talk to the agent"
     prompt: "Allowed Relay Contact ids"
     password: false
@@ -33,15 +38,15 @@ optional_env:
     description: "Reply threading: off | first | all | auto"
     prompt: "Reply threading mode"
     password: false
-  - name: RELAY_GROUP_REPLY_POLICY
-    description: "Group policy: mentions | all"
-    prompt: "Group reply policy"
+  - name: RELAY_GROUP_CHAT_POLICY
+    description: "Group Chat policy: mentions | all"
+    prompt: "Group Chat policy"
     password: false
-  - name: RELAY_HOME_CHANNEL
+  - name: RELAY_HOME_CHAT
     description: "Default Chat id for cron and notification delivery"
     prompt: "Home Chat id"
     password: false
-  - name: RELAY_HOME_CHANNEL_NAME
+  - name: RELAY_HOME_CHAT_NAME
     description: "Human label for the home Chat"
     prompt: "Home Chat name"
     password: false

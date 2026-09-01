@@ -8,6 +8,7 @@ in hermes config").
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,8 @@ def test_every_top_level_key_is_in_the_contract(manifest):
 
 def test_declares_a_platform_plugin(manifest):
     assert manifest["kind"] == "platform"
-    assert manifest["name"] == "relayapp-platform"
+    assert manifest["manifest_version"] == 1
+    assert manifest["name"] == "relay-hermes"
     assert manifest["label"] == "Relay"
 
 
@@ -67,6 +69,38 @@ def test_the_token_is_masked_and_points_at_its_docs(manifest):
 def test_no_secret_is_declared_optional(manifest):
     for entry in manifest["optional_env"]:
         assert entry["password"] is False, entry["name"]
+
+
+def test_manifest_uses_current_relay_vocabulary(manifest):
+    optional = {entry["name"] for entry in manifest["optional_env"]}
+    assert {
+        "RELAY_ALLOWED_CONTACTS",
+        "RELAY_HOME_CHAT",
+        "RELAY_HOME_CHAT_NAME",
+        "RELAY_GROUP_CHAT_POLICY",
+    } <= optional
+    assert not any("USER" in name or "CHANNEL" in name for name in optional)
+
+
+def test_public_repository_metadata_is_canonical(manifest):
+    root = MANIFEST.parent
+    canonical = "https://github.com/RelayMessenger/Relay-Hermes"
+    assert manifest["homepage"] == canonical
+    assert canonical in (root / "README.md").read_text(encoding="utf-8")
+    assert canonical in (root / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_pip_entrypoint_uses_current_hermes_module_convention():
+    metadata = tomllib.loads(
+        (MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert metadata["project"]["name"] == "relay-hermes"
+    assert metadata["project"]["entry-points"]["hermes_agent.plugins"] == {
+        "relay-hermes": "relay_hermes",
+    }
+    assert metadata["tool"]["setuptools"]["package-data"] == {
+        "relay_hermes": ["plugin.yaml"],
+    }
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])

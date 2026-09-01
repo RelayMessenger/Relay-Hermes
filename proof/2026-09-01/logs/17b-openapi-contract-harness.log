@@ -1,0 +1,2 @@
+f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5  relay-openapi.yaml
+openapi_contract=pass required_paths=5 websocket_frames=9 vocabulary=Contact,Handle,Chat,Message,Participant

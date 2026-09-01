@@ -1,0 +1,7 @@
+set -euo pipefail
+uv pip install --python /home/daytona/relay-hermes/.venv-3.13/bin/python rich
+cd /home/daytona/hermes-agent
+PYTHONPATH=/home/daytona/hermes-agent /home/daytona/relay-hermes/.venv-3.13/bin/python - <<'PY'
+from hermes_cli.plugins_cmd import cmd_plugin_doctor
+cmd_plugin_doctor('/home/daytona/relay-hermes', ci=True)
+PY

@@ -1,7 +1,7 @@
 """Relay platform adapter for Hermes Agent.
 
-Makes a Relay Chat a Hermes channel: your Hermes shows up in
-Relay as a contact people text like a friend. Inbound messages arrive by
+Makes a Relay Chat a Hermes platform: your Hermes appears as a Contact people
+can message. Inbound Messages arrive by
 Relay WebSocket, and replies go out through the v1 Chats/Messages REST API.
 The always-on Hermes gateway can own this connection without exposing a
 public URL.
@@ -17,18 +17,18 @@ obvious name is taken; ``Platform._missing_`` mints a stable pseudo-member for
 any registered plugin name, so a fresh id resolves with no core edits.
 
 Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
-``platforms.relayapp.extra``; env wins)::
+``gateway.platforms.relayapp.extra``; env wins)::
 
     RELAY_AGENT_TOKEN          Agent Token, shown once at agent creation
     RELAY_BASE_URL             API origin (default: https://api.relayapp.im)
-    RELAY_ALLOWED_USERS        Optional comma-separated Contact ids
+    RELAY_ALLOWED_CONTACTS     Optional comma-separated Contact ids
     RELAY_STATE_DIR            Durable inbox directory (default: ~/.hermes/relay)
-    RELAY_HOME_CHANNEL         Chat id for cron delivery
-    RELAY_HOME_CHANNEL_NAME    Human label for the home channel
+    RELAY_HOME_CHAT             Chat id for cron delivery
+    RELAY_HOME_CHAT_NAME        Human label for the home Chat
     RELAY_REPLY_TO_MODE        off | first | all | auto (default: auto)
-    RELAY_GROUP_REPLY_POLICY   mentions | all (default: mentions)
+    RELAY_GROUP_CHAT_POLICY    mentions | all (default: mentions)
 
-Relay authenticates senders server side. When ``RELAY_ALLOWED_USERS`` is set,
+Relay authenticates senders server side. When ``RELAY_ALLOWED_CONTACTS`` is set,
 only those Contact ids are passed to Hermes; otherwise every Contact that can
 message the agent is accepted.
 """
@@ -65,7 +65,7 @@ from .relay_api import (
     WEBSOCKETS_AVAILABLE,
     MAX_PARTS_PER_MESSAGE,
     MAX_TEXT_PART_UNITS,
-    InboundMessage,
+    InboundRelayMessage,
     RelayApiError,
     RelayClient,
     RelayFullSyncError,
@@ -109,23 +109,36 @@ DEFAULT_REPLY_TO_MODE = "auto"
 # answers only when mentioned; "all" answers every group message, for an agent
 # whose job really is to read the whole room. Direct messages are answered
 # either way.
-GROUP_REPLY_POLICIES = {"mentions", "all"}
-DEFAULT_GROUP_REPLY_POLICY = "mentions"
+GROUP_CHAT_POLICIES = {"mentions", "all"}
+DEFAULT_GROUP_CHAT_POLICY = "mentions"
 
 _TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
     contextvars.ContextVar("relay_turn_event", default=None)
 )
+
 
 def _resolve(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
     """Env wins over ``config.yaml`` extras; both stripped."""
     return os.getenv(env, "").strip() or str(extra.get(key, "") or "").strip() or default
 
 
-def _resolve_authz(extra: Dict[str, Any], key: str, env: str) -> str:
-    """Use the value captured before Hermes' generic authorization hand-off."""
+def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
+    """Resolve Contact ids from YAML list/string or the environment."""
+
+    key = "allowed_contacts"
+    env = "RELAY_ALLOWED_CONTACTS"
     if key in extra:
-        return str(extra.get(key) or "").strip()
-    return os.getenv(env, "").strip()
+        configured = extra.get(key)
+        if isinstance(configured, (list, tuple, set)):
+            return {
+                str(contact_id).strip()
+                for contact_id in configured
+                if str(contact_id).strip()
+            }
+        raw = str(configured or "")
+    else:
+        raw = os.getenv(env, "")
+    return {contact_id.strip() for contact_id in raw.split(",") if contact_id.strip()}
 
 
 _CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
@@ -134,8 +147,7 @@ _CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
 def _strip_chunk_indicators(chunks: List[str]) -> List[str]:
     """Remove the base splitter's `` (1/3)`` suffixes.
 
-    Relay bubbles flow naturally without pagination furniture, the same
-    override the BlueBubbles iMessage channel makes.
+    Relay bubbles flow naturally without pagination furniture.
     """
     return [_CHUNK_INDICATOR.sub("", chunk) for chunk in chunks]
 
@@ -212,17 +224,15 @@ def _explicit_reply_to_mode(config) -> str:
 class RelayAdapter(BasePlatformAdapter):
     """Durable WebSocket in, idempotent v1 Chats/Messages REST out.
 
-    Replies commit as canonical messages. Relay has no live partial bubble and
-    no message-edit endpoint on the developer API, so ``SUPPORTS_MESSAGE_EDITING``
-    stays off and the stream consumer skips the progressive-edit path.
+    Replies commit as canonical Messages. The adapter deliberately implements
+    no reactions, edits, typing indicators, or other Message effects.
 
     A Message contains up to 100 ordered text or media parts. Group messages
     are answered only when their structured mention names this agent, unless
-    ``RELAY_GROUP_REPLY_POLICY=all``.
+    ``RELAY_GROUP_CHAT_POLICY=all``.
     """
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
-    SUPPORTS_MESSAGE_EDITING = False
     # send() chunks long replies itself, so gateway/delivery.py must hand over
     # the full content untruncated.
     splits_long_messages = True
@@ -264,22 +274,18 @@ class RelayAdapter(BasePlatformAdapter):
         # be what turns an agent into one that answers every message in every
         # group.
         policy = _resolve(
-            extra, "group_reply_policy", "RELAY_GROUP_REPLY_POLICY",
+            extra, "group_chat_policy", "RELAY_GROUP_CHAT_POLICY",
         ).strip().lower()
-        if policy and policy not in GROUP_REPLY_POLICIES:
+        if policy and policy not in GROUP_CHAT_POLICIES:
             logger.warning(
-                "[%s] unknown group_reply_policy %r, using %r (valid: %s)",
-                self.name, policy, DEFAULT_GROUP_REPLY_POLICY,
-                ", ".join(sorted(GROUP_REPLY_POLICIES)),
+                "[%s] unknown group_chat_policy %r, using %r (valid: %s)",
+                self.name, policy, DEFAULT_GROUP_CHAT_POLICY,
+                ", ".join(sorted(GROUP_CHAT_POLICIES)),
             )
             policy = ""
-        self._group_reply_policy = policy or DEFAULT_GROUP_REPLY_POLICY
+        self._group_chat_policy = policy or DEFAULT_GROUP_CHAT_POLICY
 
-        self._allowed_users = {
-            entry.strip()
-            for entry in _resolve_authz(extra, "allowed_users", "RELAY_ALLOWED_USERS").split(",")
-            if entry.strip()
-        }
+        self._allowed_contacts = _resolve_contact_allowlist(extra)
 
         self._client: Optional[RelayClient] = None
         self._receive_task: Optional[asyncio.Task] = None
@@ -288,9 +294,9 @@ class RelayAdapter(BasePlatformAdapter):
 
         # chat_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
-        # Chat kind, learned directly from each MessageEvent.
-        self._group_convs: set = set()
-        self._direct_convs: set = set()
+        # Chat kind, learned directly from each Relay Message event.
+        self._group_chats: set = set()
+        self._direct_chats: set = set()
     # -- Connection lifecycle ----------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -369,8 +375,8 @@ class RelayAdapter(BasePlatformAdapter):
         self._inbox.close()
 
         await self._close_client()
-        self._direct_convs.clear()
-        self._group_convs.clear()
+        self._direct_chats.clear()
+        self._group_chats.clear()
         self._last_inbound.clear()
         logger.info("[%s] disconnected", self.name)
 
@@ -381,8 +387,8 @@ class RelayAdapter(BasePlatformAdapter):
 
     # -- Receive -----------------------------------------------------------
 
-    def _allow_sender(self, sender_id: str) -> bool:
-        return not self._allowed_users or sender_id in self._allowed_users
+    def _allow_contact(self, contact_id: str) -> bool:
+        return not self._allowed_contacts or contact_id in self._allowed_contacts
 
     async def _run_websocket(self) -> None:
         assert self._client is not None
@@ -480,8 +486,8 @@ class RelayAdapter(BasePlatformAdapter):
                 through_sequence,
                 snapshot,
             )
-            self._group_convs = groups
-            self._direct_convs = directs
+            self._group_chats = groups
+            self._direct_chats = directs
             self._last_inbound = latest_inbound
         except RelayFullSyncError:
             raise
@@ -497,8 +503,8 @@ class RelayAdapter(BasePlatformAdapter):
         """Rebuild the adapter's Chat and latest-inbound indexes."""
 
         groups, directs, latest_inbound = self._snapshot_indexes(snapshot)
-        self._group_convs = groups
-        self._direct_convs = directs
+        self._group_chats = groups
+        self._direct_chats = directs
         self._last_inbound = latest_inbound
 
     @staticmethod
@@ -536,6 +542,8 @@ class RelayAdapter(BasePlatformAdapter):
                     or not isinstance(message_id, str)
                     or message.get("chat_id") != chat_id
                     or not isinstance(message.get("is_from_me"), bool)
+                    or not isinstance(message.get("is_system_message"), bool)
+                    or not isinstance(message.get("created_at"), str)
                 ):
                     raise RelayFullSyncError(
                         "Relay REST snapshot contains a Message the Hermes "
@@ -545,11 +553,7 @@ class RelayAdapter(BasePlatformAdapter):
                     message["is_from_me"] is False
                     and message.get("is_system_message") is not True
                 ):
-                    created_at = message.get("created_at")
-                    inbound.append((
-                        created_at if isinstance(created_at, str) else "",
-                        message_id,
-                    ))
+                    inbound.append((message["created_at"], message_id))
             if inbound:
                 latest_inbound[chat_id] = max(inbound)[1]
 
@@ -574,10 +578,10 @@ class RelayAdapter(BasePlatformAdapter):
                 # start and finish a fast background turn before it returns.
                 self._inbox.mark_dispatched(event_id)
                 inbound = parse_inbound(event)
-                if inbound is None or inbound.sender_kind == "agent":
+                if inbound is None or inbound.sender_contact_kind == "agent":
                     self._inbox.complete(event_id, ignored=True)
                     continue
-                if not self._allow_sender(inbound.sender_id):
+                if not self._allow_contact(inbound.sender_contact_id):
                     self._inbox.complete(event_id, ignored=True)
                     continue
                 dispatched = await self._on_inbound(inbound)
@@ -591,16 +595,16 @@ class RelayAdapter(BasePlatformAdapter):
                 logger.exception("[%s] Relay event %s failed", self.name, event_id)
                 await asyncio.sleep(1.0)
 
-    def _addressed_in_group(self, inbound: InboundMessage) -> bool:
+    def _addressed_in_group(self, inbound: InboundRelayMessage) -> bool:
         """Match a structured mention against ``chat.owner_handle``."""
-        if self._group_reply_policy == "all":
+        if self._group_chat_policy == "all":
             return True
         return mentions_agent(
             inbound.message,
             handle=inbound.agent_handle,
         )
 
-    async def _on_inbound(self, inbound: InboundMessage) -> bool:
+    async def _on_inbound(self, inbound: InboundRelayMessage) -> bool:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
         chat_id = inbound.chat_id
         if chat_id and inbound.message_id:
@@ -609,7 +613,7 @@ class RelayAdapter(BasePlatformAdapter):
             self._last_inbound[chat_id] = inbound.message_id
 
         is_group = inbound.is_group
-        cache = self._group_convs if is_group else self._direct_convs
+        cache = self._group_chats if is_group else self._direct_chats
         if len(cache) > 1000:
             cache.clear()
         cache.add(chat_id)
@@ -634,8 +638,14 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             chat_name=f"Relay Chat {chat_id}",
             chat_type=chat_type,
-            user_id=inbound.sender_id or "unknown",
-            user_name=inbound.sender_name or inbound.sender_id or "unknown",
+            # Hermes names these normalized adapter fields user_id/user_name.
+            # Their Relay values are the sending Contact id and display name.
+            user_id=inbound.sender_contact_id or "unknown",
+            user_name=(
+                inbound.sender_contact_name
+                or inbound.sender_contact_id
+                or "unknown"
+            ),
             message_id=inbound.message_id,
         )
 
@@ -643,8 +653,8 @@ class RelayAdapter(BasePlatformAdapter):
             text=text or MEDIA_PLACEHOLDER,
             message_type=MessageType.PHOTO if media_paths else MessageType.TEXT,
             source=source,
-            user_id=inbound.sender_id or None,
-            user_name=inbound.sender_name or None,
+            user_id=inbound.sender_contact_id or None,
+            user_name=inbound.sender_contact_name or None,
             message_id=inbound.message_id or inbound.event_id,
             raw_message=inbound.event,
             timestamp=self._parse_timestamp(inbound.created_at),
@@ -821,7 +831,7 @@ class RelayAdapter(BasePlatformAdapter):
         # agent forced to emit something emits filler. Silence stays DM-only:
         # a group turn only reaches here because the agent was named, and being
         # named and then saying nothing reads as broken rather than tactful.
-        if self._is_silence(content) and chat_id not in self._group_convs:
+        if self._is_silence(content) and chat_id not in self._group_chats:
             logger.info("[%s] model chose not to reply in %s", self.name, chat_id)
             await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=None)
@@ -881,7 +891,7 @@ class RelayAdapter(BasePlatformAdapter):
         if mode == "off":
             return False
         if mode == "auto":
-            if chat_id in self._group_convs:
+            if chat_id in self._group_chats:
                 return True
             return reply_to != self._last_inbound.get(chat_id)
         return True
@@ -982,10 +992,7 @@ class RelayAdapter(BasePlatformAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
     ) -> SendResult:
-        # A caption rides AFTER the media, as its own text part in the same
-        # POST, so it commits as its own bubble under the photo. Decided
-        # 2026-08-19 against the owner's measured chat.db majority; the
-        # BlueBubbles iMessage channel ships captions the same way.
+        # A caption follows the media as its own text part in the same Message.
         parts: List[Dict[str, Any]] = [part]
         if caption:
             parts.extend({"type": "text", "value": chunk} for chunk in _bubble_chunks(caption))
@@ -1051,36 +1058,26 @@ class RelayAdapter(BasePlatformAdapter):
     async def send_video(self, chat_id, video_path, caption=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
         return await self.send_document(chat_id, video_path, caption=caption, reply_to=reply_to)
 
-    async def send_voice(self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        """Upload audio and use the dedicated voice-memo route."""
-        content_type = mimetypes.guess_type(audio_path)[0] or ""
-        if not content_type.startswith("audio/"):
-            # Relay validates the audio/* family for voice memos; anything
-            # else ships as a regular attachment.
-            return await self.send_document(chat_id, audio_path, caption=caption, reply_to=reply_to)
-        attachment_id, error = await self._upload_attachment(audio_path)
-        if not attachment_id:
-            return SendResult(success=False, error=error)
-        assert self._client is not None
-        try:
-            body = await self._client.send_voice_memo(
-                chat_id,
-                attachment_id,
-            )
-            sent = body.get("voice_memo")
-            result = SendResult(
-                success=True,
-                message_id=sent.get("id") if isinstance(sent, dict) else None,
-            )
-        except RelayApiError as exc:
-            return SendResult(success=False, error=str(exc), retryable=exc.retryable)
-        if caption:
-            caption_result = await self.send(chat_id, caption, reply_to=reply_to)
-            if not caption_result.success:
-                return caption_result
-        return result
+    async def send_voice(
+        self,
+        chat_id,
+        audio_path,
+        caption=None,
+        reply_to=None,
+        metadata=None,
+        **kwargs,
+    ) -> SendResult:
+        """Send audio as an idempotent Message with one media part."""
 
-    # Hermes calls these hooks. Typing transport is not implemented here yet.
+        return await self.send_document(
+            chat_id,
+            audio_path,
+            caption=caption,
+            reply_to=reply_to,
+        )
+
+    # Hermes calls these hooks. They intentionally remain no-ops: Relay-Hermes
+    # does not emit typing or other Message effects.
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         return None
@@ -1091,7 +1088,7 @@ class RelayAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {
             "name": chat_id,
-            "type": "group" if chat_id in self._group_convs else "dm",
+            "type": "group" if chat_id in self._group_chats else "dm",
         }
 
 
@@ -1122,7 +1119,7 @@ def is_connected(config) -> bool:
     return validate_config(config)
 
 
-_OPERATOR_ALLOWED_USERS = os.getenv("RELAY_ALLOWED_USERS", "").strip()
+_OPERATOR_ALLOWED_CONTACTS = os.getenv("RELAY_ALLOWED_CONTACTS", "").strip()
 
 
 def _env_enablement() -> Optional[dict]:
@@ -1130,22 +1127,23 @@ def _env_enablement() -> Optional[dict]:
     token = os.getenv("RELAY_AGENT_TOKEN", "").strip()
     if not token:
         return None
-    # Let this adapter apply the optional Relay Contact-id allowlist. Hermes'
-    # generic layer cannot interpret Relay Contact ids.
+    # Let this adapter apply the optional Relay Contact-id allowlist. Hermes's
+    # generic authorization seam calls this concept allowed_users, so explicitly
+    # bypass that layer after preserving the operator's Contact ids here.
     seed: dict = {
         "token": token,
         "base_url": os.getenv("RELAY_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-        "allowed_users": _OPERATOR_ALLOWED_USERS,
+        "allowed_contacts": _OPERATOR_ALLOWED_CONTACTS,
     }
-    os.environ["RELAY_ALLOW_ALL_USERS"] = "true"
+    os.environ["RELAY_ALLOW_ALL_CONTACTS"] = "true"
     state_dir = os.getenv("RELAY_STATE_DIR", "").strip()
     if state_dir:
         seed["state_dir"] = state_dir
-    home = os.getenv("RELAY_HOME_CHANNEL", "").strip()
+    home = os.getenv("RELAY_HOME_CHAT", "").strip()
     if home:
         seed["home_channel"] = {
             "chat_id": home,
-            "name": os.getenv("RELAY_HOME_CHANNEL_NAME", home),
+            "name": os.getenv("RELAY_HOME_CHAT_NAME", home),
         }
     return seed
 
@@ -1162,8 +1160,8 @@ async def _standalone_send(
     """Out-of-process send for ``hermes send`` and cron ``deliver=relayapp``.
 
     Runs where no gateway adapter is live, so it opens its own short client.
-    ``thread_id`` and ``media_files`` are accepted for signature parity; this
-    path sends text parts only.
+    ``thread_id`` and ``media_files`` are Hermes adapter parameters; this path
+    sends text parts only.
     """
     if not HTTPX_AVAILABLE:
         return {"error": "relay standalone send: httpx is not installed"}
@@ -1175,7 +1173,9 @@ async def _standalone_send(
     if not token:
         return {"error": "relay standalone send: RELAY_AGENT_TOKEN is not set"}
     if not chat_id:
-        return {"error": "relay standalone send: no Chat id (set RELAY_HOME_CHANNEL)"}
+        return {
+            "error": "relay standalone send: no Chat id (set RELAY_HOME_CHAT)"
+        }
 
     parts = _fold_parts([{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)])
     if not parts:
@@ -1239,13 +1239,13 @@ def register(ctx) -> None:
         required_env=["RELAY_AGENT_TOKEN"],
         install_hint="pip install httpx websockets",
         env_enablement_fn=_env_enablement,
-        cron_deliver_env_var="RELAY_HOME_CHANNEL",
+        cron_deliver_env_var="RELAY_HOME_CHAT",
         standalone_sender_fn=_standalone_send,
-        allowed_users_env="RELAY_ALLOWED_USERS",
-        allow_all_env="RELAY_ALLOW_ALL_USERS",
+        allowed_users_env="RELAY_ALLOWED_CONTACTS",
+        allow_all_env="RELAY_ALLOW_ALL_CONTACTS",
         max_message_length=MAX_MESSAGE_LENGTH,
         emoji="\N{EIGHT SPOKED ASTERISK}",
-        # Relay sender ids are server-authenticated UUIDs; no
+        # Relay Contact ids are server-authenticated UUIDs; no
         # phone numbers or email addresses cross this adapter.
         pii_safe=True,
         allow_update_command=True,

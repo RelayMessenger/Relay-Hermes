@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from hermes_relay_plugin.state import RelayInbox
+from relay_hermes.state import RelayInbox
 
 
 def payload(event_id: str):

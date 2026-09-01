@@ -1,0 +1,5 @@
+scripts/run-staging.sh: 4: RELAY_AGENT_TOKEN: Set a staging RELAY_AGENT_TOKEN first.
+Refusing to start: RELAY_BASE_URL must be https://api.staging.relayapp.im
+no_token_rc=2
+wrong_origin_rc=2
+staging_helper=pass
