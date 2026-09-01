@@ -15,12 +15,15 @@ concurrency:
 env:
   HERMES_AGENT_COMMIT: 04224b2f82aabbe89525451089eb2677edfae179
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
+  EXPECTED_PACKAGE_VERSION: 1.0.0rc1
 
 jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,10 +31,10 @@ jobs:
 
     steps:
       - name: Check out the plugin
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check out the pinned Hermes source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: NousResearch/hermes-agent
           ref: ${{ env.HERMES_AGENT_COMMIT }}
@@ -43,7 +46,7 @@ jobs:
           test "$(git -C "$HERMES_AGENT_SRC" rev-parse HEAD)" = "$HERMES_AGENT_COMMIT"
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -62,5 +65,10 @@ jobs:
       - name: Build and install the wheel
         run: |
           python -m build
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          python -c "import relay_hermes; from importlib.metadata import version; assert version('relay-hermes') == '1.0.0'"
+          test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
+          test -f "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}.tar.gz"
+          clean_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
+          python -m venv "$clean_venv"
+          "$clean_venv/bin/python" -m pip install "dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
+          "$clean_venv/bin/python" -m pip check
+          "$clean_venv/bin/python" -c "import os; from importlib.metadata import version; assert version('relay-hermes') == os.environ['EXPECTED_PACKAGE_VERSION']"

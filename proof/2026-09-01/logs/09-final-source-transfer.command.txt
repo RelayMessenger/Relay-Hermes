@@ -1,2 +1,0 @@
-{ git ls-files -z; printf '%s\0' MANIFEST.in tests/test_hermes_runtime.py; } | LC_ALL=C sort -zu | tar --null -T - -czf /tmp/relay-hermes-working-final-20260901.tar.gz
-node /Users/advaitpaliwal/Code/Relay/_runtime/daytona-tools/upload-file.mjs 7f66c025-9a3e-4010-873d-f9509e38ae02 /tmp/relay-hermes-working-final-20260901.tar.gz /home/daytona/relay-hermes-working-final.tar.gz

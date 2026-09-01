@@ -1,61 +1,54 @@
-# Relay-Hermes validation proof (2026-09-01)
+# Relay-Hermes independent-audit validation (2026-09-01)
 
-All Linux execution in this proof ran in one fresh Daytona sandbox. No local
-Linux VM, production system, hosted Relay environment, deployment, publish, or
-secret was used.
+All Linux validation ran in fresh private Daytona sandbox
+`59631847-53ec-4aac-bd17-b98998c595c5`
+(`relay-hermes-audit-final-20260901`, Debian 13 x86_64, `daytona-large`).
+No hosted Relay environment, production endpoint, deployment, publication,
+Relay credential, publication credential, or GitHub Actions run was used.
 
-## Provenance
+## Exact source
 
-- Worktree base: `c1cec22007e1b2cc27ce2aa7cf671af2a7840db2`
-  (`origin/staging` at worktree creation)
-- Dedicated branch: `codex/relay-hermes-20260901`
-- Final tested source archive SHA-256:
-  `43a0bfbbc8936ce3b8447d59ec2d5d90e31b186e42fc7c17ef93a1403346e9c7`
-- Hermes source: `04224b2f82aabbe89525451089eb2677edfae179`
-  (the `NousResearch/hermes-agent` main HEAD audited on 2026-09-01)
+The tested archive contains the 19 final-head source files outside `proof/`.
+This explicit proof exclusion avoids a self-referential receipt hash.
+
+- Source manifest SHA-256:
+  `a1e7f6d1d46fc0d66e4a193fc396dd730ec77afe62b4e826e3b4d037c9fcf865`
+- Transferred archive SHA-256:
+  `4186ead15aed1bddf9fed548d45bfc97b3194d13e5c49c8df8d74c291870092f`
+- Hermes commit:
+  `04224b2f82aabbe89525451089eb2677edfae179`
 - Relay Server OpenAPI commit:
   `9b4d5bb32cc749c6fd271969948c385300d404d6`
-- `contracts/developer/openapi.yaml` SHA-256:
+- OpenAPI SHA-256:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
-- Daytona sandbox: `7f66c025-9a3e-4010-873d-f9509e38ae02`
-  (`relay-hermes-validation-20260901`, Debian 13 x86_64,
-  `daytonaio/sandbox:0.8.0`)
-- Sandbox final desired state: `archived`
 
-## Final results
+`logs/source.sha256` is the exact sorted source manifest. The aggregate above
+is the SHA-256 of that file and is reproducible from the final head.
 
-| Validation | Exact runtime | Result | Receipt |
-| --- | --- | --- | --- |
-| Pytest | CPython 3.11.14 | 69 passed | `logs/11a-final-py311-tests.*` |
-| Pytest | CPython 3.12.12 | 69 passed | `logs/12a-final-py312-tests.*` |
-| Pytest | CPython 3.13.11 | 69 passed | `logs/13a-final-py313-tests.*` |
-| sdist and wheel build | CPython 3.13.11 | passed | `logs/14-final-package-harness.*` |
-| Clean wheel install and `uv pip check` | CPython 3.13.11 | passed | `logs/14-final-package-harness.*` |
-| Wheel `hermes_agent.plugins` registration | Hermes `04224b2` | passed | `logs/14-final-package-harness.*` |
-| Directory-plugin runtime discovery | Hermes `04224b2` | passed in each pytest matrix run | `logs/11a-*` through `logs/13a-*` |
-| Pip-entrypoint runtime discovery | Hermes `04224b2` | passed in each pytest matrix run | `logs/11a-*` through `logs/13a-*` |
-| Hermes Plugin Doctor | Hermes `04224b2` | passed | `logs/15-plugin-doctor.*` |
-| Staging helper safety/syntax | Debian `sh` | passed | `logs/16-staging-helper-harness.*` |
-| Locked OpenAPI assertions | Python 3.13.11 + PyYAML 6.0.3 | passed | `logs/17b-openapi-contract-harness.*` |
+## Exact results
 
-Package artifacts built in Daytona:
+| Validation | Result |
+| --- | --- |
+| CPython 3.11.14 | `80 passed in 1.83s` |
+| CPython 3.12.12 | `80 passed in 1.84s` |
+| CPython 3.13.11 | `80 passed in 1.81s` |
+| Fail-closed URL/account-state selection | `7 passed, 21 deselected in 0.38s` |
+| Wheel and sdist build | `relay-hermes==1.0.0rc1`, passed |
+| Clean wheel installs | Python 3.11, 3.12, and 3.13 passed `uv pip check` |
+| Plugin manifest | `1.0.0-rc.1` |
+| Hermes Plugin Doctor | passed |
+| Hermes directory and wheel harnesses | passed |
+| Staging helper | passed; missing token and production origin both returned 2 |
+| Locked OpenAPI assertions | passed; 5 paths and 9 WebSocket frames |
+| Workflow assertions | all external actions SHA-pinned; RC workflow manual, exact-SHA, staging-only, OIDC, and provenance guarded |
 
-- `relay_hermes-1.0.0-py3-none-any.whl`:
-  `cede276816c24b8db09c8357a17cf93806fe35d9fdd1c6d6bad0e402ff5047f6`
-- `relay_hermes-1.0.0.tar.gz`:
-  `b035a12c5bfb281ce64e4fc9be3edca0d23168f608e1680ed46ee56f3703ea1b`
+Artifacts built from the exact source:
 
-The package harness also verified that `plugin.yaml` is present in the wheel,
-and that `plugin.yaml`, `scripts/run-staging.sh`, and `tests/conftest.py` are
-present in the source distribution.
+- `relay_hermes-1.0.0rc1-py3-none-any.whl`:
+  `a509868a334878f0a6bf8fa79f862739a8283646d487f5b79cea76cdbfbac51e`
+- `relay_hermes-1.0.0rc1.tar.gz`:
+  `cab6520fbfaaf1ce17a1747685e9656032a2b74a72db1d5a26bb4610cb700713`
 
-## Scope of validation
-
-The suite uses mocks for Relay network I/O and the exact locked OpenAPI for
-contract assertions. It does not connect to staging or production. The tests
-cover acknowledged WebSocket ordering and recovery, durable deduplication,
-Read timing, idempotent Message sends, the absence of Message-effect routes,
-current Relay vocabulary/configuration, package metadata, and both Hermes
-plugin-loading paths.
-
-Every `.command.txt` file contains the exact command for its adjacent log.
+The suite mocked Relay network I/O. The hosted CI and guarded PyPI workflow
+were inspected and exercised by static tests only; neither workflow was run.
+See `logs/commands.txt`, `logs/results.log`, and `receipt.json`.

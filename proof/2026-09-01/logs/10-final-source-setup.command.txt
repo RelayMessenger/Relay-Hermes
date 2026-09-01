@@ -1,9 +1,0 @@
-set -euo pipefail
-cd /home/daytona
-test "$(sha256sum relay-hermes-working-final.tar.gz | cut -d" " -f1)" = 43a0bfbbc8936ce3b8447d59ec2d5d90e31b186e42fc7c17ef93a1403346e9c7
-tar -xzf relay-hermes-working-final.tar.gz -C relay-hermes
-for py in 3.11 3.12 3.13; do
-  uv pip install --python "relay-hermes/.venv-$py/bin/python" -e 'relay-hermes[dev]' build
-  "relay-hermes/.venv-$py/bin/python" --version
-done
-sha256sum relay-hermes/MANIFEST.in relay-hermes/pyproject.toml relay-hermes/tests/test_hermes_runtime.py

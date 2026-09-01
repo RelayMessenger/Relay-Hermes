@@ -449,6 +449,45 @@ def test_env_enablement_preserves_the_operator_contact_allowlist(
     assert os.environ["RELAY_ALLOW_ALL_CONTACTS"] == "true"
 
 
+def test_invalid_configured_base_url_fails_closed_without_production_fallback(
+    plugin,
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.config import PlatformConfig
+
+    monkeypatch.setenv("RELAY_AGENT_TOKEN", "relay-test-token")
+    monkeypatch.setenv("RELAY_BASE_URL", "/")
+    enabled = plugin._env_enablement()
+    assert enabled["base_url"] == "/"
+    config = PlatformConfig(extra={
+        **enabled,
+        "state_dir": str(tmp_path),
+    })
+
+    assert plugin.check_requirements() is False
+    assert plugin.validate_config(config) is False
+    with pytest.raises(ValueError, match="invalid base URL|must be an origin"):
+        plugin.RelayAdapter(config)
+    standalone = asyncio.run(
+        plugin._standalone_send(config, "chat-id", "must not send")
+    )
+    assert "invalid base URL" in standalone["error"]
+    assert "api.relayapp.im/v1" not in standalone["error"]
+
+
+def test_adapter_uses_normalized_origin_for_its_state_binding(plugin, tmp_path):
+    from gateway.config import PlatformConfig
+
+    adapter = plugin.RelayAdapter(PlatformConfig(extra={
+        "token": "relay-test-token",
+        "base_url": "HTTPS://API.STAGING.RELAYAPP.IM:443/",
+        "state_dir": str(tmp_path),
+    }))
+    assert adapter._base_url == "https://api.staging.relayapp.im"
+    assert adapter._inbox._binding.api_origin == adapter._base_url
+
+
 def test_yaml_contact_allowlist_accepts_current_list_vocabulary(plugin, tmp_path):
     from gateway.config import PlatformConfig
 

@@ -1,1 +1,0 @@
-daytona info relay-hermes-validation-20260901 --format json

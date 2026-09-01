@@ -1,10 +1,19 @@
 {
-  "schema": "relay-hermes-validation/v1",
+  "schema": "relay-hermes-validation/v2",
   "status": "pass",
   "date": "2026-09-01",
   "branch": "codex/relay-hermes-20260901",
-  "base_commit": "c1cec22007e1b2cc27ce2aa7cf671af2a7840db2",
-  "tested_source_archive_sha256": "43a0bfbbc8936ce3b8447d59ec2d5d90e31b186e42fc7c17ef93a1403346e9c7",
+  "base_commit": "7c0be99ecf96c52c9b84d0eec6ebbbaf85479453",
+  "exact_head_source": {
+    "scope": "all 19 final-head files outside proof/",
+    "manifest": "logs/source.sha256",
+    "manifest_sha256": "a1e7f6d1d46fc0d66e4a193fc396dd730ec77afe62b4e826e3b4d037c9fcf865",
+    "archive_sha256": "4186ead15aed1bddf9fed548d45bfc97b3194d13e5c49c8df8d74c291870092f"
+  },
+  "versions": {
+    "package": "1.0.0rc1",
+    "manifest": "1.0.0-rc.1"
+  },
   "hermes": {
     "repository": "NousResearch/hermes-agent",
     "commit": "04224b2f82aabbe89525451089eb2677edfae179"
@@ -12,34 +21,56 @@
   "relay_openapi": {
     "server_commit": "9b4d5bb32cc749c6fd271969948c385300d404d6",
     "path": "contracts/developer/openapi.yaml",
-    "sha256": "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5"
+    "sha256": "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5",
+    "assertions": "pass"
   },
   "daytona": {
-    "id": "7f66c025-9a3e-4010-873d-f9509e38ae02",
-    "name": "relay-hermes-validation-20260901",
-    "snapshot": "daytonaio/sandbox:0.8.0",
+    "id": "59631847-53ec-4aac-bd17-b98998c595c5",
+    "name": "relay-hermes-audit-final-20260901",
+    "snapshot": "daytona-large",
     "os": "Debian GNU/Linux 13 (trixie)",
     "architecture": "x86_64",
-    "desired_final_state": "archived"
+    "desired_final_state": "archived",
+    "actual_final_state": "archived"
   },
   "pytest": [
-    {"python": "3.11.14", "passed": 69, "failed": 0, "log": "logs/11a-final-py311-tests.log"},
-    {"python": "3.12.12", "passed": 69, "failed": 0, "log": "logs/12a-final-py312-tests.log"},
-    {"python": "3.13.11", "passed": 69, "failed": 0, "log": "logs/13a-final-py313-tests.log"}
+    {"python": "3.11.14", "passed": 80, "failed": 0},
+    {"python": "3.12.12", "passed": 80, "failed": 0},
+    {"python": "3.13.11", "passed": 80, "failed": 0}
   ],
+  "fail_closed_selection": {
+    "passed": 7,
+    "failed": 0,
+    "covers": [
+      "invalid configured base URL",
+      "normalized origin binding",
+      "Agent Token switch",
+      "API origin switch",
+      "database switch",
+      "snapshot mismatch",
+      "unbound legacy database"
+    ]
+  },
   "packages": {
     "wheel": {
-      "filename": "relay_hermes-1.0.0-py3-none-any.whl",
-      "sha256": "cede276816c24b8db09c8357a17cf93806fe35d9fdd1c6d6bad0e402ff5047f6"
+      "filename": "relay_hermes-1.0.0rc1-py3-none-any.whl",
+      "sha256": "a509868a334878f0a6bf8fa79f862739a8283646d487f5b79cea76cdbfbac51e"
     },
     "sdist": {
-      "filename": "relay_hermes-1.0.0.tar.gz",
-      "sha256": "b035a12c5bfb281ce64e4fc9be3edca0d23168f608e1680ed46ee56f3703ea1b"
-    }
+      "filename": "relay_hermes-1.0.0rc1.tar.gz",
+      "sha256": "cab6520fbfaaf1ce17a1747685e9656032a2b74a72db1d5a26bb4610cb700713"
+    },
+    "clean_install_python": ["3.11.14", "3.12.12", "3.13.11"],
+    "pip_check": "pass"
   },
   "plugin_doctor": "pass",
-  "openapi_harness": "pass",
+  "directory_plugin_harness": "pass",
+  "wheel_entrypoint_harness": "pass",
   "staging_helper_harness": "pass",
-  "hosted_environment_used": false,
-  "production_touched": false
+  "workflow_static_assertions": "pass",
+  "hosted_github_actions_run": false,
+  "hosted_relay_used": false,
+  "publication_attempted": false,
+  "production_touched": false,
+  "relay_or_publication_credentials_used": false
 }

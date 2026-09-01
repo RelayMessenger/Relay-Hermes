@@ -3,14 +3,133 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
+import stat
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from .relay_api import normalize_base_url
 
 DEFAULT_STATE_DIR = "~/.hermes/relay"
 STATE_FILENAME = "inbox.sqlite3"
+STATE_BINDING_FILENAME = ".relay-account.json"
+STATE_BINDING_SCHEMA = "relay-hermes-state-account/v1"
+
+
+class RelayStateBindingError(RuntimeError):
+    """The configured Relay account does not own this durable state."""
+
+
+def _account_fingerprint(api_origin: str, token_fingerprint: str) -> str:
+    canonical = json.dumps(
+        {
+            "api_origin": api_origin,
+            "token_fingerprint": token_fingerprint,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(
+        b"relay-hermes-account-v1\0" + canonical.encode("utf-8")
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+@dataclass(frozen=True)
+class RelayStateBinding:
+    """Non-secret, stable identity for one token at one normalized API origin."""
+
+    api_origin: str
+    token_fingerprint: str
+    account_fingerprint: str
+
+    @classmethod
+    def for_account(
+        cls,
+        api_origin: str,
+        token: str,
+    ) -> "RelayStateBinding":
+        origin = (api_origin or "").strip()
+        credential = (token or "").strip()
+        if not origin:
+            raise ValueError("relay: normalized API origin is required for state")
+        origin = normalize_base_url(origin)
+        if not credential:
+            raise ValueError("relay: Agent Token is required for state")
+        token_digest = hashlib.sha256(
+            b"relay-hermes-token-v1\0" + credential.encode("utf-8")
+        ).hexdigest()
+        token_fingerprint = f"sha256:{token_digest}"
+        return cls(
+            api_origin=origin,
+            token_fingerprint=token_fingerprint,
+            account_fingerprint=_account_fingerprint(
+                origin,
+                token_fingerprint,
+            ),
+        )
+
+    @classmethod
+    def from_record(
+        cls,
+        record: Mapping[str, Any],
+    ) -> "RelayStateBinding":
+        expected_keys = {
+            "schema",
+            "api_origin",
+            "token_fingerprint",
+            "account_fingerprint",
+        }
+        if set(record) != expected_keys or record.get("schema") != STATE_BINDING_SCHEMA:
+            raise RelayStateBindingError("Relay state account binding is malformed")
+        api_origin = record.get("api_origin")
+        token_fingerprint = record.get("token_fingerprint")
+        account_fingerprint = record.get("account_fingerprint")
+        if (
+            not isinstance(api_origin, str)
+            or not api_origin
+            or not isinstance(token_fingerprint, str)
+            or not token_fingerprint.startswith("sha256:")
+            or len(token_fingerprint) != 71
+            or not isinstance(account_fingerprint, str)
+            or not account_fingerprint.startswith("sha256:")
+            or len(account_fingerprint) != 71
+            or not hmac.compare_digest(
+                account_fingerprint,
+                _account_fingerprint(api_origin, token_fingerprint),
+            )
+        ):
+            raise RelayStateBindingError("Relay state account binding is malformed")
+        return cls(
+            api_origin=api_origin,
+            token_fingerprint=token_fingerprint,
+            account_fingerprint=account_fingerprint,
+        )
+
+    def record(self) -> Dict[str, str]:
+        return {
+            "schema": STATE_BINDING_SCHEMA,
+            "api_origin": self.api_origin,
+            "token_fingerprint": self.token_fingerprint,
+            "account_fingerprint": self.account_fingerprint,
+        }
+
+    def matches(self, other: "RelayStateBinding") -> bool:
+        return (
+            self.api_origin == other.api_origin
+            and hmac.compare_digest(
+                self.token_fingerprint,
+                other.token_fingerprint,
+            )
+            and hmac.compare_digest(
+                self.account_fingerprint,
+                other.account_fingerprint,
+            )
+        )
 
 
 class RelayInbox:
@@ -21,17 +140,115 @@ class RelayInbox:
     needs acknowledging.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        binding: Optional[RelayStateBinding],
+    ) -> None:
         self.path = path
+        self.binding_path = path.parent / STATE_BINDING_FILENAME
+        self._binding = binding
         self._db: Optional[sqlite3.Connection] = None
 
     def open(self) -> "RelayInbox":
+        if self._db is not None:
+            return self
+        if self._binding is None:
+            raise RelayStateBindingError(
+                "Relay state requires RELAY_AGENT_TOKEN account binding"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.path)
-        self._db.execute("PRAGMA foreign_keys=ON")
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=FULL")
-        self._db.execute(
+        directory_binding = self._read_directory_binding()
+        if (
+            directory_binding is not None
+            and not self._binding.matches(directory_binding)
+        ):
+            self._raise_mismatch()
+
+        db = sqlite3.connect(self.path)
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
+            database_binding, database_objects = self._read_database_binding(db)
+            if (
+                database_binding is not None
+                and not self._binding.matches(database_binding)
+            ):
+                self._raise_mismatch()
+            if database_binding is None and database_objects:
+                raise RelayStateBindingError(
+                    "Relay state database predates account binding; move it "
+                    "aside and use a new RELAY_STATE_DIR"
+                )
+
+            if directory_binding is None:
+                directory_binding = self._create_directory_binding()
+                if not self._binding.matches(directory_binding):
+                    self._raise_mismatch()
+
+            with db:
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS relay_state_account (
+                      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                      binding_schema TEXT NOT NULL,
+                      api_origin TEXT NOT NULL,
+                      token_fingerprint TEXT NOT NULL,
+                      account_fingerprint TEXT NOT NULL
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT OR IGNORE INTO relay_state_account(
+                      singleton,binding_schema,api_origin,
+                      token_fingerprint,account_fingerprint
+                    ) VALUES(1,?,?,?,?)
+                    """,
+                    (
+                        STATE_BINDING_SCHEMA,
+                        self._binding.api_origin,
+                        self._binding.token_fingerprint,
+                        self._binding.account_fingerprint,
+                    ),
+                )
+
+            database_binding, _ = self._read_database_binding(db)
+            if (
+                database_binding is None
+                or not self._binding.matches(database_binding)
+            ):
+                self._raise_mismatch()
+
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+            with db:
+                self._create_schema(db)
+                # A previous gateway process cannot still own its in-memory
+                # Hermes task. Identity checks must happen before this requeue.
+                db.execute(
+                    """
+                    UPDATE events
+                    SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+                    WHERE status IN ('processing', 'dispatched')
+                    """
+                )
+            self._db = db
+            self._assert_bound()
+            if os.name != "nt":
+                os.chmod(self.path, 0o600)
+                os.chmod(self.binding_path, 0o600)
+            return self
+        except Exception:
+            db.close()
+            self._db = None
+            raise
+
+    @staticmethod
+    def _create_schema(db: sqlite3.Connection) -> None:
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
               event_id TEXT PRIMARY KEY,
@@ -44,7 +261,7 @@ class RelayInbox:
             )
             """
         )
-        self._db.execute(
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS snapshot_chats (
               chat_id TEXT PRIMARY KEY,
@@ -52,7 +269,7 @@ class RelayInbox:
             )
             """
         )
-        self._db.execute(
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS snapshot_messages (
               message_id TEXT PRIMARY KEY,
@@ -62,13 +279,13 @@ class RelayInbox:
             )
             """
         )
-        self._db.execute(
+        db.execute(
             """
             CREATE INDEX IF NOT EXISTS snapshot_messages_chat
             ON snapshot_messages(chat_id, message_id)
             """
         )
-        self._db.execute(
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS full_sync_state (
               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -80,7 +297,7 @@ class RelayInbox:
             )
             """
         )
-        self._db.execute(
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS deliveries (
               sequence TEXT PRIMARY KEY,
@@ -89,19 +306,142 @@ class RelayInbox:
             )
             """
         )
-        # A previous gateway process cannot still own its in-memory Hermes
-        # task. Requeue rows that were handed to that process before it exited.
-        self._db.execute(
-            """
-            UPDATE events
-            SET status = 'pending', updated_at = CURRENT_TIMESTAMP
-            WHERE status IN ('processing', 'dispatched')
-            """
+
+    def _read_directory_binding(self) -> Optional[RelayStateBinding]:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.binding_path, flags)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RelayStateBindingError(
+                "Relay state account binding cannot be read safely"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
+                raise RelayStateBindingError(
+                    "Relay state account binding is malformed"
+                )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                raw = handle.read(16_385)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        try:
+            parsed = json.loads(raw)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RelayStateBindingError(
+                "Relay state account binding is malformed"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise RelayStateBindingError(
+                "Relay state account binding is malformed"
+            )
+        return RelayStateBinding.from_record(parsed)
+
+    def _create_directory_binding(self) -> RelayStateBinding:
+        binding = self._binding
+        if binding is None:  # pragma: no cover - guarded by open()
+            raise RelayStateBindingError("Relay state account binding is required")
+        payload = (
+            json.dumps(
+                binding.record(),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.binding_path, flags, 0o600)
+        except FileExistsError:
+            raced = self._read_directory_binding()
+            if raced is None:  # pragma: no cover - concurrent unlink
+                raise RelayStateBindingError(
+                    "Relay state account binding changed during startup"
+                )
+            return raced
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return binding
+
+    @staticmethod
+    def _read_database_binding(
+        db: sqlite3.Connection,
+    ) -> Tuple[Optional[RelayStateBinding], set[str]]:
+        try:
+            objects = {
+                str(row[0])
+                for row in db.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%'
+                    """
+                ).fetchall()
+            }
+            if "relay_state_account" not in objects:
+                return None, objects
+            rows = db.execute(
+                """
+                SELECT binding_schema,api_origin,
+                       token_fingerprint,account_fingerprint
+                FROM relay_state_account
+                WHERE singleton=1
+                """
+            ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise RelayStateBindingError(
+                "Relay state database account binding is malformed"
+            ) from exc
+        if len(rows) != 1:
+            raise RelayStateBindingError(
+                "Relay state database account binding is malformed"
+            )
+        row = rows[0]
+        return RelayStateBinding.from_record({
+            "schema": row[0],
+            "api_origin": row[1],
+            "token_fingerprint": row[2],
+            "account_fingerprint": row[3],
+        }), objects
+
+    @staticmethod
+    def _raise_mismatch() -> None:
+        raise RelayStateBindingError(
+            "Relay state is bound to a different API origin or Agent Token; "
+            "use a separate RELAY_STATE_DIR"
         )
-        self._db.commit()
-        if os.name != "nt":
-            os.chmod(self.path, 0o600)
-        return self
+
+    def _assert_bound(self) -> None:
+        db = self._db
+        binding = self._binding
+        if db is None:
+            raise RuntimeError("Relay inbox is not open")
+        if binding is None:  # pragma: no cover - open() rejects this
+            raise RelayStateBindingError("Relay state account binding is required")
+        directory_binding = self._read_directory_binding()
+        database_binding, _ = self._read_database_binding(db)
+        if (
+            directory_binding is None
+            or database_binding is None
+            or not binding.matches(directory_binding)
+            or not binding.matches(database_binding)
+        ):
+            self._raise_mismatch()
 
     def close(self) -> None:
         if self._db is not None:
@@ -111,6 +451,7 @@ class RelayInbox:
     def _connection(self) -> sqlite3.Connection:
         if self._db is None:
             raise RuntimeError("Relay inbox is not open")
+        self._assert_bound()
         return self._db
 
     def accept(self, sequence: str, event: Dict[str, Any]) -> bool:
@@ -171,6 +512,9 @@ class RelayInbox:
         The caller may send ``full_sync_complete`` only after this returns.
         """
 
+        # Account ownership takes precedence over parsing untrusted snapshot
+        # data. A mismatched process must do no snapshot processing at all.
+        db = self._connection()
         if (
             not through_sequence.isdigit()
             or (
@@ -247,7 +591,6 @@ class RelayInbox:
             ) from exc
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-        db = self._connection()
         with db:
             db.execute("DELETE FROM snapshot_messages")
             db.execute("DELETE FROM snapshot_chats")

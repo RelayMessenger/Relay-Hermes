@@ -8,6 +8,7 @@ in hermes config").
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -101,6 +102,41 @@ def test_pip_entrypoint_uses_current_hermes_module_convention():
     assert metadata["tool"]["setuptools"]["package-data"] == {
         "relay_hermes": ["plugin.yaml"],
     }
+
+
+def test_staging_package_and_manifest_versions_match(manifest):
+    metadata = tomllib.loads(
+        (MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert metadata["project"]["version"] == "1.0.0rc1"
+    assert manifest["version"] == "1.0.0-rc.1"
+
+
+def test_hosted_workflows_pin_every_external_action_to_a_sha():
+    workflows = MANIFEST.parent / ".github" / "workflows"
+    uses_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
+    sha_pattern = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+    for path in sorted(workflows.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        uses = uses_pattern.findall(text)
+        assert uses, path.name
+        assert all(sha_pattern.fullmatch(value) for value in uses), path.name
+        parsed = yaml.safe_load(text)
+        for job in parsed["jobs"].values():
+            for step in job.get("steps", []):
+                assert "${{" not in step.get("run", ""), path.name
+
+
+def test_rc_publish_is_manual_exact_sha_staging_only():
+    path = MANIFEST.parent / ".github" / "workflows" / "publish-rc.yml"
+    text = path.read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text
+    assert "github.ref == 'refs/heads/staging'" in text
+    assert 'environment: pypi-rc' in text
+    assert 'test "$EXPECTED_SHA" = "$EVENT_SHA"' in text
+    assert "id-token: write" in text
+    assert "attest-build-provenance@" in text
+    assert "password:" not in text
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])

@@ -81,7 +81,13 @@ from .relay_api import (
     split_paragraphs,
     utf16_len,
 )
-from .state import DEFAULT_STATE_DIR, STATE_FILENAME, RelayInbox
+from .state import (
+    DEFAULT_STATE_DIR,
+    STATE_FILENAME,
+    RelayInbox,
+    RelayStateBinding,
+    RelayStateBindingError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +126,15 @@ _TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
 def _resolve(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
     """Env wins over ``config.yaml`` extras; both stripped."""
     return os.getenv(env, "").strip() or str(extra.get(key, "") or "").strip() or default
+
+
+def _configured_base_url(extra: Dict[str, Any]) -> str:
+    return _resolve(extra, "base_url", "RELAY_BASE_URL") or _resolve(
+        extra,
+        "api_url",
+        "RELAY_API_URL",
+        DEFAULT_BASE_URL,
+    )
 
 
 def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
@@ -241,20 +256,21 @@ class RelayAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
 
         extra = config.extra or {}
-        raw_base = _resolve(extra, "base_url", "RELAY_BASE_URL") or _resolve(
-            extra, "api_url", "RELAY_API_URL", DEFAULT_BASE_URL
-        )
-        try:
-            self._base_url = normalize_base_url(raw_base)
-        except ValueError as exc:
-            logger.error("[%s] %s", self.name, exc)
-            self._base_url = DEFAULT_BASE_URL
+        self._base_url = normalize_base_url(_configured_base_url(extra))
         self._token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
 
         state_dir = Path(
             _resolve(extra, "state_dir", "RELAY_STATE_DIR", DEFAULT_STATE_DIR)
         ).expanduser()
-        self._inbox = RelayInbox(state_dir / STATE_FILENAME)
+        binding = (
+            RelayStateBinding.for_account(self._base_url, self._token)
+            if self._token
+            else None
+        )
+        self._inbox = RelayInbox(
+            state_dir / STATE_FILENAME,
+            binding=binding,
+        )
 
         mode = (
             _resolve(extra, "reply_to_mode", "RELAY_REPLY_TO_MODE")
@@ -318,6 +334,16 @@ class RelayAdapter(BasePlatformAdapter):
             self._apply_full_snapshot(self._inbox.load_full_snapshot())
             self._client = RelayClient(self._token, self._base_url)
             self._client.open()
+        except RelayStateBindingError as error:
+            self._set_fatal_error(
+                "relay_state_account_mismatch",
+                str(error),
+                retryable=False,
+            )
+            logger.error("[%s] %s", self.name, error)
+            await self._close_client()
+            self._inbox.close()
+            return False
         except RelayWebhookConfiguredError as error:
             self._set_fatal_error(
                 "relay_webhook_configured",
@@ -1103,16 +1129,28 @@ def check_requirements() -> bool:
     Called from status displays and config loading, so it must never install
     anything.
     """
-    return (
-        HTTPX_AVAILABLE
-        and WEBSOCKETS_AVAILABLE
-        and bool(os.getenv("RELAY_AGENT_TOKEN", "").strip())
-    )
+    if (
+        not HTTPX_AVAILABLE
+        or not WEBSOCKETS_AVAILABLE
+        or not os.getenv("RELAY_AGENT_TOKEN", "").strip()
+    ):
+        return False
+    try:
+        normalize_base_url(_configured_base_url({}))
+    except ValueError:
+        return False
+    return True
 
 
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
-    return bool(_resolve(extra, "token", "RELAY_AGENT_TOKEN"))
+    if not _resolve(extra, "token", "RELAY_AGENT_TOKEN"):
+        return False
+    try:
+        normalize_base_url(_configured_base_url(extra))
+    except ValueError:
+        return False
+    return True
 
 
 def is_connected(config) -> bool:
@@ -1132,7 +1170,10 @@ def _env_enablement() -> Optional[dict]:
     # bypass that layer after preserving the operator's Contact ids here.
     seed: dict = {
         "token": token,
-        "base_url": os.getenv("RELAY_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
+        # Preserve configured input. RelayAdapter normalizes a valid origin and
+        # rejects an invalid one; mutating "/" to empty here would fall back to
+        # the production default.
+        "base_url": os.getenv("RELAY_BASE_URL", DEFAULT_BASE_URL).strip(),
         "allowed_contacts": _OPERATOR_ALLOWED_CONTACTS,
     }
     os.environ["RELAY_ALLOW_ALL_CONTACTS"] = "true"
@@ -1167,9 +1208,7 @@ async def _standalone_send(
         return {"error": "relay standalone send: httpx is not installed"}
     extra = getattr(pconfig, "extra", {}) or {}
     token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
-    base_url = _resolve(extra, "base_url", "RELAY_BASE_URL") or _resolve(
-        extra, "api_url", "RELAY_API_URL", DEFAULT_BASE_URL
-    )
+    base_url = _configured_base_url(extra)
     if not token:
         return {"error": "relay standalone send: RELAY_AGENT_TOKEN is not set"}
     if not chat_id:

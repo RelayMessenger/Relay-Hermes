@@ -1,1 +1,0 @@
-daytona create --name relay-hermes-validation-20260901 --target us --auto-stop 120 --auto-archive 1440 --label purpose=relay-hermes-linux-validation --label repository=Relay-Hermes --label base=c1cec22007e1b2cc27ce2aa7cf671af2a7840db2

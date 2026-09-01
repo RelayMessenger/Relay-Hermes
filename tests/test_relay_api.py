@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
-from relay_hermes.state import RelayInbox
+from relay_hermes.state import RelayInbox, RelayStateBinding
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
@@ -40,6 +40,7 @@ from relay_hermes.relay_api import (
 )
 
 TOKEN = "relay-test-token"
+ORIGIN = "https://relay.test"
 CHAT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
 MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
 EVENT_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
@@ -758,7 +759,10 @@ def test_websocket_replay_is_deduplicated_but_acknowledged_again(tmp_path):
         ready(),
         {"type": "event", "sequence": "1", "event": event()},
     ]
-    inbox = RelayInbox(tmp_path / "inbox.sqlite3").open()
+    inbox = RelayInbox(
+        tmp_path / "inbox.sqlite3",
+        binding=RelayStateBinding.for_account(ORIGIN, TOKEN),
+    ).open()
     first = FakeSocket(frames, [])
     replay = FakeSocket(frames, [])
     with pytest.raises(RelayWebSocketClosed):
@@ -788,7 +792,10 @@ def test_full_sync_commits_before_completion_and_events_ack_afterward(tmp_path):
             order.append(f"commit:{sequence}")
             return result
 
-    inbox = TrackingInbox(tmp_path / "inbox.sqlite3").open()
+    inbox = TrackingInbox(
+        tmp_path / "inbox.sqlite3",
+        binding=RelayStateBinding.for_account(ORIGIN, TOKEN),
+    ).open()
     chat = {
         "id": CHAT_ID,
         "is_group": False,
@@ -865,14 +872,32 @@ def test_websocket_rejects_event_while_full_sync_is_pending():
 def test_base_url_idempotency_and_errors():
     assert normalize_base_url(None) == "https://api.relayapp.im"
     assert normalize_base_url("http://localhost:8790") == "http://localhost:8790"
+    assert normalize_base_url(
+        "HTTPS://API.STAGING.RELAYAPP.IM:443/"
+    ) == "https://api.staging.relayapp.im"
+    assert normalize_base_url(
+        "https://API.STAGING.RELAYAPP.IM./"
+    ) == "https://api.staging.relayapp.im"
+    assert normalize_base_url(
+        "http://[0:0:0:0:0:0:0:1]:80"
+    ) == "http://[::1]"
     assert websocket_url("https://api.relayapp.im") == (
         "wss://api.relayapp.im/v1/websocket"
     )
     assert websocket_url("http://localhost:8790") == (
         "ws://localhost:8790/v1/websocket"
     )
-    with pytest.raises(ValueError):
-        normalize_base_url("http://api.relayapp.im")
+    for invalid in (
+        "http://api.relayapp.im",
+        "not-an-origin",
+        "https://api.relayapp.im/v1",
+        "https://token@api.relayapp.im",
+        "https://api.relayapp.im:invalid",
+        "https://api%2erelayapp.im",
+        "https://-api.relayapp.im",
+    ):
+        with pytest.raises(ValueError):
+            normalize_base_url(invalid)
     assert reply_idempotency_key(EVENT_ID, 2) == f"reply-{EVENT_ID}-2"
     assert reply_idempotency_key(EVENT_ID) == f"reply-{EVENT_ID}-0"
     assert classify_status(401) == "auth"

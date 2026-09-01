@@ -1,4 +1,0 @@
-set -euo pipefail
-cd /home/daytona/relay-hermes
-export HERMES_AGENT_SRC=/home/daytona/hermes-agent
-.venv-3.12/bin/python -m pytest -q

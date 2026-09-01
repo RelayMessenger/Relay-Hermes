@@ -47,6 +47,9 @@ HEARTBEAT_PING_INTERVAL_SECONDS = 30.0
 HEARTBEAT_PONG_TIMEOUT_SECONDS = 60.0
 WEBSOCKET_WEBHOOK_CONFIGURED_CLOSE_CODE = 4410
 _SEQUENCE_PATTERN = re.compile(r"^(0|[1-9][0-9]*)$")
+_DNS_LABEL_PATTERN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -237,15 +240,39 @@ def _upgrade_error(error: Any) -> RelayApiError:
 
 
 def _is_loopback_host(hostname: str) -> bool:
-    normalized = hostname.strip().lower().strip("[]")
+    normalized = hostname.strip().lower().strip("[]").rstrip(".")
     try:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return normalized == "localhost" or normalized.endswith(".localhost")
 
 
+def _normalize_hostname(hostname: str, candidate: str) -> str:
+    normalized = hostname.lower().rstrip(".")
+    try:
+        return ipaddress.ip_address(normalized).compressed
+    except ValueError:
+        pass
+    try:
+        normalized = normalized.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError(f"relay: invalid base URL {candidate!r}") from exc
+    if (
+        not normalized
+        or len(normalized) > 253
+        or any(
+            _DNS_LABEL_PATTERN.fullmatch(label) is None
+            for label in normalized.split(".")
+        )
+    ):
+        raise ValueError(f"relay: invalid base URL {candidate!r}")
+    return normalized
+
+
 def normalize_base_url(raw: Optional[str]) -> str:
     candidate = (raw or "").strip() or DEFAULT_BASE_URL
+    if any(character.isspace() for character in candidate):
+        raise ValueError(f"relay: invalid base URL {candidate!r}")
     parts = urlsplit(candidate)
     if not parts.scheme or not parts.hostname:
         raise ValueError(f"relay: invalid base URL {candidate!r}")
@@ -259,7 +286,24 @@ def normalize_base_url(raw: Optional[str]) -> str:
         raise ValueError(
             "relay: base URL must use HTTPS (HTTP is allowed only on loopback)"
         )
-    return f"{parts.scheme}://{parts.netloc}"
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"relay: invalid base URL {candidate!r}") from exc
+    normalized_host = _normalize_hostname(parts.hostname, candidate)
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    default_port = (
+        parts.scheme == "https" and port == 443
+    ) or (
+        parts.scheme == "http" and port == 80
+    )
+    authority = (
+        normalized_host
+        if port is None or default_port
+        else f"{normalized_host}:{port}"
+    )
+    return f"{parts.scheme}://{authority}"
 
 
 def websocket_url(base_url: str) -> str:

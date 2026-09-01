@@ -30,6 +30,14 @@ It also does not add reactions, edits, or typing indicators.
 The SQLite inbox survives gateway restarts. If processing fails, the event
 returns to `pending`; the durable transport checkpoint does not move backward.
 
+The state directory and SQLite database are bound to one Relay account using
+the normalized API origin and a one-way Agent Token fingerprint. The token is
+never written to state. Changing the token or API origin while reusing a state
+directory fails before startup requeues work or reads a FULL-sync snapshot.
+Use a separate `RELAY_STATE_DIR` for every staging or production Agent.
+Pre-binding databases are not adopted automatically; move one aside only after
+accounting for its pending work.
+
 If Relay reports that a checkpoint is outside retention, the plugin follows
 the WebSocket FULL-sync flow. It pages through visible Chats and Messages,
 validates the snapshot, atomically stores it with `full_sync_through`, and
@@ -88,6 +96,10 @@ generic connector platform.
 | `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
 | `RELAY_HOME_CHAT` | unset | Chat id for cron and direct `hermes send` delivery |
 | `RELAY_HOME_CHAT_NAME` | Chat id | Human label for the home Chat |
+
+`RELAY_BASE_URL` must be an HTTPS origin, except that HTTP is accepted for
+loopback development. A configured invalid value fails closed and is never
+replaced with the production default.
 
 Non-secret settings can instead be placed under
 `gateway.platforms.relayapp.extra` in `~/.hermes/config.yaml`; environment
