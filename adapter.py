@@ -679,7 +679,7 @@ class RelayAdapter(BasePlatformAdapter):
                 # start and finish a fast background turn before it returns.
                 self._inbox.mark_dispatched(event_id)
                 inbound = parse_inbound(event)
-                if inbound is None or inbound.sender_contact_kind == "agent":
+                if inbound is None:
                     self._inbox.complete(event_id, ignored=True)
                     continue
                 if not self._allow_contact(inbound.sender_contact_id):
