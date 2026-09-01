@@ -224,6 +224,44 @@ def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path
     adapter._inbox.close()
 
 
+@pytest.mark.parametrize("sender_kind", ["user", "agent"])
+def test_inbox_dispatches_agent_sender_like_user_sender(
+    plugin,
+    tmp_path,
+    monkeypatch,
+    sender_kind,
+):
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox.open()
+    payload = relay_event(f"event-{sender_kind}")
+    payload["data"]["sender_handle"]["kind"] = sender_kind
+    assert adapter._inbox.accept("1", payload) is True
+
+    received = []
+
+    async def capture(inbound):
+        received.append(inbound)
+        adapter._running = False
+        return True
+
+    original_complete = adapter._inbox.complete
+
+    def stop_if_ignored(event_id, *, ignored=False):
+        original_complete(event_id, ignored=ignored)
+        adapter._running = False
+
+    monkeypatch.setattr(adapter, "_on_inbound", capture)
+    monkeypatch.setattr(adapter._inbox, "complete", stop_if_ignored)
+    adapter._message_handler = object()
+    adapter._running = True
+
+    asyncio.run(adapter._process_inbox())
+
+    assert [inbound.sender_kind for inbound in received] == [sender_kind]
+    assert adapter._inbox.status(payload["event_id"]) == "dispatched"
+    adapter._inbox.close()
+
+
 def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
     plugin,
     tmp_path,
