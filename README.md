@@ -165,6 +165,10 @@ This version was audited against Relay Server developer OpenAPI commit
 `9b4d5bb32cc749c6fd271969948c385300d404d6`. The exact
 `contracts/developer/openapi.yaml` SHA-256 is
 `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`.
+Those exact public bytes are checked in at
+`contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml`;
+normal CI and RC publication validate that local snapshot without private
+repository credentials.
 
 The runtime contract used here is:
 

@@ -8,6 +8,7 @@ in hermes config").
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from pathlib import Path
@@ -17,6 +18,13 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 MANIFEST = Path(__file__).resolve().parents[1] / "plugin.yaml"
+OPENAPI_COMMIT = "9b4d5bb32cc749c6fd271969948c385300d404d6"
+OPENAPI_SHA256 = (
+    "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5"
+)
+OPENAPI_RELATIVE_PATH = (
+    f"contracts/relay-server/{OPENAPI_COMMIT}/openapi.yaml"
+)
 
 KNOWN_MANIFEST_FIELDS = {
     "name", "version", "description", "author", "requires_env",
@@ -125,6 +133,29 @@ def test_staging_package_and_manifest_versions_match(manifest):
     assert manifest["version"] == "1.0.0-rc.1"
 
 
+def test_locked_openapi_snapshot_is_exact_and_provenanced():
+    root = MANIFEST.parent
+    snapshot = root / OPENAPI_RELATIVE_PATH
+    raw = snapshot.read_bytes()
+    metadata = (
+        root / "contracts" / "relay-server" / "README.md"
+    ).read_text(encoding="utf-8")
+    harness = (root / "scripts" / "check-openapi.py").read_text(
+        encoding="utf-8"
+    )
+    assert len(raw) == 117289
+    assert hashlib.sha256(raw).hexdigest() == OPENAPI_SHA256
+    assert OPENAPI_COMMIT in metadata
+    assert OPENAPI_SHA256 in metadata
+    assert "contracts/developer/openapi.yaml" in metadata
+    local_snapshot = OPENAPI_RELATIVE_PATH.removeprefix(
+        "contracts/relay-server/"
+    )
+    assert local_snapshot in metadata
+    assert OPENAPI_COMMIT in harness
+    assert OPENAPI_SHA256 in harness
+
+
 def test_hosted_workflows_pin_every_external_action_to_a_sha():
     workflows = MANIFEST.parent / ".github" / "workflows"
     uses_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
@@ -162,7 +193,10 @@ def test_rc_publish_is_manual_exact_sha_staging_only():
     assert jobs["contract"]["needs"] == "validate"
     assert jobs["provenance"]["needs"] == "contract"
     assert jobs["publish"]["needs"] == "provenance"
-    assert "RELAY_CONTRACT_READ_TOKEN" in text
+    assert "RELAY_CONTRACT_READ_TOKEN" not in text
+    assert "RelayMessenger/Relay-Server" not in text
+    assert "_relay-server" not in text
+    assert text.count(OPENAPI_RELATIVE_PATH) == 1
     assert "scripts/check-openapi.py" in text
     assert text.count("environment: release-candidate") == 2
     assert 'case "$EXPECTED_SHA" in' in text
@@ -185,6 +219,9 @@ def test_reusable_ci_covers_full_release_compatibility():
     assert "Test the staging helper fail-closed guards" in text
     assert "Clean-install the exact wheel and sdist" in text
     assert "Run Hermes against the exact clean wheel" in text
+    assert "Validate the exact checked-in Relay contract snapshot" in text
+    assert text.count(OPENAPI_RELATIVE_PATH) == 1
+    assert 'python scripts/check-openapi.py "$RELAY_OPENAPI_SNAPSHOT"' in text
     assert "setuptools==84.0.0" in text
     assert "build==1.3.0" in text
 

@@ -1,0 +1,3933 @@
+openapi: 3.1.0
+info:
+  title: Relay API
+  version: 1.0.0
+  description: |-
+    Create conversations between users and agents.
+
+    Send multipart Messages, manage Chats, upload Attachments, and receive agent events.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: https://api.relayapp.im
+    description: Relay API
+security:
+  - BearerAuth: []
+tags:
+  - name: Chats
+    x-page-title: Chats
+    description: Create, retrieve, and update direct or group chats.
+  - name: Messages
+    x-page-title: Messages
+    description: Send and retrieve messages, replies, reactions, and receipts.
+  - name: Attachments
+    x-page-title: Attachments
+    description: Allocate, upload, retrieve, and delete attachment bytes.
+  - name: Blocked Handles
+    x-page-title: Blocked Handles
+    description: Block or unblock registered Relay Handles.
+  - name: Contact Card
+    x-page-title: Contact Card
+    description: Manage the authenticated agent's Relay contact card.
+  - name: Webhooks
+    x-page-title: Webhooks
+    description: Register signed webhook destinations.
+  - name: WebSocket
+    description: Receive agent events over a durable acknowledged WebSocket.
+  - name: Contacts
+    description: Request a user Contact.
+paths:
+  /v1/chats:
+    post:
+      operationId: createChat
+      summary: Create a new chat
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChatRequest"
+      responses:
+        "201":
+          description: Chat created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateChatResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Mentions require a group chat
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional 1–255 character key for safe retries. If message.idempotency_key is also present, the two values
+            must match.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      description: Create a direct or group Chat with its first Message.
+    get:
+      operationId: listChats
+      summary: List all chats
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of chats to return per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Pagination cursor from the previous response's `next_cursor` field.
+            Omit this parameter for the first page of results.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of chats retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListChatsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: List Chats visible to the authenticated Contact.
+  /v1/chats/{chatId}:
+    get:
+      operationId: getChat
+      summary: Get a chat by ID
+      description: Retrieve one visible Chat.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Chat found and returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chat"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    put:
+      operationId: updateChat
+      summary: Update a chat
+      description: Update a group Chat name or photo.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateChatRequest"
+      responses:
+        "202":
+          description: Update request accepted and queued for processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  chat_id:
+                    type: string
+                    format: uuid
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/participants:
+    post:
+      operationId: addParticipant
+      summary: Add a participant to a chat
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddParticipantRequest"
+      responses:
+        "202":
+          description: Participant addition queued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  trace_id:
+                    type: string
+                  message:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Add a registered Contact to a group Chat.
+    delete:
+      operationId: removeParticipant
+      summary: Remove a participant from a chat
+      description: Remove a Contact from a group Chat.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveParticipantRequest"
+      responses:
+        "202":
+          description: Participant removal queued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  trace_id:
+                    type: string
+                  message:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/leave:
+    post:
+      operationId: leaveChat
+      summary: Leave a group chat
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat to leave
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Leave group chat request queued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  trace_id:
+                    type: string
+                  message:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Leave a group Chat.
+  /v1/chats/{chatId}/typing:
+    post:
+      operationId: startTyping
+      summary: Start typing indicator
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: |
+            Request accepted. Does not guarantee the typing indicator is visible
+            to the recipient (see behavior notes above).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Start or refresh the authenticated Contact's typing indicator.
+    delete:
+      operationId: stopTyping
+      summary: Stop typing indicator
+      description: Stop the authenticated Contact's typing indicator.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Request accepted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/read:
+    post:
+      operationId: markChatAsRead
+      summary: Mark chat as read
+      description: Explicitly mark visible Messages in a Chat as Read. Webhook responses and WebSocket acknowledgements do
+        not mark Messages Read.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Chat marked as read successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/share_contact_card:
+    post:
+      operationId: shareContactWithChat
+      summary: Share your contact card with a chat
+      description: Share the authenticated agent's configured Contact Card into an existing Chat. Each successful call shares
+        the card once.
+      tags:
+        - Chats
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Contact shared successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/messages:
+    post:
+      operationId: sendMessage
+      summary: Resolve a Chat and send a Message
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Optional idempotency key for the send. Reuse the same key to safely
+            retry without sending twice. May also be supplied as
+            `message.idempotency_key`.
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "202":
+          description: Message accepted for delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The request conflicts with current Chat, membership, or idempotency state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: |
+            The send could not be completed. The condition is temporary — retry
+            the request shortly.
+
+            Retrying is safe, but send an `Idempotency-Key` header (or
+            `message.idempotency_key`) so a retry cannot produce a duplicate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Resolve or create a Chat, then send a Message.
+  /v1/chats/{chatId}/messages:
+    post:
+      operationId: sendMessageToChat
+      summary: Send a message to an existing chat
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional 1–255 character key for safe retries. If message.idempotency_key is also present, the two values
+            must match.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageToChatRequest"
+      responses:
+        "202":
+          description: Message accepted for delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Chat is unavailable, a mention was used in a non-group chat, or a mention target is no longer in the chat
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Send a Message to an existing Chat.
+    get:
+      operationId: getMessages
+      summary: Get messages from a chat
+      description: List visible Messages and group-history events in a Chat.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          description: Pagination cursor from previous next_cursor response
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of messages to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Messages retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetMessagesResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/messages/{messageId}/thread:
+    get:
+      operationId: getMessageThread
+      summary: Get all messages in a thread
+      description: List a Message and its replies.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: ID of any message in the thread (can be originator or any reply)
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          description: Pagination cursor from previous next_cursor response
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of messages to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: order
+          in: query
+          description: Sort order for messages (asc = oldest first, desc = newest first)
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+      responses:
+        "200":
+          description: Thread retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetThreadResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/voicememo:
+    post:
+      operationId: sendVoiceMemoToChat
+      summary: Send a voice memo to a chat
+      description: Send an uploaded audio Attachment as a voice memo.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Unique identifier of the chat
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendVoiceMemoToChatRequest"
+      responses:
+        "202":
+          description: Voice memo accepted for delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendVoiceMemoToChatResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: Voice memo file too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/messages/{messageId}:
+    get:
+      operationId: getMessage
+      summary: Get a message by ID
+      description: Retrieve one visible Message.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Unique identifier of the message to retrieve
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Message found and returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/messages/{messageId}/reactions:
+    post:
+      operationId: sendReaction
+      summary: Add or remove a reaction to a message
+      description: Add or remove a reaction on one Message part.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Unique identifier of the message to react to
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendReactionRequest"
+      responses:
+        "202":
+          description: Reaction queued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  trace_id:
+                    type: string
+                  message:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/attachments:
+    post:
+      operationId: requestUpload
+      summary: Pre-upload a file
+      description: Create an Attachment upload allocation.
+      tags:
+        - Attachments
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestUploadRequest"
+      responses:
+        "200":
+          description: Upload URL generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestUploadResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/attachments/{attachmentId}:
+    get:
+      operationId: getAttachment
+      summary: Get attachment metadata
+      description: Retrieve Attachment metadata and a download URL.
+      tags:
+        - Attachments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          description: Unique identifier of the attachment
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Attachment found and returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: deleteAttachment
+      summary: Delete an attachment
+      description: Delete an unreferenced Attachment owned by the caller.
+      tags:
+        - Attachments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          description: Unique identifier of the attachment to delete
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Attachment deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/blocked_handles:
+    get:
+      operationId: listBlockedHandles
+      summary: List blocked handles
+      description: List Handles blocked by the authenticated Contact.
+      tags:
+        - Blocked Handles
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Blocked handles retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListBlockedHandlesResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: blockHandle
+      summary: Block a handle
+      tags:
+        - Blocked Handles
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BlockHandleRequest"
+      responses:
+        "201":
+          description: Handle blocked successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlockedHandleResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Block direct traffic with a registered Handle.
+    delete:
+      operationId: unblockHandle
+      summary: Unblock a handle
+      description: Remove a Handle from the authenticated Contact's block list.
+      tags:
+        - Blocked Handles
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnblockHandleRequest"
+      responses:
+        "204":
+          description: Handle unblocked successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/webhook-events:
+    get:
+      operationId: listWebhookEvents
+      summary: List available webhook event types
+      description: List event names available to agent backends.
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of available webhook event types
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEventsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/webhook-subscriptions:
+    post:
+      operationId: createWebhookSubscription
+      summary: Create a new webhook subscription
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookSubscriptionRequest"
+      responses:
+        "201":
+          description: Webhook subscription created successfully. The signing_secret is only returned in this response - store it
+            securely.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscriptionCreatedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Create a signed webhook subscription.
+    get:
+      operationId: listWebhookSubscriptions
+      summary: List all webhook subscriptions
+      description: List webhook subscriptions for the authenticated agent.
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of webhook subscriptions retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWebhookSubscriptionsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/webhook-subscriptions/{subscriptionId}:
+    get:
+      operationId: getWebhookSubscription
+      summary: Get a webhook subscription by ID
+      description: Retrieve one webhook subscription.
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: subscriptionId
+          in: path
+          required: true
+          description: Unique identifier of the webhook subscription
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook subscription found and returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscriptionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    put:
+      operationId: updateWebhookSubscription
+      summary: Update a webhook subscription
+      description: Replace a webhook subscription's settings.
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: subscriptionId
+          in: path
+          required: true
+          description: Unique identifier of the webhook subscription
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWebhookSubscriptionRequest"
+      responses:
+        "200":
+          description: Webhook subscription updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscriptionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: deleteWebhookSubscription
+      summary: Delete a webhook subscription
+      description: Delete a webhook subscription.
+      tags:
+        - Webhooks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: subscriptionId
+          in: path
+          required: true
+          description: Unique identifier of the webhook subscription
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Webhook subscription deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/contact_card:
+    get:
+      operationId: getContactCard
+      summary: Get contact cards
+      tags:
+        - Contact Card
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: handle
+          in: query
+          required: false
+          description: Relay Handle. Agents can access only their own card.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Contact card(s) returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetContactCardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Retrieve the authenticated agent's Contact Card.
+    post:
+      operationId: setupContactCard
+      summary: Setup contact card
+      tags:
+        - Contact Card
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetContactCardRequest"
+      responses:
+        "200":
+          description: Contact card created/updated and sync attempted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetContactCardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Activate the authenticated agent's Contact Card.
+    patch:
+      operationId: updateContactCard
+      summary: Update contact card
+      tags:
+        - Contact Card
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: handle
+          in: query
+          required: true
+          description: Relay Handle. Agents can access only their own card.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContactCardRequest"
+      responses:
+        "200":
+          description: Contact card updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetContactCardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+      description: Update the authenticated agent's Contact Card.
+  /v1/websocket:
+    get:
+      operationId: connectAgentWebSocket
+      summary: Connect an Agent WebSocket
+      tags:
+        - WebSocket
+      security:
+        - BearerAuth: []
+      responses:
+        "101":
+          description: WebSocket connection accepted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+      description: "Upgrade wss://api.relayapp.im/v1/websocket with Authorization: Bearer <Agent Token>. If the Agent has any
+        saved webhook subscription, Relay returns 409; delete the subscriptions to connect by WebSocket."
+  /v1/contact_requests:
+    post:
+      operationId: createContactRequest
+      summary: Request a Contact
+      description: Send an Add request to one user as the authenticated agent. The request contains the agent identity and no
+        Message content. This operation is available to Agents with Premium Handles.
+      tags:
+        - Contacts
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContactRequest"
+      responses:
+        "201":
+          description: Add request accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateContactRequestResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  schemas:
+    AddParticipantRequest:
+      type: object
+      required:
+        - handle
+      properties:
+        handle:
+          type: string
+          description: Relay Handle.
+    Attachment:
+      type: object
+      required:
+        - id
+        - filename
+        - content_type
+        - size_bytes
+        - status
+        - created_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the attachment (UUID)
+        filename:
+          type: string
+          description: Original filename of the attachment
+        content_type:
+          $ref: "#/components/schemas/SupportedContentType"
+        size_bytes:
+          type: integer
+          format: int64
+          description: Size of the attachment in bytes
+        status:
+          type: string
+          description: Current upload state.
+          enum:
+            - pending
+            - complete
+            - failed
+        download_url:
+          type: string
+          format: uri
+          description: URL to download the attachment
+        created_at:
+          type: string
+          format: date-time
+          description: When the attachment was created
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: Audio or video duration in milliseconds when known.
+        width:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel width when known. Width and height are supplied together.
+        height:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel height when known. Width and height are supplied together.
+    BlockHandleRequest:
+      type: object
+      required:
+        - handle
+      properties:
+        handle:
+          type: string
+          description: Registered Relay Handle.
+        reason:
+          type: string
+          description: Optional free-text note on why the handle was blocked
+    BlockedHandleEntry:
+      type: object
+      required:
+        - handle
+        - blocked_at
+      properties:
+        handle:
+          type: string
+          description: Registered Relay Handle blocked by the authenticated Contact.
+        reason:
+          type: string
+          description: Optional note recorded when the handle was blocked
+        blocked_at:
+          type: string
+          format: date-time
+          description: When the handle was blocked
+    BlockedHandleResult:
+      type: object
+      required:
+        - blocked_handle
+      properties:
+        blocked_handle:
+          $ref: "#/components/schemas/BlockedHandleEntry"
+    Chat:
+      type: object
+      required:
+        - id
+        - display_name
+        - handles
+        - is_group
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the chat
+          format: uuid
+        display_name:
+          type:
+            - string
+            - "null"
+          description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
+            group chats.
+        group_chat_icon:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: URL of the group chat icon. Only set for group chats that have an icon; `null` otherwise.
+        handles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatHandle"
+        is_group:
+          type: boolean
+          description: Whether this is a group chat
+          default: false
+        created_at:
+          type: string
+          format: date-time
+          description: When the chat was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the chat was last updated
+    ChatCreatedEvent:
+      type: object
+      required:
+        - id
+        - display_name
+        - handles
+        - is_group
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the chat
+          format: uuid
+        display_name:
+          type:
+            - string
+            - "null"
+          description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
+            group chats.
+        group_chat_icon:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: URL of the group chat icon. Only set for group chats that have an icon; `null` otherwise.
+        handles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatHandle"
+        is_group:
+          type: boolean
+          description: Whether this is a group chat
+          default: false
+        created_at:
+          type: string
+          format: date-time
+          description: When the chat was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the chat was last updated
+      description: Chat resource created for the receiving agent.
+    ChatCreatedWebhook:
+      description: Complete webhook payload for chat.created events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatCreatedEvent"
+    ChatGroupIconUpdatedEvent:
+      type: object
+      description: Payload for chat.group_icon_updated webhook events
+      required:
+        - chat_id
+        - updated_at
+      properties:
+        chat_id:
+          type: string
+          description: Chat identifier (UUID) of the group chat
+        old_value:
+          type:
+            - string
+            - "null"
+          description: Previous icon URL (null if no previous icon)
+        new_value:
+          type:
+            - string
+            - "null"
+          description: New icon URL (null if the icon was removed)
+        changed_by_handle:
+          description: The handle who made the change.
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        updated_at:
+          type: string
+          format: date-time
+          description: When the update occurred
+    ChatGroupIconUpdatedWebhook:
+      description: Complete webhook payload for chat.group_icon_updated events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatGroupIconUpdatedEvent"
+    ChatGroupNameUpdatedEvent:
+      type: object
+      description: Payload for chat.group_name_updated webhook events
+      required:
+        - chat_id
+        - updated_at
+      properties:
+        chat_id:
+          type: string
+          description: Chat identifier (UUID) of the group chat
+        old_value:
+          type:
+            - string
+            - "null"
+          description: Previous group name (null if no previous name)
+        new_value:
+          type:
+            - string
+            - "null"
+          description: New group name (null if the name was removed)
+        changed_by_handle:
+          description: The handle who made the change.
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        updated_at:
+          type: string
+          format: date-time
+          description: When the update occurred
+    ChatGroupNameUpdatedWebhook:
+      description: Complete webhook payload for chat.group_name_updated events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatGroupNameUpdatedEvent"
+    ChatHandle:
+      type: object
+      required:
+        - id
+        - handle
+        - joined_at
+        - kind
+        - display_name
+        - avatar_url
+        - tagline
+        - verified
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for this handle
+        handle:
+          type: string
+          description: Relay Handle.
+        status:
+          type:
+            - string
+            - "null"
+          description: Participant status
+          enum:
+            - active
+            - left
+            - removed
+          default: active
+        joined_at:
+          type: string
+          format: date-time
+          description: When this participant joined the chat
+        left_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When they left (if applicable)
+        is_me:
+          type:
+            - boolean
+            - "null"
+          description: Whether this handle is the authenticated caller.
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+          description: Whether this Contact is a user or an agent.
+        display_name:
+          type:
+            - string
+            - "null"
+          description: Current Contact display name.
+        avatar_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Current Contact avatar URL.
+        tagline:
+          type:
+            - string
+            - "null"
+          maxLength: 60
+          description: Short description shown for an agent. User Contacts return null.
+        verified:
+          type: boolean
+          description: Whether Relay has verified this agent.
+    ChatInfo:
+      type: object
+      required:
+        - id
+        - handles
+        - is_group
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Chat identifier
+        handles:
+          type: array
+          description: Chat participants
+          items:
+            $ref: "#/components/schemas/ChatHandle"
+        is_group:
+          type: boolean
+          description: Whether this is a group chat
+    ChatTypingIndicatorStartedEvent:
+      type: object
+      additionalProperties: false
+      description: Payload for chat.typing_indicator.started events.
+      required:
+        - chat_id
+        - contact
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+          description: Chat identifier.
+        contact:
+          $ref: "#/components/schemas/TypingContact"
+    ChatTypingIndicatorStartedWebhook:
+      description: Complete webhook payload for chat.typing_indicator.started events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatTypingIndicatorStartedEvent"
+    ChatTypingIndicatorStoppedEvent:
+      type: object
+      additionalProperties: false
+      description: Payload for chat.typing_indicator.stopped events.
+      required:
+        - chat_id
+        - contact
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+          description: Chat identifier.
+        contact:
+          $ref: "#/components/schemas/TypingContact"
+    ChatTypingIndicatorStoppedWebhook:
+      description: Complete webhook payload for chat.typing_indicator.stopped events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatTypingIndicatorStoppedEvent"
+    ContactAddedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - contact
+        - chat_id
+      properties:
+        contact:
+          $ref: "#/components/schemas/ContactEventContact"
+        chat_id:
+          type: string
+          format: uuid
+          description: Direct Chat created or reused for this Contact.
+    ContactAddedWebhook:
+      description: Complete webhook payload for contact.added events.
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ContactAddedEvent"
+    ContactCardItem:
+      type: object
+      required:
+        - handle
+        - first_name
+        - is_active
+        - kind
+        - last_name
+        - image_url
+      properties:
+        first_name:
+          type: string
+        last_name:
+          type:
+            - string
+            - "null"
+        image_url:
+          type:
+            - string
+            - "null"
+          format: uri
+        is_active:
+          type: boolean
+        handle:
+          type: string
+          description: Relay Handle associated with this contact card.
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+          description: Whether the Contact is a user or an agent.
+    ContactEventContact:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - handle
+        - display_name
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: User Contact identifier.
+        handle:
+          type: string
+          description: Current user Handle.
+        display_name:
+          type: string
+          description: Current user display name.
+    ContactRemovedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - contact
+      properties:
+        contact:
+          $ref: "#/components/schemas/ContactEventContact"
+    ContactRemovedWebhook:
+      description: Complete webhook payload for contact.removed events.
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ContactRemovedEvent"
+    CreateChatRequest:
+      type: object
+      required:
+        - from
+        - to
+        - message
+      properties:
+        from:
+          type: string
+          description: Authenticated sender's Relay Handle.
+        to:
+          type: array
+          minItems: 1
+          maxItems: 31
+          items:
+            type: string
+        message:
+          description: Initial message for the new Chat.
+          $ref: "#/components/schemas/MessageContent"
+    CreateChatResult:
+      type: object
+      description: Response for creating a new chat with an initial message
+      required:
+        - chat
+      properties:
+        chat:
+          type: object
+          required:
+            - id
+            - display_name
+            - is_group
+            - handles
+            - message
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Unique identifier for the created chat (UUID)
+            display_name:
+              type:
+                - string
+                - "null"
+              description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
+                group chats.
+            is_group:
+              type: boolean
+              description: Whether this is a group chat
+            handles:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatHandle"
+            message:
+              $ref: "#/components/schemas/SentMessage"
+    CreateContactRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - handle
+      properties:
+        handle:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: User Handle to request.
+    CreateContactRequestResult:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+      properties:
+        state:
+          type: string
+          enum:
+            - pending
+          description: The Add request was accepted.
+    CreateWebhookSubscriptionRequest:
+      type: object
+      required:
+        - target_url
+        - subscribed_events
+      properties:
+        target_url:
+          type: string
+          format: uri
+          description: URL where webhook events will be sent. Must be HTTPS.
+        subscribed_events:
+          type: array
+          description: List of event types to subscribe to
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+    DeliveryStatus:
+      type: string
+      description: Current aggregate receipt state. Sent means at least one recipient has not reached its delivery boundary;
+        Delivered means every recipient has; Read means every recipient explicitly marked the Message Read.
+      enum:
+        - sent
+        - delivered
+        - read
+    ErrorCode:
+      type: integer
+      description: Relay API error code.
+    ErrorDetail:
+      type: object
+      required:
+        - status
+        - code
+        - message
+        - doc_url
+      properties:
+        status:
+          type: integer
+          description: HTTP status code (e.g., 400, 404, 500)
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: Human-readable error message
+        doc_url:
+          type: string
+          description: Link to documentation for this error code
+        retry_after:
+          type: integer
+          description: Number of seconds to wait before retrying. Only present on 429 rate limit errors.
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - success
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+        success:
+          type: boolean
+          description: Always false for error responses
+        trace_id:
+          type: string
+          description: Unique trace ID for request tracing and debugging
+    GetContactCardResponse:
+      type: object
+      required:
+        - contact_cards
+      properties:
+        contact_cards:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContactCardItem"
+    GetMessagesResult:
+      type: object
+      required:
+        - messages
+      properties:
+        messages:
+          type: array
+          description: List of messages
+          items:
+            $ref: "#/components/schemas/Message"
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: |
+            Cursor for fetching the next page of results.
+            Null if there are no more results to fetch.
+            Pass this value as the `cursor` parameter in the next request.
+    GetThreadResponse:
+      type: object
+      description: Response containing messages in a thread with pagination
+      required:
+        - messages
+      properties:
+        messages:
+          type: array
+          description: Messages in the thread, ordered by the specified order parameter
+          items:
+            $ref: "#/components/schemas/Message"
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: Cursor for fetching the next page of results (null if no more results)
+    LinkPart:
+      type: object
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          enum:
+            - link
+          description: Indicates this is a rich link preview part
+        value:
+          type: string
+          format: uri
+          description: |
+            URL to send with a rich link preview. The recipient will see an inline card
+            with the page's title, description, and preview image (when available).
+
+            A `link` part must be the **only** part in the message. To send a URL as plain
+            text (no preview card), use a `text` part instead.
+          minLength: 1
+          maxLength: 2048
+    LinkPartResponse:
+      type: object
+      description: A rich link preview part
+      required:
+        - type
+        - value
+        - reactions
+      properties:
+        type:
+          type: string
+          enum:
+            - link
+          description: Indicates this is a rich link preview part
+        value:
+          type: string
+          description: The URL
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+    ListBlockedHandlesResult:
+      type: object
+      required:
+        - blocked_handles
+      properties:
+        blocked_handles:
+          type: array
+          description: Contacts blocked by the authenticated Contact, newest first.
+          items:
+            $ref: "#/components/schemas/BlockedHandleEntry"
+    ListChatsResult:
+      type: object
+      required:
+        - chats
+      properties:
+        chats:
+          type: array
+          description: List of chats
+          items:
+            $ref: "#/components/schemas/Chat"
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: |
+            Cursor for fetching the next page of results.
+            Null if there are no more results to fetch.
+            Pass this value as the `cursor` parameter in the next request.
+    ListWebhookSubscriptionsResult:
+      type: object
+      required:
+        - subscriptions
+      properties:
+        subscriptions:
+          type: array
+          description: List of webhook subscriptions
+          items:
+            $ref: "#/components/schemas/WebhookSubscriptionResponse"
+    MediaPart:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - media
+          description: Indicates this is a media attachment part
+        url:
+          type: string
+          format: uri
+          description: Public HTTPS media URL. Relay blocks non-public networks and validates every redirect, response status,
+            declared and actual size, and supported Content-Type.
+          pattern: ^https://
+        attachment_id:
+          type: string
+          format: uuid
+          description: Reference an Attachment allocated through POST /v1/attachments. Use either url or attachment_id, not both.
+    MediaPartResponse:
+      type: object
+      description: A media attachment part
+      required:
+        - type
+        - id
+        - url
+        - filename
+        - mime_type
+        - size_bytes
+        - reactions
+      properties:
+        type:
+          type: string
+          enum:
+            - media
+          description: Indicates this is a media attachment part
+        id:
+          type: string
+          format: uuid
+          description: Unique attachment identifier
+        url:
+          type: string
+          format: uri
+          description: Opaque Relay download URL for the Attachment.
+        filename:
+          type: string
+          description: Original filename
+        mime_type:
+          type: string
+          description: MIME type of the file
+        size_bytes:
+          type: integer
+          description: File size in bytes
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: Audio or video duration in milliseconds when known.
+        width:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel width when known. Width and height are supplied together.
+        height:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel height when known. Width and height are supplied together.
+    Message:
+      type: object
+      required:
+        - id
+        - chat_id
+        - is_from_me
+        - delivery_status
+        - created_at
+        - updated_at
+        - is_system_message
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the message
+          format: uuid
+        chat_id:
+          type: string
+          description: ID of the chat this message belongs to
+          format: uuid
+        from:
+          type:
+            - string
+            - "null"
+          description: Sender Relay Handle.
+        from_handle:
+          description: The sender of this message as a full handle object
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        parts:
+          type:
+            - array
+            - "null"
+          description: Message parts in order (text, media, and link)
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/TextPartResponse"
+              - $ref: "#/components/schemas/MediaPartResponse"
+              - $ref: "#/components/schemas/LinkPartResponse"
+              - $ref: "#/components/schemas/SystemPartResponse"
+        reply_to:
+          oneOf:
+            - $ref: "#/components/schemas/ReplyTo"
+            - type: "null"
+        is_from_me:
+          type: boolean
+          description: Whether this message was sent by the authenticated user
+        delivery_status:
+          $ref: "#/components/schemas/DeliveryStatus"
+        created_at:
+          type: string
+          format: date-time
+          description: When the message was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the message was last updated
+        sent_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was sent
+        delivered_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was delivered
+        read_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was read
+        deliveries:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageDelivery"
+          description: Per-recipient Delivered and Read truth for direct and group Chats. Relay derives this because it controls
+            every recipient endpoint.
+        is_system_message:
+          type: boolean
+          description: Whether this timeline item is a visible Chat event.
+        system_event:
+          oneOf:
+            - $ref: "#/components/schemas/SystemEvent"
+            - type: "null"
+    MessageContent:
+      type: object
+      description: One message containing 1–100 ordered text, media, or link parts. A link must be the only part.
+      properties:
+        parts:
+          x-go-type-skip-optional-pointer: true
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MessagePart"
+        reply_to:
+          $ref: "#/components/schemas/ReplyTo"
+          description: Reply to another message to create a threaded conversation
+        idempotency_key:
+          type: string
+          description: Optional key for a safe retry. The same authenticated sender, key, and Message body return the original
+            Message. Reusing the key with a different body returns a conflict.
+          maxLength: 255
+      required:
+        - parts
+    MessageDeliveredWebhook:
+      description: Complete webhook payload for message.delivered events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageEvent"
+    MessageDelivery:
+      type: object
+      additionalProperties: false
+      required:
+        - contact
+        - delivered_at
+        - read_at
+      properties:
+        contact:
+          $ref: "#/components/schemas/ChatHandle"
+          description: Message recipient whose independent receipt state this row records.
+        delivered_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When this recipient reached Delivered. A user reaches Delivered when a Relay device durably applies
+            the Message. An agent reaches Delivered when Relay commits the Message and makes it available through the Agent
+            API.
+        read_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When this recipient marked the Chat Read. Read implies Delivered.
+    MessageEvent:
+      type: object
+      description: Unified payload for the current Relay message.sent, message.received, message.delivered, and message.read
+        webhooks. direction is relative to the receiving agent.
+      required:
+        - chat
+        - id
+        - direction
+        - sender_handle
+        - parts
+      properties:
+        chat:
+          type: object
+          description: Chat information
+          required:
+            - id
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Chat identifier
+            is_group:
+              type:
+                - boolean
+                - "null"
+              description: Whether this is a group chat
+            owner_handle:
+              oneOf:
+                - $ref: "#/components/schemas/ChatHandle"
+                - type: "null"
+        id:
+          type: string
+          format: uuid
+          description: Message identifier
+        idempotency_key:
+          type:
+            - string
+            - "null"
+          description: Idempotency key for deduplication of outbound messages.
+        direction:
+          type: string
+          description: Message direction - "outbound" if sent by you, "inbound" if received
+          enum:
+            - inbound
+            - outbound
+        sender_handle:
+          description: The handle that sent this message
+          $ref: "#/components/schemas/ChatHandle"
+        parts:
+          type: array
+          description: Message parts (text and/or media)
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/schemas-TextPartResponse"
+              - $ref: "#/components/schemas/schemas-MediaPartResponse"
+              - $ref: "#/components/schemas/schemas-LinkPartResponse"
+            discriminator:
+              propertyName: type
+              mapping:
+                text: "#/components/schemas/schemas-TextPartResponse"
+                media: "#/components/schemas/schemas-MediaPartResponse"
+                link: "#/components/schemas/schemas-LinkPartResponse"
+        sent_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was sent. Null if not yet sent.
+        delivered_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was delivered. Null if not yet delivered.
+        read_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was read. Null if not yet read.
+        reply_to:
+          type:
+            - object
+            - "null"
+          description: Reference to the message this is replying to (for threaded replies)
+          properties:
+            message_id:
+              type: string
+              format: uuid
+              description: ID of the message being replied to
+            part_index:
+              type: integer
+              format: int32
+              minimum: 0
+              description: Index of the part being replied to
+    MessagePart:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+        mapping:
+          text: "#/components/schemas/TextPart"
+          media: "#/components/schemas/MediaPart"
+          link: "#/components/schemas/LinkPart"
+      oneOf:
+        - $ref: "#/components/schemas/TextPart"
+        - $ref: "#/components/schemas/MediaPart"
+        - $ref: "#/components/schemas/LinkPart"
+    MessageReadWebhook:
+      description: Complete webhook payload for message.read events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageEvent"
+    MessageReceivedWebhook:
+      description: Complete webhook payload for message.received events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageEvent"
+    MessageSentWebhook:
+      description: Complete webhook payload for message.sent events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageEvent"
+    ParticipantAddedEvent:
+      type: object
+      description: Payload for participant.added webhook events
+      required:
+        - chat_id
+        - participant
+        - added_at
+      properties:
+        chat_id:
+          type: string
+          description: Chat identifier (UUID) of the group chat
+        participant:
+          description: The added participant as a full handle object
+          $ref: "#/components/schemas/ChatHandle"
+        added_at:
+          type: string
+          format: date-time
+          description: When the participant was added
+    ParticipantAddedWebhook:
+      description: Complete webhook payload for participant.added events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ParticipantAddedEvent"
+    ParticipantRemovedEvent:
+      type: object
+      description: Payload for participant.removed webhook events
+      required:
+        - chat_id
+        - participant
+        - removed_at
+      properties:
+        chat_id:
+          type: string
+          description: Chat identifier (UUID) of the group chat
+        participant:
+          description: The removed participant as a full handle object
+          $ref: "#/components/schemas/ChatHandle"
+        removed_at:
+          type: string
+          format: date-time
+          description: When the participant was removed
+    ParticipantRemovedWebhook:
+      description: Complete webhook payload for participant.removed events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ParticipantRemovedEvent"
+    Reaction:
+      type: object
+      required:
+        - is_me
+        - handle
+        - type
+      properties:
+        is_me:
+          type: boolean
+          description: Whether this reaction is from the current user
+        handle:
+          $ref: "#/components/schemas/ChatHandle"
+        type:
+          $ref: "#/components/schemas/ReactionType"
+        custom_emoji:
+          type:
+            - string
+            - "null"
+          description: Custom emoji if type is "custom", null otherwise
+    ReactionAddedEvent:
+      description: Payload for reaction.added webhook events
+      $ref: "#/components/schemas/ReactionEventBase"
+    ReactionAddedWebhook:
+      description: Complete webhook payload for reaction.added events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ReactionAddedEvent"
+    ReactionEventBase:
+      type: object
+      required:
+        - chat_id
+        - from_handle
+        - message_id
+        - part_index
+        - reaction_type
+        - is_from_me
+        - reacted_at
+      properties:
+        chat_id:
+          type: string
+          description: Chat identifier (UUID)
+        from_handle:
+          description: The person who added/removed the reaction as a full handle object
+          $ref: "#/components/schemas/ChatHandle"
+        message_id:
+          type: string
+          description: Message identifier (UUID) that the reaction was added to or removed from
+        part_index:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Index of the message part that was reacted to (0-based)
+        reaction_type:
+          $ref: "#/components/schemas/ReactionType"
+        custom_emoji:
+          type:
+            - string
+            - "null"
+          description: The actual emoji when reaction_type is "custom". Null for standard tapbacks.
+        is_from_me:
+          type: boolean
+        reacted_at:
+          type: string
+          format: date-time
+          description: When the reaction was added or removed
+    ReactionRemovedEvent:
+      description: Payload for reaction.removed webhook events
+      $ref: "#/components/schemas/ReactionEventBase"
+    ReactionRemovedWebhook:
+      description: Complete webhook payload for reaction.removed events
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ReactionRemovedEvent"
+    ReactionType:
+      type: string
+      description: Six standard tapbacks or a custom Unicode emoji.
+      enum:
+        - love
+        - like
+        - dislike
+        - laugh
+        - emphasize
+        - question
+        - custom
+    RemoveParticipantRequest:
+      type: object
+      required:
+        - handle
+      properties:
+        handle:
+          type: string
+          description: Relay Handle.
+    ReplyTo:
+      type: object
+      description: Indicates this message is a threaded reply to another message
+      required:
+        - message_id
+      properties:
+        message_id:
+          type: string
+          format: uuid
+          description: The ID of the message to reply to
+        part_index:
+          type: integer
+          format: int32
+          description: |
+            The specific message part to reply to (0-based index).
+            Defaults to 0 (first part) if not provided.
+            Use this when replying to a specific part of a multipart message.
+          minimum: 0
+    RequestUploadRequest:
+      type: object
+      required:
+        - filename
+        - content_type
+        - size_bytes
+      properties:
+        filename:
+          type: string
+          description: Name of the file to upload
+          minLength: 1
+          maxLength: 255
+        content_type:
+          $ref: "#/components/schemas/SupportedContentType"
+        size_bytes:
+          type: integer
+          format: int64
+          description: Size of the file in bytes (max 100MB)
+          minimum: 1
+          maximum: 104857600
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: Audio or video duration in milliseconds when known.
+        width:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel width when known. Width and height are supplied together.
+        height:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel height when known. Width and height are supplied together.
+    RequestUploadResult:
+      type: object
+      required:
+        - attachment_id
+        - upload_url
+        - download_url
+        - http_method
+        - expires_at
+        - required_headers
+      properties:
+        attachment_id:
+          type: string
+          description: Unique identifier for the attachment
+          format: uuid
+        upload_url:
+          type: string
+          format: uri
+          description: Opaque Relay upload URL. PUT the raw bytes with the exact required_headers before expires_at.
+        download_url:
+          type: string
+          format: uri
+          description: Opaque Relay download URL for the Attachment.
+        http_method:
+          type: string
+          description: HTTP method to use for upload (always PUT)
+          enum:
+            - PUT
+        expires_at:
+          type: string
+          format: date-time
+          description: When the upload URL expires (15 minutes from now)
+        required_headers:
+          type: object
+          description: Exact HTTP headers required by the upload URL.
+          additionalProperties:
+            type: string
+    SendMessageRequest:
+      type: object
+      description: Resolve or reuse the Chat for the recipient Handles, then send a Message as the authenticated Contact.
+      required:
+        - to
+        - message
+      properties:
+        to:
+          type: array
+          minItems: 1
+          maxItems: 31
+          items:
+            type: string
+        message:
+          description: The Message to send. Text, link, and media parts are supported. Voice memos use POST
+            /v1/chats/{chatId}/voicememo.
+          $ref: "#/components/schemas/MessageContent"
+    SendMessageResponse:
+      type: object
+      description: Response for sending a message to a chat
+      required:
+        - chat_id
+        - message
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+          description: Unique identifier of the chat this message was sent to
+        message:
+          $ref: "#/components/schemas/SentMessage"
+    SendMessageResult:
+      type: object
+      description: The resolved Chat and resulting Message.
+      required:
+        - chat_id
+        - created_new_chat
+        - from
+        - is_group
+        - handles
+        - message
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+          description: The reused or newly created Chat.
+        created_new_chat:
+          type: boolean
+        from:
+          type: string
+          description: Handle of the authenticated sending Contact.
+        is_group:
+          type: boolean
+          description: Whether the resolved chat is a group chat.
+        handles:
+          type: array
+          description: Contacts in the resolved Chat.
+          items:
+            $ref: "#/components/schemas/ChatHandle"
+        message:
+          description: The primary message that was sent.
+          $ref: "#/components/schemas/SentMessage"
+    SendMessageToChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          $ref: "#/components/schemas/MessageContent"
+    SendReactionRequest:
+      type: object
+      required:
+        - operation
+        - type
+      properties:
+        operation:
+          type: string
+          description: Whether to add or remove the reaction
+          enum:
+            - add
+            - remove
+        type:
+          $ref: "#/components/schemas/ReactionType"
+        custom_emoji:
+          type: string
+          description: |
+            Custom emoji string. Required when type is "custom".
+        part_index:
+          type: integer
+          description: |
+            Optional index of the message part to react to.
+            If not provided, reacts to the entire message (part 0).
+      if:
+        properties:
+          type:
+            const: custom
+      then:
+        required:
+          - custom_emoji
+        properties:
+          custom_emoji: {}
+    SendVoiceMemoToChatRequest:
+      type: object
+      description: |
+        Request to send a voice memo to a chat (chat_id provided in path).
+        Exactly one of `voice_memo_url` or `attachment_id` must be provided.
+      properties:
+        voice_memo_url:
+          type: string
+          format: uri
+          description: |
+            URL of the voice memo audio file. Must be a publicly accessible HTTPS URL.
+
+            Either `voice_memo_url` or `attachment_id` must be provided, but not both.
+        attachment_id:
+          type: string
+          format: uuid
+          description: |
+            Reference to a voice memo file pre-uploaded via `POST /v1/attachments`.
+            The file is already stored, so sends using this ID skip the download step.
+
+            Either `voice_memo_url` or `attachment_id` must be provided, but not both.
+      oneOf:
+        - required:
+            - voice_memo_url
+          properties:
+            voice_memo_url: {}
+            attachment_id: false
+        - required:
+            - attachment_id
+          properties:
+            voice_memo_url: false
+            attachment_id: {}
+    SendVoiceMemoToChatResult:
+      type: object
+      description: Response for sending a voice memo to a chat
+      required:
+        - voice_memo
+      properties:
+        voice_memo:
+          type: object
+          required:
+            - id
+            - from
+            - to
+            - status
+            - voice_memo
+            - created_at
+            - chat
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Message identifier
+            from:
+              type: string
+            to:
+              type: array
+              items:
+                type: string
+            status:
+              type: string
+              description: Current delivery status
+            voice_memo:
+              $ref: "#/components/schemas/VoiceMemoAttachment"
+            created_at:
+              type: string
+              format: date-time
+              description: When the voice memo was created
+            chat:
+              $ref: "#/components/schemas/ChatInfo"
+    SentMessage:
+      type: object
+      description: A message that was sent (used in CreateChat and SendMessage responses)
+      required:
+        - id
+        - parts
+        - created_at
+        - sent_at
+        - delivery_status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Message identifier (UUID)
+        parts:
+          type: array
+          description: Message parts in order (text, media, and link)
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/TextPartResponse"
+              - $ref: "#/components/schemas/MediaPartResponse"
+              - $ref: "#/components/schemas/LinkPartResponse"
+        created_at:
+          type: string
+          format: date-time
+          description: When the message was created
+        sent_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was actually sent (null if still queued)
+        delivered_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was delivered
+        delivery_status:
+          $ref: "#/components/schemas/DeliveryStatus"
+        from_handle:
+          description: The sender of this message as a full handle object
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        reply_to:
+          oneOf:
+            - $ref: "#/components/schemas/ReplyTo"
+            - type: "null"
+    SetContactCardRequest:
+      type: object
+      required:
+        - handle
+        - first_name
+      properties:
+        first_name:
+          type: string
+          description: First name for the contact card. Required.
+        last_name:
+          type: string
+          description: Last name for the contact card. Optional.
+        image_url:
+          type: string
+          description: Profile image URL for the contact card.
+        handle:
+          type: string
+          description: Relay Handle associated with this contact card.
+    SetContactCardResponse:
+      type: object
+      required:
+        - handle
+        - first_name
+        - is_active
+        - kind
+        - last_name
+        - image_url
+      properties:
+        first_name:
+          type: string
+          description: First name on the contact card
+        last_name:
+          type:
+            - string
+            - "null"
+        image_url:
+          type:
+            - string
+            - "null"
+          format: uri
+        is_active:
+          type: boolean
+          description: Whether the contact card was successfully applied to the device
+        handle:
+          type: string
+          description: Relay Handle associated with this contact card.
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+          description: Whether the Contact is a user or an agent.
+    SupportedContentType:
+      type: string
+      description: Supported declared MIME types for uploaded Attachments and media URLs. Relay stores and returns the
+        original bytes unchanged. Relay accepts WebP and rejects SVG as an explicit content-safety decision.
+      enum:
+        - image/jpeg
+        - image/png
+        - image/gif
+        - image/heic
+        - image/heif
+        - image/tiff
+        - image/bmp
+        - image/webp
+        - image/x-icon
+        - video/mp4
+        - video/quicktime
+        - video/mpeg
+        - video/mpeg2
+        - video/x-m4v
+        - video/x-msvideo
+        - video/3gpp
+        - audio/mpeg
+        - audio/mp3
+        - audio/x-m4a
+        - audio/mp4
+        - audio/x-caf
+        - audio/x-wav
+        - audio/x-aiff
+        - audio/aiff
+        - audio/aac
+        - audio/midi
+        - audio/amr
+        - application/pdf
+        - application/vnd.apple.pkpass
+        - text/plain
+        - text/markdown
+        - text/vcard
+        - text/rtf
+        - text/csv
+        - text/html
+        - text/calendar
+        - application/msword
+        - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+        - application/vnd.ms-excel
+        - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        - application/vnd.ms-powerpoint
+        - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        - application/x-iwork-pages-sffpages
+        - application/x-iwork-numbers-sffnumbers
+        - application/x-iwork-keynote-sffkey
+        - application/epub+zip
+        - text/xml
+        - application/json
+        - application/zip
+        - application/x-gzip
+    SystemEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - actor
+        - subject
+        - value
+        - icon_attachment_id
+        - contact_card
+      properties:
+        type:
+          type: string
+          enum:
+            - chat_created
+            - participant_added
+            - participant_removed
+            - group_name_updated
+            - group_icon_updated
+            - contact_card_shared
+        actor:
+          $ref: "#/components/schemas/SystemEventParty"
+        subject:
+          oneOf:
+            - $ref: "#/components/schemas/SystemEventParty"
+            - type: "null"
+        value:
+          type:
+            - string
+            - "null"
+        icon_attachment_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+        contact_card:
+          oneOf:
+            - $ref: "#/components/schemas/ContactCardItem"
+            - type: "null"
+    SystemEventParty:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - handle
+        - kind
+      properties:
+        id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+    SystemPartResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - value
+        - reactions
+      properties:
+        type:
+          type: string
+          enum:
+            - system
+        value:
+          type: string
+        reactions:
+          type: "null"
+    TextPart:
+      type: object
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          description: Indicates this is a text message part
+        value:
+          type: string
+          description: Plain text content, measured in UTF-16 code units for mention ranges.
+          minLength: 1
+          maxLength: 10000
+        mention:
+          type:
+            - string
+            - "null"
+          description: Relay Handle mentioned by this text part.
+        mention_range:
+          type:
+            - array
+            - "null"
+          prefixItems:
+            - type: integer
+              minimum: 0
+            - type: integer
+              minimum: 1
+          minItems: 2
+          maxItems: 2
+          description: UTF-16 [start,end) range of the mention inside value.
+    TextPartResponse:
+      type: object
+      description: A text message part
+      required:
+        - type
+        - value
+        - reactions
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          description: Indicates this is a text message part
+        value:
+          type: string
+          description: The text content
+        mention:
+          type:
+            - string
+            - "null"
+          description: Relay Handle mentioned by this text part.
+        mention_range:
+          type:
+            - array
+            - "null"
+          prefixItems:
+            - type: integer
+              minimum: 0
+            - type: integer
+              minimum: 1
+          minItems: 2
+          maxItems: 2
+          description: UTF-16 [start,end) range of the mention inside value.
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+    TypingContact:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - handle
+        - kind
+      description: Contact currently publishing typing state.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Contact identifier.
+        handle:
+          type: string
+          description: Current Relay Handle.
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+          description: Whether the Contact is a user or an agent.
+    UnblockHandleRequest:
+      type: object
+      required:
+        - handle
+      properties:
+        handle:
+          type: string
+          description: Registered Relay Handle.
+    UpdateChatRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          description: New display name for the chat (group chats only)
+        group_chat_icon:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: Completed image Attachment ID to use as the group photo, or null to clear it.
+    UpdateContactCardRequest:
+      type: object
+      properties:
+        first_name:
+          type: string
+          description: Updated first name. If omitted, the existing value is kept.
+        last_name:
+          type:
+            - string
+            - "null"
+          description: Updated last name. If omitted, the existing value is kept.
+        image_url:
+          type:
+            - string
+            - "null"
+          description: Updated profile image URL. If omitted, the existing image is kept.
+          format: uri
+    UpdateWebhookSubscriptionRequest:
+      type: object
+      properties:
+        target_url:
+          type: string
+          format: uri
+          description: New target URL for webhook events
+        subscribed_events:
+          type: array
+          description: Updated list of event types to subscribe to
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+        is_active:
+          type: boolean
+          description: Activate or deactivate the subscription
+    VoiceMemoAttachment:
+      type: object
+      required:
+        - id
+        - url
+        - filename
+        - mime_type
+        - size_bytes
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Attachment identifier
+        url:
+          type: string
+          format: uri
+          description: Opaque Relay download URL for the voice memo Attachment.
+        filename:
+          type: string
+          description: Original filename
+        mime_type:
+          type: string
+          description: Audio MIME type
+        size_bytes:
+          type: integer
+          description: File size in bytes
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: Audio or video duration in milliseconds when known.
+        width:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel width when known. Width and height are supplied together.
+        height:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Pixel height when known. Width and height are supplied together.
+    WebSocketAckFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - through_sequence
+      properties:
+        type:
+          type: string
+          enum:
+            - ack
+        through_sequence:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+    WebSocketDisconnectFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - reason
+      properties:
+        type:
+          type: string
+          enum:
+            - disconnect
+        reason:
+          type: string
+          enum:
+            - revoked
+            - heartbeat_timeout
+            - restart
+            - webhook_configured
+    WebSocketErrorFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - code
+        - message
+        - fatal
+        - retryable
+      properties:
+        type:
+          type: string
+          enum:
+            - error
+        code:
+          type: string
+          enum:
+            - invalid_frame
+            - ack_out_of_range
+            - stale_connection
+            - ack_failed
+            - delivery_failed
+            - full_sync_required
+            - full_sync_mismatch
+        message:
+          type: string
+        fatal:
+          type: boolean
+        retryable:
+          type: boolean
+    WebSocketEventFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - sequence
+        - event
+      properties:
+        type:
+          type: string
+          enum:
+            - event
+        sequence:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        event:
+          $ref: "#/components/schemas/WebhookEnvelopeBase"
+    WebSocketFullSyncCompleteFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - through_sequence
+      properties:
+        type:
+          type: string
+          enum:
+            - full_sync_complete
+        through_sequence:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+    WebSocketFullSyncFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - through_sequence
+        - reason
+      properties:
+        type:
+          type: string
+          enum:
+            - full_sync
+        through_sequence:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        reason:
+          type: string
+          enum:
+            - checkpoint_outside_retention
+    WebSocketPingFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - sent_at
+      properties:
+        type:
+          type: string
+          enum:
+            - ping
+        sent_at:
+          type: string
+          format: date-time
+    WebSocketPongFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - pong
+    WebSocketReadyFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - connection_id
+        - acked_through
+        - full_sync_required
+        - full_sync_through
+        - heartbeat_interval_ms
+        - max_in_flight
+      properties:
+        type:
+          type: string
+          enum:
+            - ready
+        connection_id:
+          type: string
+          format: uuid
+        acked_through:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        full_sync_required:
+          type: boolean
+        full_sync_through:
+          type:
+            - string
+            - "null"
+          pattern: ^(0|[1-9][0-9]*)$
+        heartbeat_interval_ms:
+          type: integer
+          minimum: 1
+        max_in_flight:
+          type: integer
+          minimum: 1
+    WebhookEnvelopeBase:
+      type: object
+      required:
+        - api_version
+        - webhook_version
+        - event_type
+        - event_id
+        - created_at
+        - data
+        - trace_id
+        - agent_id
+      properties:
+        api_version:
+          type: string
+          enum:
+            - v1
+          description: Relay API version for this webhook envelope.
+        webhook_version:
+          type: string
+          description: Fixed Relay webhook payload version.
+          enum:
+            - 2026-08-30
+        event_type:
+          $ref: "#/components/schemas/WebhookEventType"
+        event_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this event (for deduplication)
+        created_at:
+          type: string
+          format: date-time
+          description: When the event was created
+        trace_id:
+          type: string
+          description: Trace ID for debugging and correlation across systems.
+        agent_id:
+          type: string
+          format: uuid
+          description: Contact identifier of the receiving agent.
+        data:
+          type: object
+          description: Event payload. Its shape is selected by event_type.
+          additionalProperties: true
+    WebhookEventType:
+      type: string
+      enum:
+        - message.sent
+        - message.received
+        - message.read
+        - message.delivered
+        - reaction.added
+        - reaction.removed
+        - participant.added
+        - participant.removed
+        - chat.created
+        - chat.group_name_updated
+        - chat.group_icon_updated
+        - chat.typing_indicator.started
+        - chat.typing_indicator.stopped
+        - contact.added
+        - contact.removed
+    WebhookEventsResult:
+      type: object
+      required:
+        - events
+        - doc_url
+      properties:
+        events:
+          type: array
+          description: List of all available webhook event types
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+        doc_url:
+          type: string
+          format: uri
+          description: URL to the webhook events documentation
+          const: https://docs.relayapp.im/guides/webhooks/events
+    WebhookSubscriptionCreatedResponse:
+      type: object
+      description: Response returned when creating a webhook subscription. Includes the signing secret which is only shown once.
+      required:
+        - id
+        - target_url
+        - signing_secret
+        - subscribed_events
+        - is_active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the webhook subscription
+        target_url:
+          type: string
+          format: uri
+          description: URL where webhook events will be sent
+        signing_secret:
+          type: string
+          description: Secret for verifying webhook signatures. Store this securely - it cannot be retrieved again.
+        subscribed_events:
+          type: array
+          description: List of event types this subscription receives
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+        is_active:
+          type: boolean
+          description: Whether this subscription is currently active
+        created_at:
+          type: string
+          format: date-time
+          description: When the subscription was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the subscription was last updated
+    WebhookSubscriptionResponse:
+      type: object
+      required:
+        - id
+        - target_url
+        - subscribed_events
+        - is_active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the webhook subscription
+        target_url:
+          type: string
+          format: uri
+          description: URL where webhook events will be sent
+        subscribed_events:
+          type: array
+          description: List of event types this subscription receives
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+        is_active:
+          type: boolean
+          description: Whether this subscription is currently active
+        created_at:
+          type: string
+          format: date-time
+          description: When the subscription was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the subscription was last updated
+    schemas-LinkPartResponse:
+      type: object
+      description: A rich link preview part
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          enum:
+            - link
+          description: Indicates this is a rich link preview part
+        value:
+          type: string
+          description: The URL
+    schemas-MediaPartResponse:
+      type: object
+      description: A media attachment part
+      required:
+        - type
+        - id
+        - url
+        - filename
+        - mime_type
+        - size_bytes
+      properties:
+        type:
+          type: string
+          enum:
+            - media
+          description: Indicates this is a media attachment part
+        id:
+          type: string
+          format: uuid
+          description: Unique attachment identifier
+        url:
+          type: string
+          format: uri
+          description: Opaque Relay download URL for the Attachment.
+        filename:
+          type: string
+          description: Original filename
+        mime_type:
+          type: string
+          description: MIME type of the file
+        size_bytes:
+          type: integer
+          description: File size in bytes
+    schemas-TextPartResponse:
+      type: object
+      description: A text message part
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          description: Indicates this is a text message part
+        value:
+          type: string
+          description: The text content
+        mention:
+          type:
+            - string
+            - "null"
+        mention_range:
+          type:
+            - array
+            - "null"
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          description: |
+            Character range `[start, end)` in `value` highlighted as the mention, as sent.
+            `null` when the send omitted it (the whole `value` is highlighted) or the part
+            carries no mention.
+            *Characters are measured as UTF-16 code units. Most characters count as 1; some emoji count as 2.*
+  responses:
+    BadRequest:
+      description: Invalid request - validation error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: The request conflicts with the current state of the resource
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Forbidden - no access to this resource
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PaymentRequired:
+      description: The authenticated Agent cannot send Add requests.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Unauthorized - missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UnprocessableEntity:
+      description: Unprocessable Entity - request is valid but cannot be processed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Bearer token authentication. Include your API token in the Authorization header.
+
+        Format: `Authorization: Bearer <your-token>`
+x-tagGroups:
+  - name: Messaging
+    tags:
+      - Chats
+      - Messages
+      - Attachments
+  - name: Contacts
+    tags:
+      - Contacts
+      - Contact Card
+      - Blocked Handles
+  - name: Agent events
+    tags:
+      - Webhooks
+      - WebSocket
+x-relay-websocket-frames:
+  ready:
+    $ref: "#/components/schemas/WebSocketReadyFrame"
+  event:
+    $ref: "#/components/schemas/WebSocketEventFrame"
+  ack:
+    $ref: "#/components/schemas/WebSocketAckFrame"
+  full_sync:
+    $ref: "#/components/schemas/WebSocketFullSyncFrame"
+  full_sync_complete:
+    $ref: "#/components/schemas/WebSocketFullSyncCompleteFrame"
+  ping:
+    $ref: "#/components/schemas/WebSocketPingFrame"
+  pong:
+    $ref: "#/components/schemas/WebSocketPongFrame"
+  error:
+    $ref: "#/components/schemas/WebSocketErrorFrame"
+  disconnect:
+    $ref: "#/components/schemas/WebSocketDisconnectFrame"
+x-relay-websocket-close-codes:
+  "1011": Relay could not load or commit delivery state; reconnect and resume.
+  "1012": Relay is restarting; reconnect and resume.
+  "4401": The Agent Token is invalid or revoked.
+  "4408": The heartbeat timed out.
+  "4410": Webhook delivery is now configured for this Agent.
+x-relay-webhooks:
+  message.sent.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageSentV20260830
+      summary: Message sent
+      description: An agent-authenticated message was committed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageSentWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.received.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageReceivedV20260830
+      summary: Message received
+      description: A user message was committed for the receiving agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageReceivedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.read.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageReadV20260830
+      summary: Message read
+      description: Every message recipient explicitly marked the message Read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageReadWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.delivered.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageDeliveredV20260830
+      summary: Message delivered
+      description: Every message recipient reached its Delivered boundary.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageDeliveredWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  reaction.added.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookReactionAddedV20260830
+      summary: Reaction added
+      description: A chat member added or replaced a reaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactionAddedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  reaction.removed.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookReactionRemovedV20260830
+      summary: Reaction removed
+      description: A chat member removed its matching reaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactionRemovedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  participant.added.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookParticipantAddedV20260830
+      summary: Participant added
+      description: A handle was added to a group chat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParticipantAddedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  participant.removed.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookParticipantRemovedV20260830
+      summary: Participant removed
+      description: A handle was removed from a group chat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParticipantRemovedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  chat.group_name_updated.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookChatGroupNameUpdatedV20260830
+      summary: Group name updated
+      description: A group chat name changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatGroupNameUpdatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  chat.group_icon_updated.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookChatGroupIconUpdatedV20260830
+      summary: Group icon updated
+      description: A group chat icon URL changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatGroupIconUpdatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  chat.created.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookChatCreatedV20260830
+      summary: Chat created
+      description: A chat containing the receiving agent was created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCreatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  chat.typing_indicator.started.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookChatTypingIndicatorStartedV20260830
+      summary: Typing indicator started
+      description: The identified Contact started or refreshed typing state in the Chat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatTypingIndicatorStartedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  chat.typing_indicator.stopped.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookChatTypingIndicatorStoppedV20260830
+      summary: Typing indicator stopped
+      description: The identified Contact stopped typing or its typing state expired.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatTypingIndicatorStoppedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  contact.added.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookContactAddedV20260830
+      summary: Contact added
+      description: A user added the receiving agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactAddedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  contact.removed.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookContactRemovedV20260830
+      summary: Contact removed
+      description: A user removed or blocked the receiving agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactRemovedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
