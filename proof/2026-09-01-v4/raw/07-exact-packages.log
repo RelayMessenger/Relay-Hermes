@@ -1,0 +1,153 @@
+time="2026-09-01T07:54:12-04:00" level=warning msg="Version mismatch: Daytona CLI is on v0.190.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+dist/relay_hermes-1.0.0rc1-py3-none-any.whl: OK
+dist/relay_hermes-1.0.0rc1.tar.gz: OK
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/contract-v4-wheel-3.11
+Activate with: source /home/daytona/contract-v4-wheel-3.11/bin/activate
+Using CPython 3.11.14
+Creating virtual environment at: /home/daytona/contract-v4-sdist-3.11
+Activate with: source /home/daytona/contract-v4-sdist-3.11/bin/activate
+Using Python 3.11.14 environment at: /home/daytona/contract-v4-wheel-3.11
+Resolved 17 packages in 7ms
+Prepared 1 package in 2ms
+Installed 17 packages in 17ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/contract-v4-sdist-3.11
+Resolved 9 packages in 13ms
+   Building relay-hermes @ file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz
+      Built relay-hermes @ file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz
+Prepared 1 package in 449ms
+Installed 9 packages in 10ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.11.14 environment at: /home/daytona/contract-v4-wheel-3.11
+Checked 17 packages in 25ms
+All installed packages are compatible
+Using Python 3.11.14 environment at: /home/daytona/contract-v4-sdist-3.11
+Checked 9 packages in 21ms
+All installed packages are compatible
+clean_install=pass python=3.11.14 version=1.0.0rc1 runtime_payload=exact
+clean_install=pass python=3.11.14 version=1.0.0rc1 runtime_payload=exact
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/contract-v4-wheel-3.12
+Activate with: source /home/daytona/contract-v4-wheel-3.12/bin/activate
+Using CPython 3.12.12
+Creating virtual environment at: /home/daytona/contract-v4-sdist-3.12
+Activate with: source /home/daytona/contract-v4-sdist-3.12/bin/activate
+Using Python 3.12.12 environment at: /home/daytona/contract-v4-wheel-3.12
+Resolved 17 packages in 6ms
+Installed 17 packages in 12ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/contract-v4-sdist-3.12
+Resolved 9 packages in 6ms
+Installed 9 packages in 5ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + typing-extensions==4.16.0
+ + websockets==17.1
+Using Python 3.12.12 environment at: /home/daytona/contract-v4-wheel-3.12
+Checked 17 packages in 28ms
+All installed packages are compatible
+Using Python 3.12.12 environment at: /home/daytona/contract-v4-sdist-3.12
+Checked 9 packages in 27ms
+All installed packages are compatible
+clean_install=pass python=3.12.12 version=1.0.0rc1 runtime_payload=exact
+clean_install=pass python=3.12.12 version=1.0.0rc1 runtime_payload=exact
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/contract-v4-wheel-3.13
+Activate with: source /home/daytona/contract-v4-wheel-3.13/bin/activate
+Using CPython 3.13.11
+Creating virtual environment at: /home/daytona/contract-v4-sdist-3.13
+Activate with: source /home/daytona/contract-v4-sdist-3.13/bin/activate
+Using Python 3.13.11 environment at: /home/daytona/contract-v4-wheel-3.13
+Resolved 16 packages in 6ms
+Installed 16 packages in 11ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + pygments==2.21.0
+ + pyyaml==6.0.3
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl)
+ + requests==2.34.2
+ + rich==15.0.0
+ + urllib3==2.7.0
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/contract-v4-sdist-3.13
+Resolved 8 packages in 6ms
+Installed 8 packages in 6ms
+ + anyio==4.14.2
+ + certifi==2026.7.22
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + idna==3.19
+ + relay-hermes==1.0.0rc1 (from file:///home/daytona/relay-hermes/release/dist/relay_hermes-1.0.0rc1.tar.gz)
+ + websockets==17.1
+Using Python 3.13.11 environment at: /home/daytona/contract-v4-wheel-3.13
+Checked 16 packages in 26ms
+All installed packages are compatible
+Using Python 3.13.11 environment at: /home/daytona/contract-v4-sdist-3.13
+Checked 8 packages in 27ms
+All installed packages are compatible
+clean_install=pass python=3.13.11 version=1.0.0rc1 runtime_payload=exact
+clean_install=pass python=3.13.11 version=1.0.0rc1 runtime_payload=exact
+Plugin Doctor: /home/daytona/contract-v4-doctor-3.13/relay_hermes-1.0.0rc1
+  manifest: relay-hermes 1.0.0-rc.1 (platform)
+  OK: runtime discovery, manifest parsing, import, and registration passed
+  registrations: 0 tool(s), 0 hook(s)
+exact_wheel_hermes_load=pass python=3.13 package_behavior=unchanged
+dist/relay_hermes-1.0.0rc1-py3-none-any.whl: OK
+dist/relay_hermes-1.0.0rc1.tar.gz: OK
+d0aaa8aba4f692a1ba363dd35fce08bcba06a4e07c526608c5488722456a6d3e  release/dist/relay_hermes-1.0.0rc1-py3-none-any.whl
+5b378167b155632b964277f9a05eb0162391678875109f20407b47342ced4457  release/dist/relay_hermes-1.0.0rc1.tar.gz
+01ad8f34115709c1a62a200ab1eea11a649e845c89fb9d408f9b4d33617dd49b  /home/daytona/relay-hermes-contract-v4-artifacts.tar.gz

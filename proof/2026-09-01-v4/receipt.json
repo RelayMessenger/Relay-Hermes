@@ -1,0 +1,116 @@
+{
+  "schema": "relay-hermes-validation/v7",
+  "summary_kind": "derived_from_retained_raw_evidence",
+  "status": "release_enablement_validation_pass",
+  "date": "2026-09-01",
+  "branch": "codex/relay-hermes-20260901",
+  "supplements_proof": "proof/2026-09-01-v3",
+  "audited_public_staging_base": "6e2f06d7da73c1430a7100485b279eae565c37a9",
+  "release_enablement_source_commit": "25d35866b84efeeaf8c9858db148ca16553aded4",
+  "closure": {
+    "manifest": "proof-manifest.sha256",
+    "manifest_includes_itself": false,
+    "covered_summary_files": ["README.md", "receipt.json"],
+    "covered_evidence_root": "raw/evidence.sha256"
+  },
+  "authoritative_raw_evidence": {
+    "manifest": "raw/evidence.sha256",
+    "scope": "raw/** and artifacts/** except raw/evidence.sha256 itself",
+    "manifest_sha256": "4d18b03771c8bb31f9ce4f9fee4bcb7a7f3950da122a34c43c8b20253f701dc7",
+    "covers_this_receipt": false
+  },
+  "exact_source": {
+    "scope": "all 23 release-enablement source files outside proof/",
+    "manifest": "raw/source.sha256",
+    "manifest_sha256": "26d892a3105044e1c4f2469d41759a8e3a90a3e3db7fcd9935365a156c4617aa",
+    "archive_sha256": "f16a1275235a496ff8bf945c5868dbf058fd56deb80d437d25dc9644be3a0d22",
+    "setup_log": "raw/03-setup.log"
+  },
+  "locked_openapi": {
+    "source_repository": "https://github.com/RelayMessenger/Relay-Server",
+    "source_commit": "9b4d5bb32cc749c6fd271969948c385300d404d6",
+    "source_commit_date": "2026-08-31T23:04:39-04:00",
+    "source_path": "contracts/developer/openapi.yaml",
+    "local_snapshot": "contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml",
+    "byte_length": 117289,
+    "sha256": "f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5",
+    "workspace_locked_input_byte_identical": true,
+    "contract_harness": "pass"
+  },
+  "change_guards": {
+    "database_schema_changed": false,
+    "public_api_contract_bytes_changed": false,
+    "runtime_source_changed": false,
+    "package_runtime_behavior_source_changed": false,
+    "package_version_changed": false,
+    "private_relay_server_checkout_present": false,
+    "relay_contract_read_token_required": false
+  },
+  "tests": {
+    "updated_contract_workflow_tests": {
+      "python": "3.13.11",
+      "passed": 16,
+      "failed": 0,
+      "log": "raw/04-contract-workflow.log"
+    },
+    "full_suite": {
+      "python": "3.13.11",
+      "passed": 98,
+      "failed": 0,
+      "log": "raw/05-py313.log"
+    }
+  },
+  "workflows": {
+    "normal_ci_validates_local_snapshot": true,
+    "publish_contract_validates_same_local_snapshot": true,
+    "external_actions_immutable_sha_pinned": true,
+    "ci_builds_one_distribution_pair": true,
+    "ci_retains_before_validation": true,
+    "matrix_downloads_same_artifact": true,
+    "publish_rebuilds": false,
+    "provenance_downloads_and_rehashes": true,
+    "publish_downloads_and_rehashes": true,
+    "hosted_github_actions_run": false,
+    "log": "raw/04-contract-workflow.log"
+  },
+  "packages": {
+    "version": "1.0.0rc1",
+    "setuptools_backend": "84.0.0",
+    "build_frontend": "1.3.0",
+    "retained_distribution_pair_build_count": 1,
+    "contract_snapshot_shipped": false,
+    "wheel": {
+      "path": "artifacts/relay_hermes-1.0.0rc1-py3-none-any.whl",
+      "sha256": "d0aaa8aba4f692a1ba363dd35fce08bcba06a4e07c526608c5488722456a6d3e"
+    },
+    "sdist": {
+      "path": "artifacts/relay_hermes-1.0.0rc1.tar.gz",
+      "sha256": "5b378167b155632b964277f9a05eb0162391678875109f20407b47342ced4457"
+    },
+    "clean_wheel_install_python": ["3.11.14", "3.12.12", "3.13.11"],
+    "clean_sdist_install_python": ["3.11.14", "3.12.12", "3.13.11"],
+    "installed_runtime_payload_matches_source": true,
+    "sdist_plugin_doctor_python": ["3.13.11"],
+    "wheel_hermes_load_python": ["3.13.11"],
+    "pip_check": "pass",
+    "build_log": "raw/06-build-once.log",
+    "validation_log": "raw/07-exact-packages.log"
+  },
+  "daytona": {
+    "id": "4443c705-f35c-4172-839e-1520e2c64d52",
+    "name": "relay-hermes-contract-v4-20260901",
+    "snapshot": "daytona-large",
+    "os": "Debian GNU/Linux 13 (trixie)",
+    "architecture": "x86_64",
+    "final_state": "archived",
+    "archive_first_attempt": "conflict_while_stop_in_progress",
+    "archive_retry": "accepted",
+    "log": "raw/17-daytona-final.json"
+  },
+  "hosted_relay_used": false,
+  "production_touched": false,
+  "relay_or_publication_credentials_used": false,
+  "pushed_or_published": false,
+  "independent_postchange_review": "not_run",
+  "summary_decisions": "agent-made_pending_review"
+}

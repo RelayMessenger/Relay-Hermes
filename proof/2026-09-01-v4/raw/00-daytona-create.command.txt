@@ -1,0 +1,1 @@
+daytona create --name relay-hermes-contract-v4-20260901 --target us --snapshot daytona-large --auto-stop 90 --auto-archive 1440 --label purpose=relay-hermes-contract-v4-proof --label repository=Relay-Hermes
