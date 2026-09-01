@@ -30,10 +30,6 @@ optional_env:
     description: "Optional comma-separated Relay Contact ids allowed to talk to the agent"
     prompt: "Allowed Relay Contact ids"
     password: false
-  - name: RELAY_OPERATOR_CONTACTS
-    description: "Explicit comma-separated Relay Contact ids allowed to run privileged Hermes commands"
-    prompt: "Privileged Relay operator Contact ids"
-    password: false
   - name: RELAY_STATE_DIR
     description: "Directory holding this profile's durable SQLite inbox (default: <Hermes profile home>/relay)"
     prompt: "Relay state directory"

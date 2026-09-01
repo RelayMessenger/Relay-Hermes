@@ -22,7 +22,6 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
     RELAY_AGENT_TOKEN          Agent Token, shown once at agent creation
     RELAY_BASE_URL             API origin (default: https://api.relayapp.im)
     RELAY_ALLOWED_CONTACTS     Optional comma-separated Contact ids
-    RELAY_OPERATOR_CONTACTS    Contact ids allowed to run privileged commands
     RELAY_STATE_DIR            Durable inbox directory (default: <profile>/relay)
     RELAY_HOME_CHAT             Chat id for cron delivery
     RELAY_HOME_CHAT_NAME        Human label for the home Chat
@@ -31,9 +30,10 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
 
 Relay authenticates senders server side. When ``RELAY_ALLOWED_CONTACTS`` is set,
 only those Contact ids are passed to Hermes; otherwise every Contact that can
-message the agent is accepted. Chat access never grants operator authority:
-privileged slash commands are denied unless ``RELAY_OPERATOR_CONTACTS`` (or the
-equivalent profile config) explicitly lists the sending Contact.
+message the agent is accepted. Chat access never grants operator authority.
+Relay slash-command messages are not dispatched to Hermes on the pinned core:
+privileged command policy is not profile-aware there, so every Relay profile
+fails closed while ordinary chat continues.
 """
 
 from __future__ import annotations
@@ -121,11 +121,13 @@ DEFAULT_REPLY_TO_MODE = "auto"
 GROUP_CHAT_POLICIES = {"mentions", "all"}
 DEFAULT_GROUP_CHAT_POLICY = "mentions"
 
-# Hermes's pinned slash-access policy enables command gating only when an admin
-# list is non-empty. Relay Contact ids are server-authenticated UUIDs, so this
-# deliberately invalid id turns the gate on while matching no real Contact.
-# It is an internal policy marker, never sent to Relay.
-NO_OPERATOR_CONTACT = "!relay-hermes-no-operator"
+# Pinned Hermes ``gateway.slash_access.policy_for_source`` ignores
+# ``source.profile`` and reads only the process runner's primary config. There
+# is therefore no safe per-profile Relay operator decision. This impossible
+# Relay Contact id keeps Hermes's generic slash gate enabled and denied for
+# every profile as defense in depth; adapter intake also drops every slash
+# message before Hermes dispatch.
+NO_RELAY_SLASH_ADMIN = "!relay-hermes-slash-disabled"
 
 _TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
     contextvars.ContextVar("relay_turn_event", default=None)
@@ -170,7 +172,7 @@ def _coerce_contact_ids(raw: Any) -> set[str]:
 
 
 def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
-    """Resolve ordinary chat access independently from operator authority."""
+    """Resolve ordinary chat access independently from slash authority."""
 
     key = "allowed_contacts"
     scoped = _profile_value("RELAY_ALLOWED_CONTACTS")
@@ -181,41 +183,19 @@ def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
     return set()
 
 
-def _resolve_operator_contacts(
-    extra: Dict[str, Any],
-    *,
-    group: bool = False,
-) -> set[str]:
-    """Resolve the explicit operator decision for one Hermes chat scope."""
-
-    scoped = _profile_value("RELAY_OPERATOR_CONTACTS")
-    if scoped:
-        return _coerce_contact_ids(scoped)
-    if "operator_contacts" in extra:
-        return _coerce_contact_ids(extra.get("operator_contacts"))
-    native_key = "group_allow_admin_from" if group else "allow_admin_from"
-    return {
-        contact_id
-        for contact_id in _coerce_contact_ids(extra.get(native_key))
-        if contact_id != NO_OPERATOR_CONTACT
-    }
-
-
-def _install_access_policy(config: PlatformConfig) -> Tuple[set[str], set[str]]:
-    """Separate Relay chat admission from privileged Hermes command access.
+def _install_access_policy(config: PlatformConfig) -> set[str]:
+    """Preserve ordinary chat while forcing every Relay slash command closed.
 
     Hermes's central chat authorization understands ``allowed_users`` while
-    its slash-command authorization understands ``allow_admin_from``. Keep
-    those keys deliberately distinct: an ordinary allowed Contact may chat,
-    but receives only Hermes's non-admin command floor unless explicitly
-    listed as an operator in this profile.
+    its slash authorization reads only the primary profile config. Mirroring
+    the chat principals keeps normal Contact chat working. Overwriting every
+    admin and user command list with a deny policy prevents either a primary or
+    secondary Relay source from inheriting a cross-profile `/update` grant.
     """
 
     extra = dict(getattr(config, "extra", {}) or {})
     config.extra = extra
     allowed_contacts = _resolve_contact_allowlist(extra)
-    dm_operators = _resolve_operator_contacts(extra)
-    group_operators = _resolve_operator_contacts(extra, group=True)
 
     # The adapter enforces allowed_contacts before dispatch. Mirroring the
     # same decision here lets Hermes's central chat gate accept only messages
@@ -225,11 +205,20 @@ def _install_access_policy(config: PlatformConfig) -> Tuple[set[str], set[str]]:
     extra["allowed_users"] = chat_principals
     extra["allow_from"] = chat_principals
     extra["group_allow_from"] = chat_principals
-    extra["allow_admin_from"] = sorted(dm_operators) or [NO_OPERATOR_CONTACT]
-    extra["group_allow_admin_from"] = (
-        sorted(group_operators) or [NO_OPERATOR_CONTACT]
-    )
-    return allowed_contacts, dm_operators | group_operators
+    # Retire both the former plugin vocabulary and Hermes-native attempted
+    # grants. Pinned Hermes cannot enforce them per source.profile.
+    extra.pop("operator_contacts", None)
+    extra["allow_admin_from"] = [NO_RELAY_SLASH_ADMIN]
+    extra["group_allow_admin_from"] = [NO_RELAY_SLASH_ADMIN]
+    extra["user_allowed_commands"] = []
+    extra["group_user_allowed_commands"] = []
+    return allowed_contacts
+
+
+def _is_slash_message(text: str) -> bool:
+    """Return whether Relay must withhold this message from Hermes dispatch."""
+
+    return bool((text or "").lstrip().startswith("/"))
 
 
 _CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
@@ -331,9 +320,7 @@ class RelayAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
 
-        self._allowed_contacts, self._operator_contacts = _install_access_policy(
-            config
-        )
+        self._allowed_contacts = _install_access_policy(config)
         extra = config.extra
         self._base_url = normalize_base_url(_configured_base_url(extra))
         self._token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
@@ -741,6 +728,16 @@ class RelayAdapter(BasePlatformAdapter):
             return False
 
         text = render_text(inbound.message)
+        if _is_slash_message(text):
+            # Pinned Hermes resolves slash policy from the runner's primary
+            # config and ignores source.profile. Do not let either a primary
+            # or secondary Relay Contact reach that unsafe dispatch seam.
+            logger.info(
+                "[%s] Relay slash commands are disabled; ignoring %s",
+                self.name,
+                inbound.message_id,
+            )
+            return False
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
@@ -1263,12 +1260,6 @@ def _env_enablement() -> Optional[dict]:
         allowed_contacts = _coerce_contact_ids(raw_allowed_contacts)
         seed["allowed_contacts"] = sorted(allowed_contacts)
         seed["allowed_users"] = sorted(allowed_contacts)
-    raw_operator_contacts = _profile_value("RELAY_OPERATOR_CONTACTS")
-    if raw_operator_contacts:
-        operator_contacts = _coerce_contact_ids(raw_operator_contacts)
-        seed["operator_contacts"] = sorted(operator_contacts)
-        seed["allow_admin_from"] = sorted(operator_contacts)
-        seed["group_allow_admin_from"] = sorted(operator_contacts)
     state_dir = _profile_value("RELAY_STATE_DIR")
     if state_dir:
         seed["state_dir"] = state_dir
@@ -1378,6 +1369,8 @@ def register(ctx) -> None:
         # Relay Contact ids are server-authenticated UUIDs; no
         # phone numbers or email addresses cross this adapter.
         pii_safe=True,
-        allow_update_command=True,
+        # Pinned Hermes slash policy is not source.profile-aware. Even if a
+        # MessageEvent bypassed adapter intake, /update must reject relayapp.
+        allow_update_command=False,
         platform_hint=PLATFORM_HINT,
     )

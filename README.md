@@ -97,7 +97,6 @@ generic connector platform.
 | --- | --- | --- |
 | `RELAY_BASE_URL` | `https://api.relayapp.im` | Relay API origin |
 | `RELAY_ALLOWED_CONTACTS` | all reachable Contacts | Comma-separated Contact ids allowed to start turns |
-| `RELAY_OPERATOR_CONTACTS` | none | Contact ids allowed to run privileged Hermes slash commands |
 | `RELAY_STATE_DIR` | `<Hermes profile home>/relay` | Profile-scoped durable SQLite inbox directory |
 | `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy: `off`, `first`, `all`, or `auto` |
 | `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
@@ -108,11 +107,21 @@ generic connector platform.
 loopback development. A configured invalid value fails closed and is never
 replaced with the production default.
 
-Chat permission and operator authority are separate. An allowed Relay Contact
-can chat normally but cannot run privileged slash commands, including
-`/update`, unless that Contact is explicitly listed in the active profile's
-`RELAY_OPERATOR_CONTACTS`. With no operator list, privileged commands default
-deny; Hermes's read-only `/help` and `/whoami` floor remains available.
+### Slash-command limitation
+
+Relay Contact chat is enabled, but Relay slash commands are disabled on the
+pinned Hermes core. Its slash-policy resolver reads the gateway runner's
+primary platform config and ignores `source.profile`, so a primary profile
+operator grant could otherwise authorize a secondary-profile Contact. The
+adapter therefore withholds every Relay message whose first non-whitespace
+character is `/` from Hermes, installs deny-only slash policy as defense in
+depth, and registers `relayapp` as ineligible for `/update`. This is consistent
+for primary and secondary profiles; use a trusted local CLI or authenticated
+dashboard for operator commands.
+
+`RELAY_OPERATOR_CONTACTS` and `operator_contacts` are not supported. Any old
+setting should be removed; it cannot safely grant Relay slash authority until
+the pinned Hermes policy becomes profile-aware.
 
 Non-secret settings can instead be placed under
 `gateway.platforms.relayapp.extra` in `~/.hermes/config.yaml`; environment
@@ -126,17 +135,15 @@ gateway:
       extra:
         allowed_contacts:
           - 01993d50-ef7b-7b37-886b-23fd80c7ec12
-        operator_contacts:
-          - 01993d50-ef7b-7b37-886b-23fd80c7ec99
         group_chat_policy: mentions
         reply_to_mode: auto
 ```
 
-Relay resolves the token, API origin, chat and operator allowlists, state
-directory, and delivery settings through Hermes's active profile secret scope.
-In a multiplexed gateway, a missing value never falls through to another
-profile's process environment. The default state path is under the active
-profile home, so profile inboxes are distinct even when neither profile sets
+Relay resolves the token, API origin, chat allowlist, state directory, and
+delivery settings through Hermes's active profile secret scope. In a
+multiplexed gateway, a missing value never falls through to another profile's
+process environment. The default state path is under the active profile home,
+so profile inboxes are distinct even when neither profile sets
 `RELAY_STATE_DIR`.
 
 ### Isolated staging
