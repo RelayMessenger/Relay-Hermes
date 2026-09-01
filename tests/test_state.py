@@ -215,6 +215,133 @@ def test_state_directory_symlink_is_refused_without_chmodding_target(tmp_path):
     assert list(target.iterdir()) == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX component no-follow")
+def test_symlinked_state_ancestor_is_refused_without_creating_below_it(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    target.chmod(0o755)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RelayStateBindingError, match="no-follow path"):
+        open_inbox(linked_parent / "relay" / "inbox.sqlite3")
+
+    assert linked_parent.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX openat no-follow")
+def test_dangling_database_symlink_is_refused_without_creating_its_target(
+    tmp_path,
+):
+    state_dir = tmp_path / "relay"
+    state_dir.mkdir()
+    victim = tmp_path / "victim.sqlite3"
+    database_link = state_dir / "inbox.sqlite3"
+    database_link.symlink_to(victim)
+
+    with pytest.raises(
+        RelayStateBindingError,
+        match="without following links",
+    ):
+        open_inbox(database_link)
+
+    assert database_link.is_symlink()
+    assert not victim.exists()
+    assert list(state_dir.iterdir()) == [database_link]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX openat no-follow")
+def test_database_symlink_never_mutates_an_existing_target(tmp_path):
+    state_dir = tmp_path / "relay"
+    state_dir.mkdir()
+    victim = tmp_path / "victim.sqlite3"
+    victim.write_bytes(b"not a Relay database")
+    victim.chmod(0o644)
+    expected = (victim.read_bytes(), victim.stat().st_mode & 0o777)
+    database_link = state_dir / "inbox.sqlite3"
+    database_link.symlink_to(victim)
+
+    with pytest.raises(
+        RelayStateBindingError,
+        match="without following links",
+    ):
+        open_inbox(database_link)
+
+    assert database_link.is_symlink()
+    assert (victim.read_bytes(), victim.stat().st_mode & 0o777) == expected
+    assert not (state_dir / STATE_BINDING_FILENAME).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor SQLite path")
+def test_directory_replacement_before_sqlite_connect_cannot_redirect_or_mutate(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir = tmp_path / "relay"
+    path = state_dir / "inbox.sqlite3"
+    displaced = tmp_path / "relay-displaced"
+    real_connect = sqlite3.connect
+    before_connect = {}
+
+    def replace_directory(database, *args, **kwargs):
+        database_path = state_dir / "inbox.sqlite3"
+        before_connect["database"] = database
+        before_connect["bytes"] = database_path.read_bytes()
+        before_connect["mode"] = database_path.stat().st_mode & 0o777
+        state_dir.rename(displaced)
+        state_dir.mkdir()
+        state_dir.chmod(0o777)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", replace_directory)
+
+    with pytest.raises(RelayStateBindingError, match="replaced during use"):
+        open_inbox(path)
+
+    assert str(before_connect["database"]).startswith(
+        ("file:/proc/self/fd/", "file:/dev/fd/")
+    )
+    displaced_database = displaced / "inbox.sqlite3"
+    assert displaced_database.read_bytes() == before_connect["bytes"] == b""
+    assert displaced_database.stat().st_mode & 0o777 == before_connect["mode"]
+    assert list(state_dir.iterdir()) == []
+    assert not path.exists()
+    assert not (state_dir / STATE_BINDING_FILENAME).exists()
+    assert not (displaced / STATE_BINDING_FILENAME).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor SQLite path")
+def test_database_replacement_before_sqlite_connect_cannot_reach_dangling_target(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir = tmp_path / "relay"
+    path = state_dir / "inbox.sqlite3"
+    victim = tmp_path / "victim.sqlite3"
+    real_connect = sqlite3.connect
+    connected_to = []
+
+    def replace_database(database, *args, **kwargs):
+        connected_to.append(database)
+        path.unlink()
+        path.symlink_to(victim)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", replace_database)
+
+    with pytest.raises(RelayStateBindingError):
+        open_inbox(path)
+
+    assert str(connected_to[0]).startswith(
+        ("file:/proc/self/fd/", "file:/dev/fd/")
+    )
+    assert path.is_symlink()
+    assert not victim.exists()
+    assert not (state_dir / STATE_BINDING_FILENAME).exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor identity")
 def test_replacement_during_directory_chmod_is_detected_without_touching_replacement(
     tmp_path,

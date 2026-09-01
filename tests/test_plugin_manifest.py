@@ -76,6 +76,7 @@ def test_manifest_uses_current_relay_vocabulary(manifest):
     optional = {entry["name"] for entry in manifest["optional_env"]}
     assert {
         "RELAY_ALLOWED_CONTACTS",
+        "RELAY_OPERATOR_CONTACTS",
         "RELAY_HOME_CHAT",
         "RELAY_HOME_CHAT_NAME",
         "RELAY_GROUP_CHAT_POLICY",

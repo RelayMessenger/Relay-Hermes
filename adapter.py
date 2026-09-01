@@ -22,7 +22,8 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
     RELAY_AGENT_TOKEN          Agent Token, shown once at agent creation
     RELAY_BASE_URL             API origin (default: https://api.relayapp.im)
     RELAY_ALLOWED_CONTACTS     Optional comma-separated Contact ids
-    RELAY_STATE_DIR            Durable inbox directory (default: ~/.hermes/relay)
+    RELAY_OPERATOR_CONTACTS    Contact ids allowed to run privileged commands
+    RELAY_STATE_DIR            Durable inbox directory (default: <profile>/relay)
     RELAY_HOME_CHAT             Chat id for cron delivery
     RELAY_HOME_CHAT_NAME        Human label for the home Chat
     RELAY_REPLY_TO_MODE        off | first | all | auto (default: auto)
@@ -30,7 +31,9 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
 
 Relay authenticates senders server side. When ``RELAY_ALLOWED_CONTACTS`` is set,
 only those Contact ids are passed to Hermes; otherwise every Contact that can
-message the agent is accepted.
+message the agent is accepted. Chat access never grants operator authority:
+privileged slash commands are denied unless ``RELAY_OPERATOR_CONTACTS`` (or the
+equivalent profile config) explicitly lists the sending Contact.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
+from agent.secret_scope import get_secret
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -82,7 +86,6 @@ from .relay_api import (
     utf16_len,
 )
 from .state import (
-    DEFAULT_STATE_DIR,
     STATE_FILENAME,
     RelayInbox,
     RelayStateBinding,
@@ -118,14 +121,27 @@ DEFAULT_REPLY_TO_MODE = "auto"
 GROUP_CHAT_POLICIES = {"mentions", "all"}
 DEFAULT_GROUP_CHAT_POLICY = "mentions"
 
+# Hermes's pinned slash-access policy enables command gating only when an admin
+# list is non-empty. Relay Contact ids are server-authenticated UUIDs, so this
+# deliberately invalid id turns the gate on while matching no real Contact.
+# It is an internal policy marker, never sent to Relay.
+NO_OPERATOR_CONTACT = "!relay-hermes-no-operator"
+
 _TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
     contextvars.ContextVar("relay_turn_event", default=None)
 )
 
 
+def _profile_value(name: str) -> str:
+    """Read one profile setting through Hermes's fail-closed secret scope."""
+
+    return str(get_secret(name, "") or "").strip()
+
+
 def _resolve(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
-    """Env wins over ``config.yaml`` extras; both stripped."""
-    return os.getenv(env, "").strip() or str(extra.get(key, "") or "").strip() or default
+    """Profile env wins over profile config; multiplexed misses never fall back."""
+
+    return _profile_value(env) or str(extra.get(key, "") or "").strip() or default
 
 
 def _configured_base_url(extra: Dict[str, Any]) -> str:
@@ -137,23 +153,83 @@ def _configured_base_url(extra: Dict[str, Any]) -> str:
     )
 
 
+def _coerce_contact_ids(raw: Any) -> set[str]:
+    """Normalize a Contact-id sequence or comma-separated scalar."""
+
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        return {
+            str(contact_id).strip()
+            for contact_id in raw
+            if str(contact_id).strip()
+        }
+    return {
+        contact_id.strip()
+        for contact_id in str(raw or "").split(",")
+        if contact_id.strip()
+    }
+
+
 def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
-    """Resolve Contact ids from YAML list/string or the environment."""
+    """Resolve ordinary chat access independently from operator authority."""
 
     key = "allowed_contacts"
-    env = "RELAY_ALLOWED_CONTACTS"
+    scoped = _profile_value("RELAY_ALLOWED_CONTACTS")
+    if scoped:
+        return _coerce_contact_ids(scoped)
     if key in extra:
-        configured = extra.get(key)
-        if isinstance(configured, (list, tuple, set)):
-            return {
-                str(contact_id).strip()
-                for contact_id in configured
-                if str(contact_id).strip()
-            }
-        raw = str(configured or "")
-    else:
-        raw = os.getenv(env, "")
-    return {contact_id.strip() for contact_id in raw.split(",") if contact_id.strip()}
+        return _coerce_contact_ids(extra.get(key))
+    return set()
+
+
+def _resolve_operator_contacts(
+    extra: Dict[str, Any],
+    *,
+    group: bool = False,
+) -> set[str]:
+    """Resolve the explicit operator decision for one Hermes chat scope."""
+
+    scoped = _profile_value("RELAY_OPERATOR_CONTACTS")
+    if scoped:
+        return _coerce_contact_ids(scoped)
+    if "operator_contacts" in extra:
+        return _coerce_contact_ids(extra.get("operator_contacts"))
+    native_key = "group_allow_admin_from" if group else "allow_admin_from"
+    return {
+        contact_id
+        for contact_id in _coerce_contact_ids(extra.get(native_key))
+        if contact_id != NO_OPERATOR_CONTACT
+    }
+
+
+def _install_access_policy(config: PlatformConfig) -> Tuple[set[str], set[str]]:
+    """Separate Relay chat admission from privileged Hermes command access.
+
+    Hermes's central chat authorization understands ``allowed_users`` while
+    its slash-command authorization understands ``allow_admin_from``. Keep
+    those keys deliberately distinct: an ordinary allowed Contact may chat,
+    but receives only Hermes's non-admin command floor unless explicitly
+    listed as an operator in this profile.
+    """
+
+    extra = dict(getattr(config, "extra", {}) or {})
+    config.extra = extra
+    allowed_contacts = _resolve_contact_allowlist(extra)
+    dm_operators = _resolve_operator_contacts(extra)
+    group_operators = _resolve_operator_contacts(extra, group=True)
+
+    # The adapter enforces allowed_contacts before dispatch. Mirroring the
+    # same decision here lets Hermes's central chat gate accept only messages
+    # that this profile's adapter admitted. "*" preserves Relay's documented
+    # default that every reachable Contact may chat.
+    chat_principals = sorted(allowed_contacts) or ["*"]
+    extra["allowed_users"] = chat_principals
+    extra["allow_from"] = chat_principals
+    extra["group_allow_from"] = chat_principals
+    extra["allow_admin_from"] = sorted(dm_operators) or [NO_OPERATOR_CONTACT]
+    extra["group_allow_admin_from"] = (
+        sorted(group_operators) or [NO_OPERATOR_CONTACT]
+    )
+    return allowed_contacts, dm_operators | group_operators
 
 
 _CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
@@ -255,13 +331,27 @@ class RelayAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
 
-        extra = config.extra or {}
+        self._allowed_contacts, self._operator_contacts = _install_access_policy(
+            config
+        )
+        extra = config.extra
         self._base_url = normalize_base_url(_configured_base_url(extra))
         self._token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
 
-        state_dir = Path(
-            _resolve(extra, "state_dir", "RELAY_STATE_DIR", DEFAULT_STATE_DIR)
-        ).expanduser()
+        configured_state_dir = _resolve(
+            extra,
+            "state_dir",
+            "RELAY_STATE_DIR",
+        )
+        if configured_state_dir:
+            state_dir = Path(configured_state_dir).expanduser()
+        else:
+            # Hermes installs a context-local home override around every
+            # multiplexed profile adapter. Resolve the default at construction
+            # time so profile B can never inherit profile A's ~/.hermes/relay.
+            from hermes_cli.config import get_hermes_home
+
+            state_dir = Path(get_hermes_home()) / "relay"
         binding = (
             RelayStateBinding.for_account(self._base_url, self._token)
             if self._token
@@ -300,8 +390,6 @@ class RelayAdapter(BasePlatformAdapter):
             )
             policy = ""
         self._group_chat_policy = policy or DEFAULT_GROUP_CHAT_POLICY
-
-        self._allowed_contacts = _resolve_contact_allowlist(extra)
 
         self._client: Optional[RelayClient] = None
         self._receive_task: Optional[asyncio.Task] = None
@@ -1132,7 +1220,7 @@ def check_requirements() -> bool:
     if (
         not HTTPX_AVAILABLE
         or not WEBSOCKETS_AVAILABLE
-        or not os.getenv("RELAY_AGENT_TOKEN", "").strip()
+        or not _profile_value("RELAY_AGENT_TOKEN")
     ):
         return False
     try:
@@ -1157,34 +1245,38 @@ def is_connected(config) -> bool:
     return validate_config(config)
 
 
-_OPERATOR_ALLOWED_CONTACTS = os.getenv("RELAY_ALLOWED_CONTACTS", "").strip()
-
-
 def _env_enablement() -> Optional[dict]:
-    """Seed ``PlatformConfig.extra`` from env vars during gateway config load."""
-    token = os.getenv("RELAY_AGENT_TOKEN", "").strip()
+    """Seed profile-scoped config without mutating process-global auth state."""
+
+    token = _profile_value("RELAY_AGENT_TOKEN")
     if not token:
         return None
-    # Let this adapter apply the optional Relay Contact-id allowlist. Hermes's
-    # generic authorization seam calls this concept allowed_users, so explicitly
-    # bypass that layer after preserving the operator's Contact ids here.
-    seed: dict = {
-        "token": token,
+    seed: dict = {"token": token}
+    base_url = _profile_value("RELAY_BASE_URL")
+    if base_url:
         # Preserve configured input. RelayAdapter normalizes a valid origin and
         # rejects an invalid one; mutating "/" to empty here would fall back to
         # the production default.
-        "base_url": os.getenv("RELAY_BASE_URL", DEFAULT_BASE_URL).strip(),
-        "allowed_contacts": _OPERATOR_ALLOWED_CONTACTS,
-    }
-    os.environ["RELAY_ALLOW_ALL_CONTACTS"] = "true"
-    state_dir = os.getenv("RELAY_STATE_DIR", "").strip()
+        seed["base_url"] = base_url
+    raw_allowed_contacts = _profile_value("RELAY_ALLOWED_CONTACTS")
+    if raw_allowed_contacts:
+        allowed_contacts = _coerce_contact_ids(raw_allowed_contacts)
+        seed["allowed_contacts"] = sorted(allowed_contacts)
+        seed["allowed_users"] = sorted(allowed_contacts)
+    raw_operator_contacts = _profile_value("RELAY_OPERATOR_CONTACTS")
+    if raw_operator_contacts:
+        operator_contacts = _coerce_contact_ids(raw_operator_contacts)
+        seed["operator_contacts"] = sorted(operator_contacts)
+        seed["allow_admin_from"] = sorted(operator_contacts)
+        seed["group_allow_admin_from"] = sorted(operator_contacts)
+    state_dir = _profile_value("RELAY_STATE_DIR")
     if state_dir:
         seed["state_dir"] = state_dir
-    home = os.getenv("RELAY_HOME_CHAT", "").strip()
+    home = _profile_value("RELAY_HOME_CHAT")
     if home:
         seed["home_channel"] = {
             "chat_id": home,
-            "name": os.getenv("RELAY_HOME_CHAT_NAME", home),
+            "name": _profile_value("RELAY_HOME_CHAT_NAME") or home,
         }
     return seed
 
@@ -1281,7 +1373,6 @@ def register(ctx) -> None:
         cron_deliver_env_var="RELAY_HOME_CHAT",
         standalone_sender_fn=_standalone_send,
         allowed_users_env="RELAY_ALLOWED_CONTACTS",
-        allow_all_env="RELAY_ALLOW_ALL_CONTACTS",
         max_message_length=MAX_MESSAGE_LENGTH,
         emoji="\N{EIGHT SPOKED ASTERISK}",
         # Relay Contact ids are server-authenticated UUIDs; no

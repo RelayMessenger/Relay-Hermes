@@ -34,9 +34,13 @@ The state directory and SQLite database are bound to one Relay account using
 the normalized API origin and a one-way Agent Token fingerprint. The token is
 never written to state. Changing the token or API origin while reusing a state
 directory fails before startup requeues work or reads a FULL-sync snapshot.
-On POSIX systems the directory is forced to mode `0700`, including when it
-already exists; symlinks and directory replacement during use are refused.
-Use a separate `RELAY_STATE_DIR` for every staging or production Agent.
+On supported Linux systems every directory component and the database are
+opened through pinned descriptors with no-follow checks before SQLite receives
+an already-open file descriptor path. SQLite never connects to the mutable
+configured pathname and cannot create through a dangling database symlink or a
+replaced directory. The directory is forced to mode `0700`, including when it
+already exists. Use a separate `RELAY_STATE_DIR` for every staging or
+production Agent.
 Pre-binding databases are not adopted automatically; move one aside only after
 accounting for its pending work.
 
@@ -93,7 +97,8 @@ generic connector platform.
 | --- | --- | --- |
 | `RELAY_BASE_URL` | `https://api.relayapp.im` | Relay API origin |
 | `RELAY_ALLOWED_CONTACTS` | all reachable Contacts | Comma-separated Contact ids allowed to start turns |
-| `RELAY_STATE_DIR` | `~/.hermes/relay` | Durable SQLite inbox directory |
+| `RELAY_OPERATOR_CONTACTS` | none | Contact ids allowed to run privileged Hermes slash commands |
+| `RELAY_STATE_DIR` | `<Hermes profile home>/relay` | Profile-scoped durable SQLite inbox directory |
 | `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy: `off`, `first`, `all`, or `auto` |
 | `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
 | `RELAY_HOME_CHAT` | unset | Chat id for cron and direct `hermes send` delivery |
@@ -102,6 +107,12 @@ generic connector platform.
 `RELAY_BASE_URL` must be an HTTPS origin, except that HTTP is accepted for
 loopback development. A configured invalid value fails closed and is never
 replaced with the production default.
+
+Chat permission and operator authority are separate. An allowed Relay Contact
+can chat normally but cannot run privileged slash commands, including
+`/update`, unless that Contact is explicitly listed in the active profile's
+`RELAY_OPERATOR_CONTACTS`. With no operator list, privileged commands default
+deny; Hermes's read-only `/help` and `/whoami` floor remains available.
 
 Non-secret settings can instead be placed under
 `gateway.platforms.relayapp.extra` in `~/.hermes/config.yaml`; environment
@@ -115,9 +126,18 @@ gateway:
       extra:
         allowed_contacts:
           - 01993d50-ef7b-7b37-886b-23fd80c7ec12
+        operator_contacts:
+          - 01993d50-ef7b-7b37-886b-23fd80c7ec99
         group_chat_policy: mentions
         reply_to_mode: auto
 ```
+
+Relay resolves the token, API origin, chat and operator allowlists, state
+directory, and delivery settings through Hermes's active profile secret scope.
+In a multiplexed gateway, a missing value never falls through to another
+profile's process environment. The default state path is under the active
+profile home, so profile inboxes are distinct even when neither profile sets
+`RELAY_STATE_DIR`.
 
 ### Isolated staging
 

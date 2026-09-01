@@ -434,19 +434,105 @@ def test_register_loads_as_a_hermes_platform_plugin(plugin):
     assert len(calls) == 1
     assert calls[0]["name"] == "relayapp"
     assert calls[0]["required_env"] == ["RELAY_AGENT_TOKEN"]
+    assert calls[0]["allowed_users_env"] == "RELAY_ALLOWED_CONTACTS"
+    assert "allow_all_env" not in calls[0]
+    assert calls[0]["allow_update_command"] is True
 
 
-def test_env_enablement_preserves_the_operator_contact_allowlist(
+def test_env_enablement_keeps_chat_and_operator_allowlists_separate(
     plugin,
     monkeypatch,
 ):
     monkeypatch.setenv("RELAY_AGENT_TOKEN", "relay-test-token")
-    monkeypatch.setattr(plugin, "_OPERATOR_ALLOWED_CONTACTS", "contact-one,contact-two")
+    monkeypatch.setenv("RELAY_ALLOWED_CONTACTS", "contact-one,contact-two")
+    monkeypatch.setenv("RELAY_OPERATOR_CONTACTS", "contact-two")
+    monkeypatch.delenv("RELAY_ALLOW_ALL_CONTACTS", raising=False)
     first = plugin._env_enablement()
     second = plugin._env_enablement()
-    assert first["allowed_contacts"] == "contact-one,contact-two"
-    assert second["allowed_contacts"] == "contact-one,contact-two"
-    assert os.environ["RELAY_ALLOW_ALL_CONTACTS"] == "true"
+    assert first["allowed_contacts"] == ["contact-one", "contact-two"]
+    assert first["allowed_users"] == ["contact-one", "contact-two"]
+    assert first["operator_contacts"] == ["contact-two"]
+    assert first["allow_admin_from"] == ["contact-two"]
+    assert first["group_allow_admin_from"] == ["contact-two"]
+    assert second == first
+    assert "RELAY_ALLOW_ALL_CONTACTS" not in os.environ
+
+
+def test_ordinary_contacts_can_chat_but_are_not_gateway_operators(
+    plugin,
+    tmp_path,
+    monkeypatch,
+):
+    import logging
+    import types
+
+    from gateway.authz_mixin import GatewayAuthorizationMixin
+    from gateway.config import GatewayConfig, PlatformConfig
+    from gateway.slash_access import policy_from_extra
+
+    config = PlatformConfig(extra={
+        "token": "relay-test-token",
+        "state_dir": str(tmp_path),
+        "allowed_contacts": ["ordinary-contact", "operator-contact"],
+        "operator_contacts": ["operator-contact"],
+    })
+    adapter = plugin.RelayAdapter(config)
+
+    assert adapter._allow_contact("ordinary-contact") is True
+    assert adapter._allow_contact("operator-contact") is True
+    assert config.extra["allowed_users"] == [
+        "operator-contact",
+        "ordinary-contact",
+    ]
+
+    runner = GatewayAuthorizationMixin()
+    runner.config = GatewayConfig(platforms={adapter.platform: config})
+    runner.adapters = {adapter.platform: adapter}
+    runner._profile_adapters = {}
+    runner.pairing_store = None
+    gateway_run = types.ModuleType("gateway.run")
+    gateway_run.logger = logging.getLogger("gateway.run")
+    monkeypatch.setitem(sys.modules, "gateway.run", gateway_run)
+    source = adapter.build_source(
+        chat_id="chat-id",
+        chat_name="Relay Chat",
+        chat_type="dm",
+        user_id="ordinary-contact",
+        user_name="Ordinary",
+    )
+    assert runner._is_user_authorized(source) is True
+    source.user_id = "not-on-the-chat-allowlist"
+    assert runner._is_user_authorized(source) is False
+
+    dm_policy = policy_from_extra(config.extra, "dm")
+    group_policy = policy_from_extra(config.extra, "group")
+    assert dm_policy.enabled is True
+    assert dm_policy.can_run("ordinary-contact", "update") is False
+    assert group_policy.can_run("ordinary-contact", "update") is False
+    assert dm_policy.can_run("operator-contact", "update") is True
+    assert group_policy.can_run("operator-contact", "update") is True
+
+
+def test_privileged_commands_default_deny_without_an_operator_decision(
+    plugin,
+    tmp_path,
+):
+    from gateway.config import PlatformConfig
+    from gateway.slash_access import policy_from_extra
+
+    config = PlatformConfig(extra={
+        "token": "relay-test-token",
+        "state_dir": str(tmp_path),
+    })
+    adapter = plugin.RelayAdapter(config)
+    assert adapter._allow_contact("ordinary-contact") is True
+
+    for scope in ("dm", "group"):
+        policy = policy_from_extra(config.extra, scope)
+        assert policy.enabled is True
+        assert policy.can_run("ordinary-contact", "help") is True
+        assert policy.can_run("ordinary-contact", "update") is False
+        assert policy.can_run("ordinary-contact", "approvals") is False
 
 
 def test_invalid_configured_base_url_fails_closed_without_production_fallback(
@@ -497,3 +583,114 @@ def test_yaml_contact_allowlist_accepts_current_list_vocabulary(plugin, tmp_path
         "allowed_contacts": ["contact-one", "contact-two"],
     }))
     assert adapter._allowed_contacts == {"contact-one", "contact-two"}
+
+
+def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
+    plugin,
+    tmp_path,
+    monkeypatch,
+):
+    from agent.secret_scope import (
+        is_multiplex_active,
+        reset_secret_scope,
+        set_multiplex_active,
+        set_secret_scope,
+    )
+    from gateway.config import PlatformConfig
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    process_state = tmp_path / "process-state"
+    monkeypatch.setenv("RELAY_AGENT_TOKEN", "process-token-must-not-leak")
+    monkeypatch.setenv("RELAY_BASE_URL", "https://process.invalid")
+    monkeypatch.setenv("RELAY_ALLOWED_CONTACTS", "process-contact")
+    monkeypatch.setenv("RELAY_OPERATOR_CONTACTS", "process-operator")
+    monkeypatch.setenv("RELAY_STATE_DIR", str(process_state))
+
+    previous_multiplex = is_multiplex_active()
+    set_multiplex_active(True)
+
+    def build(home: Path, secrets: dict[str, str]):
+        home.mkdir()
+        home_token = set_hermes_home_override(str(home))
+        secret_token = set_secret_scope(secrets)
+        try:
+            seed = plugin._env_enablement()
+            if seed is None:
+                return None, None
+            config = PlatformConfig(extra=seed)
+            return plugin.RelayAdapter(config), config
+        finally:
+            reset_secret_scope(secret_token)
+            reset_hermes_home_override(home_token)
+
+    try:
+        profile_a_state = tmp_path / "profile-a-state"
+        profile_a, config_a = build(
+            tmp_path / "profile-a",
+            {
+                "RELAY_AGENT_TOKEN": "profile-a-token",
+                "RELAY_BASE_URL": "https://a.example.test",
+                "RELAY_ALLOWED_CONTACTS": "a-contact,a-operator",
+                "RELAY_OPERATOR_CONTACTS": "a-operator",
+                "RELAY_STATE_DIR": str(profile_a_state),
+            },
+        )
+        profile_b, config_b = build(
+            tmp_path / "profile-b",
+            {
+                "RELAY_AGENT_TOKEN": "profile-b-token",
+            },
+        )
+        missing, missing_config = build(
+            tmp_path / "profile-missing",
+            {},
+        )
+    finally:
+        set_multiplex_active(previous_multiplex)
+
+    assert profile_a is not None and config_a is not None
+    assert profile_b is not None and config_b is not None
+    assert missing is None and missing_config is None
+
+    assert profile_a._token == "profile-a-token"
+    assert profile_a._base_url == "https://a.example.test"
+    assert profile_a._allowed_contacts == {"a-contact", "a-operator"}
+    assert profile_a._operator_contacts == {"a-operator"}
+    assert profile_a._inbox.path.parent == profile_a_state
+
+    assert profile_b._token == "profile-b-token"
+    assert profile_b._base_url == plugin.DEFAULT_BASE_URL
+    assert profile_b._allowed_contacts == set()
+    assert profile_b._operator_contacts == set()
+    assert profile_b._inbox.path.parent == tmp_path / "profile-b" / "relay"
+    assert config_b.extra["allowed_users"] == ["*"]
+    assert config_b.extra["allow_admin_from"] == [
+        plugin.NO_OPERATOR_CONTACT
+    ]
+
+    assert profile_a._inbox.path != profile_b._inbox.path
+    assert profile_a._inbox.path.parent != process_state
+    assert profile_b._inbox.path.parent != process_state
+    assert os.environ["RELAY_AGENT_TOKEN"] == "process-token-must-not-leak"
+
+    profile_a._inbox.open()
+    profile_b._inbox.open()
+    try:
+        assert profile_a._inbox.accept(
+            "1",
+            {"event_id": "profile-a-event", "data": {}},
+        ) is True
+        assert profile_b._inbox.accept(
+            "1",
+            {"event_id": "profile-b-event", "data": {}},
+        ) is True
+        assert profile_a._inbox.status("profile-a-event") == "pending"
+        assert profile_a._inbox.status("profile-b-event") is None
+        assert profile_b._inbox.status("profile-b-event") == "pending"
+        assert profile_b._inbox.status("profile-a-event") is None
+    finally:
+        profile_a._inbox.close()
+        profile_b._inbox.close()
