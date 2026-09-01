@@ -1,0 +1,134 @@
+build_backend=setuptools==84.0.0 build_frontend=build==1.3.0
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools==84.0.0
+* Getting build dependencies for sdist...
+running egg_info
+creating relay_hermes.egg-info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+* Building sdist...
+running sdist
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+running check
+creating relay_hermes-1.0.0rc1
+creating relay_hermes-1.0.0rc1/relay_hermes.egg-info
+creating relay_hermes-1.0.0rc1/scripts
+creating relay_hermes-1.0.0rc1/tests
+copying files to relay_hermes-1.0.0rc1...
+copying LICENSE -> relay_hermes-1.0.0rc1
+copying MANIFEST.in -> relay_hermes-1.0.0rc1
+copying README.md -> relay_hermes-1.0.0rc1
+copying __init__.py -> relay_hermes-1.0.0rc1
+copying adapter.py -> relay_hermes-1.0.0rc1
+copying plugin.yaml -> relay_hermes-1.0.0rc1
+copying pyproject.toml -> relay_hermes-1.0.0rc1
+copying relay_api.py -> relay_hermes-1.0.0rc1
+copying state.py -> relay_hermes-1.0.0rc1
+copying relay_hermes.egg-info/PKG-INFO -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/SOURCES.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/dependency_links.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/entry_points.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/requires.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying relay_hermes.egg-info/top_level.txt -> relay_hermes-1.0.0rc1/relay_hermes.egg-info
+copying scripts/check-openapi.py -> relay_hermes-1.0.0rc1/scripts
+copying scripts/run-staging.sh -> relay_hermes-1.0.0rc1/scripts
+copying tests/conftest.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_adapter.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_hermes_runtime.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_plugin_manifest.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_relay_api.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_staging_wrapper.py -> relay_hermes-1.0.0rc1/tests
+copying tests/test_state.py -> relay_hermes-1.0.0rc1/tests
+Writing relay_hermes-1.0.0rc1/setup.cfg
+Creating tar archive
+removing 'relay_hermes-1.0.0rc1' (and everything under it)
+* Building wheel from sdist
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools==84.0.0
+* Getting build dependencies for wheel...
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+* Building wheel...
+running bdist_wheel
+running build
+running build_py
+creating build/lib/relay_hermes
+copying ./__init__.py -> build/lib/relay_hermes
+copying ./adapter.py -> build/lib/relay_hermes
+copying ./relay_api.py -> build/lib/relay_hermes
+copying ./state.py -> build/lib/relay_hermes
+running egg_info
+writing relay_hermes.egg-info/PKG-INFO
+writing dependency_links to relay_hermes.egg-info/dependency_links.txt
+writing entry points to relay_hermes.egg-info/entry_points.txt
+writing requirements to relay_hermes.egg-info/requires.txt
+writing top-level names to relay_hermes.egg-info/top_level.txt
+reading manifest file 'relay_hermes.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'relay_hermes.egg-info/SOURCES.txt'
+copying ./plugin.yaml -> build/lib/relay_hermes
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64/wheel
+creating build/bdist.linux-x86_64/wheel/relay_hermes
+copying build/lib/relay_hermes/__init__.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/adapter.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/relay_api.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/state.py -> build/bdist.linux-x86_64/wheel/./relay_hermes
+copying build/lib/relay_hermes/plugin.yaml -> build/bdist.linux-x86_64/wheel/./relay_hermes
+running install_egg_info
+Copying relay_hermes.egg-info to build/bdist.linux-x86_64/wheel/./relay_hermes-1.0.0rc1-py3.13.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/relay_hermes-1.0.0rc1.dist-info/WHEEL
+creating '/home/daytona/relay-hermes/release/dist/.tmp-xcsdqkyg/relay_hermes-1.0.0rc1-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'relay_hermes/__init__.py'
+adding 'relay_hermes/adapter.py'
+adding 'relay_hermes/plugin.yaml'
+adding 'relay_hermes/relay_api.py'
+adding 'relay_hermes/state.py'
+adding 'relay_hermes-1.0.0rc1.dist-info/licenses/LICENSE'
+adding 'relay_hermes-1.0.0rc1.dist-info/METADATA'
+adding 'relay_hermes-1.0.0rc1.dist-info/WHEEL'
+adding 'relay_hermes-1.0.0rc1.dist-info/entry_points.txt'
+adding 'relay_hermes-1.0.0rc1.dist-info/top_level.txt'
+adding 'relay_hermes-1.0.0rc1.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
+Successfully built relay_hermes-1.0.0rc1.tar.gz and relay_hermes-1.0.0rc1-py3-none-any.whl
+relay_hermes-1.0.0rc1/plugin.yaml
+relay_hermes-1.0.0rc1/scripts/check-openapi.py
+relay_hermes-1.0.0rc1/scripts/run-staging.sh
+relay_hermes-1.0.0rc1/tests/test_adapter.py
+relay_hermes-1.0.0rc1/tests/test_state.py
+dist/relay_hermes-1.0.0rc1-py3-none-any.whl: OK
+dist/relay_hermes-1.0.0rc1.tar.gz: OK
+013da952474f36579a247575cfe57571fff53d23d6fd67490c3805a34f1fb08b  dist/relay_hermes-1.0.0rc1-py3-none-any.whl
+ee73111b5dbdf1ac93101a3debb7ac584b6bec6418e916e2f91dfa0ef81aa9d6  dist/relay_hermes-1.0.0rc1.tar.gz

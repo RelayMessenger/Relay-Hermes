@@ -1,0 +1,1 @@
+daytona info relay-hermes-slash-v3-20260901 --format json

@@ -1,0 +1,1 @@
+daytona create --name relay-hermes-slash-v3-20260901 --target us --snapshot daytona-large --auto-stop 120 --auto-archive 1440 --label purpose=relay-hermes-slash-v3-proof --label repository=Relay-Hermes
