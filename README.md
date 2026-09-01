@@ -23,8 +23,7 @@ Transport acknowledgement and Read are separate. A WebSocket ACK never marks
 a Chat Read.
 
 Relay-Hermes does not poll for events and does not expose a public HTTP server.
-It also does not add reactions, edits, typing indicators, or other Message
-effects.
+It also does not add reactions, edits, or typing indicators.
 
 ### Recovery
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relay-hermes"
-version = "1.0.0"
+version = "1.0.0rc1"
 description = "Connect Hermes Agent to Relay as an always-on agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
