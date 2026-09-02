@@ -139,7 +139,7 @@ jobs:
     timeout-minutes: 10
     environment: pypi-rc
     permissions:
-      id-token: write
+      contents: read
     steps:
       - name: Download the validated and attested distributions
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -155,12 +155,16 @@ jobs:
           )
           test "$(find release/dist -maxdepth 1 -type f | wc -l)" -eq 2
 
-      - name: Publish through PyPI trusted publishing
+      - name: Publish with the project-scoped PyPI API token
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: release/dist
           repository-url: https://upload.pypi.org/legacy/
-          attestations: true
+          # PEP 740 attestations only work through Trusted Publishing, so an
+          # API token turns them off. Build provenance is still attested by
+          # the provenance job above.
+          attestations: false
           skip-existing: false
           verbose: false
           print-hash: true

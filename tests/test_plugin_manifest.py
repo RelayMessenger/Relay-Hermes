@@ -187,7 +187,14 @@ def test_rc_publish_is_manual_exact_sha_staging_only():
     assert 'test "$EXPECTED_SHA" = "$EVENT_SHA"' in text
     assert "id-token: write" in text
     assert "attest-build-provenance@" in text
-    assert "password:" not in text
+    # PyPI has no trusted publisher for this repository, so the RC uploads
+    # with a project-scoped API token. The token must reach the job as a
+    # secret reference and never as a literal in the tracked workflow.
+    assert "password: ${{ secrets.PYPI_API_TOKEN }}" in text
+    assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", text)
+    # PEP 740 attestations only work through Trusted Publishing. With a
+    # token the upload step ignores the input, so it stays off on purpose.
+    assert "attestations: false" in text
     assert jobs["validate"]["needs"] == "preflight"
     assert jobs["validate"]["uses"] == "./.github/workflows/ci.yml"
     assert jobs["contract"]["needs"] == "validate"
