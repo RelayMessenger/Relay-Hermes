@@ -27,7 +27,7 @@ jobs:
     if: >-
       github.repository == 'RelayMessenger/Relay-Hermes' &&
       github.ref == 'refs/heads/staging'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     env:
       EXPECTED_SHA: ${{ inputs.commit_sha }}
@@ -64,7 +64,7 @@ jobs:
       github.repository == 'RelayMessenger/Relay-Hermes' &&
       github.ref == 'refs/heads/staging' &&
       needs.validate.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: release-candidate
     permissions:
@@ -99,7 +99,7 @@ jobs:
       github.repository == 'RelayMessenger/Relay-Hermes' &&
       github.ref == 'refs/heads/staging' &&
       needs.contract.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: release-candidate
     permissions:
@@ -135,7 +135,7 @@ jobs:
       github.repository == 'RelayMessenger/Relay-Hermes' &&
       github.ref == 'refs/heads/staging' &&
       needs.provenance.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: pypi-rc
     permissions:
