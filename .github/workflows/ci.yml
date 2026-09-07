@@ -30,7 +30,7 @@ env:
 jobs:
   build:
     name: Build exact distributions once
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - name: Check out the exact plugin source
@@ -102,7 +102,7 @@ jobs:
   test:
     name: Validate exact distributions on Python ${{ matrix.python-version }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
       MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
