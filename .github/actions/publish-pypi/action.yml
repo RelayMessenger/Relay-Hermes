@@ -1,0 +1,80 @@
+name: Publish to PyPI
+description: >-
+  The one publish step both release lanes share. It is a composite action and
+  not a reusable workflow on purpose: PyPI matches a trusted publisher on the
+  workflow file that runs the job, and its documentation says reusable
+  workflows "cannot currently be used as the workflow in a Trusted Publisher"
+  (docs.pypi.org/trusted-publishers/troubleshooting, warehouse#11096). A
+  composite action runs inside the calling job, so the OIDC token names
+  publish-staging.yml or release.yml, which is what the owner registers.
+
+  The switch is the repository variable PYPI_TRUSTED_PUBLISHING, passed in by
+  the caller. Unset: today's path, the project-scoped PYPI_API_TOKEN, and
+  attestations off because PEP 740 attestations only work through Trusted
+  Publishing (the action's own upload script forces them off with a password).
+  Set to "true": no password, the job's OIDC token, attestations on. Flipping
+  it changes no file in this repository.
+
+inputs:
+  packages-dir:
+    description: Directory holding exactly the wheel and sdist to upload
+    required: true
+  trusted-publishing:
+    description: The repository variable PYPI_TRUSTED_PUBLISHING; "true" or unset
+    required: false
+    default: ""
+  token:
+    description: The PYPI_API_TOKEN secret; used only while trusted-publishing is unset
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse an unreadable publishing switch or a missing token
+      shell: bash
+      env:
+        SWITCH: ${{ inputs.trusted-publishing }}
+        TOKEN_PRESENT: ${{ inputs.token != '' }}
+      run: |
+        case "$SWITCH" in
+          ("")
+            if [ "$TOKEN_PRESENT" != "true" ]; then
+              echo "PYPI_TRUSTED_PUBLISHING is unset and no PYPI_API_TOKEN reached the job." >&2
+              echo "Add the secret at Settings -> Secrets and variables -> Actions," >&2
+              echo "or register the trusted publisher and set PYPI_TRUSTED_PUBLISHING=true." >&2
+              exit 1
+            fi
+            echo "publishing with the project-scoped API token, attestations off"
+            ;;
+          (true)
+            echo "publishing through PyPI Trusted Publishing, attestations on"
+            ;;
+          (*)
+            echo "PYPI_TRUSTED_PUBLISHING must be unset or exactly 'true', not '$SWITCH'" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Publish with the project-scoped PyPI API token
+      if: inputs.trusted-publishing == ''
+      uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+      with:
+        password: ${{ inputs.token }}
+        packages-dir: ${{ inputs.packages-dir }}
+        repository-url: https://upload.pypi.org/legacy/
+        attestations: false
+        skip-existing: false
+        verbose: false
+        print-hash: true
+
+    - name: Publish through PyPI Trusted Publishing
+      if: inputs.trusted-publishing == 'true'
+      uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+      with:
+        packages-dir: ${{ inputs.packages-dir }}
+        repository-url: https://upload.pypi.org/legacy/
+        attestations: true
+        skip-existing: false
+        verbose: false
+        print-hash: true

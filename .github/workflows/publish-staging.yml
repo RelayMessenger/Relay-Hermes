@@ -1,0 +1,208 @@
+name: Publish staging to PyPI
+
+# The staging release, automatic end to end, the way Relay-SDK publishes its
+# npm packages (publish-package-staging.yml there). On every push to staging:
+#
+#   bump      scripts/release_version.py decides which X.Y.Z[rcK].devN comes
+#             next from what PyPI holds and whether the packed content
+#             changed; rewrites pyproject.toml and plugin.yaml; commits the
+#             result to staging as github-actions[bot]. A push made with
+#             GITHUB_TOKEN starts no new workflow run (GitHub: "events
+#             triggered by the GITHUB_TOKEN will not create a new workflow
+#             run"), which is why the rest of this run validates and
+#             publishes that commit instead of a second run.
+#   validate  ci.yml at the bump commit: the exact-SHA guards, the contract
+#             snapshot check, the build, the Hermes matrix, and the retained
+#             distributions.
+#   publish   the retained distributions, rehashed, through the one shared
+#             publish step (.github/actions/publish-pypi), then a read-back
+#             from PyPI. The `pypi-staging` environment holds the token and
+#             any approval rule the owner sets on it.
+#
+# A newer push to staging cancels a run in flight; the newer run re-derives
+# everything from the tip. A bump commit that published nothing is harmless:
+# the next run finds an unpublished dev version and publishes it as named.
+#
+# `pip install relay-hermes` never selects a .dev release; `pip install --pre`
+# does. The main release (release.yml) then strips `.devN` and publishes the
+# target.
+
+on:
+  push:
+    branches:
+      - staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-hermes-staging-release
+  cancel-in-progress: true
+
+jobs:
+  bump:
+    name: Version the staging package
+    if: >-
+      github.repository == 'RelayMessenger/Relay-Hermes' &&
+      github.ref == 'refs/heads/staging'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Check out staging
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: staging
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify this run starts from staging's tip
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin staging
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/staging)"
+          git merge-base --is-ancestor "$EVENT_SHA" HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the pinned build tools
+        run: |
+          python -m pip install --disable-pip-version-check \
+            "build==1.6.0" "PyYAML==6.0.3" "pytest>=8"
+
+      - name: Prove the version derivation
+        run: python -m pytest -q tests/test_release_version.py tests/test_plugin_manifest.py
+
+      - name: Decide and write the next staging version
+        id: plan
+        run: python scripts/release_version.py staging --write
+
+      - name: Retain the plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-plan-${{ github.sha }}
+          path: .release-tmp/staging/plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit the bump to staging
+        id: commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "nothing to bump"
+            exit 0
+          fi
+          git status --porcelain
+          # Only the two version carriers may change. Anything else means the
+          # build wrote where it must not, and the run stops here.
+          if git status --porcelain | awk '{print $2}' | grep -Ev '^(pyproject\.toml|plugin\.yaml)$'
+          then
+            echo "unexpected paths changed" >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pyproject.toml plugin.yaml
+          git commit -F - <<'EOF'
+          release: version the staging package automatically
+
+          scripts/release_version.py compared the packed sdist with what PyPI
+          holds and moved the version to the next X.Y.Z[rcK].devN. The plan is
+          the staging-plan artifact of this run.
+          EOF
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git" HEAD:staging
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git log -1 --format='%H %s'
+
+  validate:
+    name: Full exact-SHA CI at the bump commit
+    needs: bump
+    if: ${{ !cancelled() && needs.bump.result == 'success' && needs.bump.outputs.publish == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      commit_sha: ${{ needs.bump.outputs.sha }}
+
+  publish:
+    name: Publish the dev version to PyPI
+    needs: [bump, validate]
+    if: ${{ !cancelled() && needs.bump.result == 'success' && needs.validate.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    environment: pypi-staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_SHA: ${{ needs.bump.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.bump.outputs.version }}
+    steps:
+      - name: Verify the exact bump SHA
+        env:
+          EXPECTED_SHA: ${{ needs.bump.outputs.sha }}
+        run: |
+          case "$EXPECTED_SHA" in
+            (""|*[!0-9a-f]*) exit 2 ;;
+          esac
+          test "${#EXPECTED_SHA}" -eq 40
+
+      - name: Check out the bump commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify the checkout is staging's tip
+        run: |
+          git fetch origin staging
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$RELEASE_SHA" = "$(git rev-parse origin/staging)"
+
+      - name: Download the CI-validated distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: relay-hermes-validated-rc
+          path: release
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Rehash and recheck the exact validated bytes
+        run: |
+          python -m pip install --disable-pip-version-check "twine==7.0.0"
+          (
+            cd release
+            sha256sum --check provenance/SHA256SUMS
+          )
+          python scripts/release_version.py verify-dist \
+            --dist release/dist --version "$RELEASE_VERSION"
+
+      - name: Publish
+        uses: ./.github/actions/publish-pypi
+        with:
+          packages-dir: release/dist
+          trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
+          token: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Read the release back from PyPI
+        run: |
+          python scripts/release_version.py verify-published \
+            --dist release/dist --version "$RELEASE_VERSION"

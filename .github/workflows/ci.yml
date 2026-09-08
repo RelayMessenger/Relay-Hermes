@@ -23,7 +23,6 @@ env:
   SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
   HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
-  EXPECTED_PACKAGE_VERSION: 1.0.0rc2
   RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/1a2245dd775f781b57e0d1f6f3146ebd384c90c3/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
@@ -57,6 +56,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      - name: Read the package version from the tree
+        # The staging lane rewrites the version on every publish, so no
+        # workflow names it. plugin.yaml must carry the same version in its
+        # manifest form, or this step fails.
+        run: python scripts/release_version.py show | tee -a "$GITHUB_ENV"
+
       - name: Install pinned build and contract dependencies
         run: |
           python -m pip install --disable-pip-version-check "build==1.6.0" "PyYAML==6.0.3"
@@ -77,7 +82,7 @@ jobs:
           manifest = yaml.safe_load(Path("plugin.yaml").read_text())
           assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
           assert metadata["project"]["version"] == os.environ["EXPECTED_PACKAGE_VERSION"]
-          assert manifest["version"] == "1.0.0-rc.2"
+          assert manifest["version"] == os.environ["EXPECTED_MANIFEST_VERSION"]
           PY
           mkdir -p release/dist release/provenance
           python -m build --outdir release/dist
@@ -142,6 +147,9 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             _hermes-agent/pyproject.toml
+
+      - name: Read the package version from the tree
+        run: python scripts/release_version.py show | tee -a "$GITHUB_ENV"
 
       - name: Install the pinned Hermes runtime and the plugin
         # The tests import Hermes itself (gateway, hermes_cli), so the
@@ -264,3 +272,96 @@ jobs:
           assert entry is not None
           assert entry.required_env == ["RELAY_AGENT_TOKEN"]
           PY
+
+  # The staging release proves itself before it can run: the version
+  # decision publish-staging.yml would commit, derived here against live
+  # PyPI and written nowhere. Its decision table is unit-tested first.
+  staging-bump-dry-run:
+    name: Rehearse the staging bump
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the exact source SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the pinned build tools
+        run: |
+          python -m pip install --disable-pip-version-check \
+            "build==1.6.0" "PyYAML==6.0.3" "pytest>=8"
+
+      - name: Prove the version derivation
+        run: python -m pytest -q tests/test_release_version.py
+
+      - name: Rehearse the staging bump
+        run: python scripts/release_version.py staging --dry-run
+
+      - name: Verify the rehearsal wrote nothing tracked
+        run: test -z "$(git status --porcelain)"
+
+  # The production release proves itself the same way: the derivation, the
+  # build of a scratch copy, `twine check`, and the stale-version scan that
+  # release.yml performs on a push to main, here on every change. GitHub only
+  # dispatches a workflow that already exists on the default branch, so this
+  # is also the only way a change to the release itself is rehearsed before
+  # it merges.
+  release-dry-run:
+    name: Rehearse the release
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the exact source SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the pinned build tools
+        run: |
+          python -m pip install --disable-pip-version-check \
+            "build==1.6.0" "twine==7.0.0" "PyYAML==6.0.3" "pytest>=8"
+
+      - name: Prove the version derivation
+        run: python -m pytest -q tests/test_release_version.py
+
+      - name: Rehearse a skip for a target PyPI already has
+        run: |
+          set -euo pipefail
+          # The plan against live PyPI, whatever it says today...
+          python scripts/release_version.py release --dry-run --plan-only | tee plan-a.txt
+          grep -q '^release plan only: ' plan-a.txt
+          # ...and the same plan told the target is on PyPI must say skip.
+          # (tests/test_release_version.py proves the derivation itself; this
+          # proves the wiring in CI.)
+          target="$(python scripts/release_version.py show | sed -n 's/^RELEASE_TARGET_VERSION=//p')"
+          test -n "$target"
+          python scripts/release_version.py release --dry-run --plan-only \
+            --assume-published "$target" | tee plan-b.txt
+          grep -q '^release plan only: skip$' plan-b.txt
+          rm -f plan-a.txt plan-b.txt
+
+      - name: Rehearse the release
+        run: python scripts/release_version.py release --dry-run
+
+      - name: Verify the rehearsal wrote nothing tracked
+        run: test -z "$(git status --porcelain)"
