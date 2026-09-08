@@ -97,12 +97,15 @@ class RelayApiError(Exception):
         status: Optional[int] = None,
         code: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
+        detail: str = "",
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status = status
         self.code = code
         self.details = details or {}
+        # The server's own error.message, without this client's prefix.
+        self.detail = detail
 
     @property
     def terminal(self) -> bool:
@@ -181,6 +184,31 @@ class RelayWebhookConfiguredError(RelayApiError):
             details=details,
         )
         self.trace_id = trace_id
+
+
+# Relay answers a reused Idempotency-Key whose stored content hash differs
+# from the new body with HTTP 409 and this message (Relay-Server
+# server/src/messaging.ts:743 and :847 at contract snapshot 9990699,
+# `throw new ApiError(409, 1005, "Idempotency key was already used for
+# different message content.")`). The contract documents the status only:
+# openapi.yaml:712 "The request conflicts with current Chat, membership, or
+# idempotency state", and its ErrorCode is a bare integer (openapi.yaml:2476),
+# where 1005 is the server's generic rejection code shared with "This Chat has
+# no active recipient." (messaging.ts:905). The message text is therefore the
+# only field that names the idempotency case, and it is matched by prefix.
+IDEMPOTENCY_REUSE_MESSAGE = "Idempotency key was already used"
+
+
+def is_idempotency_reuse(error: "RelayApiError") -> bool:
+    """Did Relay refuse this send because its key already names a message?
+
+    That message was committed by the first send under the same key, so the
+    logical send succeeded; the caller must never send again.
+    """
+    return (
+        error.status == 409
+        and error.detail.lower().startswith(IDEMPOTENCY_REUSE_MESSAGE.lower())
+    )
 
 
 def classify_status(status: int) -> str:
@@ -498,6 +526,7 @@ class RelayClient:
             status=response.status,
             code=code,
             details=details,
+            detail=detail,
         )
 
     async def list_chats(

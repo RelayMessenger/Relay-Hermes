@@ -171,9 +171,24 @@ display:
 
 `display.busy_input_mode` (default `interrupt`) is global, not per platform,
 and is left alone: a message that arrives while Hermes is mid-turn is folded
-into that turn. The adapter marks it Read at intake, leaves the reply
-unquoted, and settles its durable inbox row, so it reads as it does on
-iMessage.
+into that turn, queued behind it, or (in `queue` mode) buffered for 0.35 s
+and then queued. The adapter marks it Read at intake and leaves the reply
+unquoted, so it reads as it does on iMessage. Its durable inbox row is
+settled only when the session goes quiet: at the successful end of the turn
+that consumed it, unless Hermes still holds it for a later turn, in which
+case that later turn settles it. If the gateway dies before then the row
+replays on restart, which is the safe side.
+
+Hermes core posts a busy acknowledgement bubble when a message lands
+mid-turn ("Redirected current run", "Interrupting current task"); its iMessage
+adapters show the same bubble, and this plugin does not suppress it. Hermes's
+own environment variable turns it off for every platform
+(`gateway/run_busy.py`: `os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED",
+"true").lower() != "true"` suppresses the ack):
+
+```sh
+export HERMES_GATEWAY_BUSY_ACK_ENABLED=false
+```
 
 Relay resolves the token, API origin, chat allowlist, state directory, and
 delivery settings through Hermes's shared adapter credential reader. The primary
