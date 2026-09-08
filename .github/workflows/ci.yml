@@ -24,7 +24,7 @@ env:
   HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
   EXPECTED_PACKAGE_VERSION: 1.0.0rc1
-  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml
+  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
 jobs:
