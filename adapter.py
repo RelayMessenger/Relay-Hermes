@@ -51,8 +51,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
-from agent.secret_scope import get_secret
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms._shared import get_scoped_secret
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -135,9 +135,9 @@ _TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
 
 
 def _profile_value(name: str) -> str:
-    """Read one profile setting through Hermes's fail-closed secret scope."""
+    """Use Hermes's adapter reader for primary startup and scoped profiles."""
 
-    return str(get_secret(name, "") or "").strip()
+    return str(get_scoped_secret(name, "") or "").strip()
 
 
 def _resolve(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
