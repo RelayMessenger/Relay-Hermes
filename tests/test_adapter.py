@@ -429,6 +429,63 @@ def test_auto_quote_ignores_a_folded_message_but_quotes_an_older_turn_starter(
     assert client.calls[-1]["reply_to"] == {"message_id": "01993d50-ef7b-7b37-886b-23fd80c7ec11"}
 
 
+class RecordingInbox:
+    """Stands in for the SQLite inbox: records lifecycle calls only."""
+
+    def __init__(self) -> None:
+        self.completed: List[str] = []
+        self.retried: List[str] = []
+
+    def complete(self, event_id: str, *, ignored: bool = False) -> None:
+        self.completed.append(event_id)
+
+    def retry(self, event_id: str, error: str) -> None:
+        self.retried.append(event_id)
+
+
+@pytest.mark.parametrize(
+    "hermes_outcome,expect_completed",
+    [
+        ("folded", True),      # busy session, redirect swallowed the text
+        ("queued", False),     # busy session, event became the pending turn
+        ("overflow", False),   # busy session, accepted into the invisible FIFO
+        ("started", False),    # idle session, a turn started for this event
+    ],
+)
+def test_dispatch_settles_only_a_folded_event(
+    plugin, tmp_path, hermes_outcome, expect_completed
+):
+    """Hermes calls no processing hook for a message it folds into a running
+    turn, so the durable row would stay dispatched and replay on restart. An
+    event Hermes accepted anywhere is left for its own hooks to settle."""
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    event = message_event(plugin, adapter, "event-fold")
+    session_key = adapter._event_session_key(event)
+
+    async def fake_handle_message(incoming):
+        incoming._gateway_accepted = False
+        if hermes_outcome == "folded":
+            adapter._active_sessions[session_key] = asyncio.Event()
+        elif hermes_outcome == "queued":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            adapter._pending_messages[session_key] = incoming
+            incoming._gateway_accepted = True
+        elif hermes_outcome == "overflow":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            incoming._gateway_accepted = True
+        elif hermes_outcome == "started":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            incoming._gateway_accepted = True
+
+    adapter.handle_message = fake_handle_message
+    asyncio.run(adapter._dispatch_turn(event))
+
+    assert inbox.completed == (["event-fold"] if expect_completed else [])
+    assert inbox.retried == []
+
+
 def _event_with_message_id(plugin, adapter, event_id, message_id):
     from gateway.platforms.base import MessageEvent, MessageType
 

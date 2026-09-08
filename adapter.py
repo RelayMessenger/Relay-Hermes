@@ -887,6 +887,47 @@ class RelayAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         finally:
             _TURN_EVENT.reset(token)
+        if event_id and self._folded_into_running_turn(event):
+            # No processing hook will ever run for this event, so nothing
+            # else can settle its durable row. Left dispatched, a restart
+            # requeues it (state.py open()) and Hermes answers it twice.
+            logger.debug(
+                "[%s] event %s folded into the running turn", self.name, event_id,
+            )
+            self._inbox.complete(event_id)
+
+    def _folded_into_running_turn(self, event: MessageEvent) -> bool:
+        """Did Hermes fold ``event`` into a turn that was already running?
+
+        Hermes has no hook for a fold (pinned b2aa855: handle_message routes
+        a busy session to _handle_message_while_active, which returns as
+        soon as the busy handler returns True and never enters
+        _process_message_background, where both processing hooks live). The
+        interim signal is read from the base adapter's own state after
+        handle_message returns:
+
+        - the session is still busy (``_active_sessions``, base.py:1838);
+        - the event was not queued as the next turn (``_pending_messages``,
+          base.py:1839);
+        - and Hermes did not accept it anywhere: ``event._gateway_accepted``
+          is reset to False on entry (base.py:3482) and set True only when a
+          turn starts for it (base.py:3505), when it is queued in the pending
+          slot (base.py:3566, 3578; run_busy.py:314) or in the gateway's
+          overflow list, which this adapter cannot see (run_busy.py:55). A
+          successful redirect or steer sets nothing.
+
+        An event Hermes accepted somewhere is never reported folded: it has
+        or will have its own turn and its own on_processing_complete. Losing
+        a message is worse than replaying one. The clean fix is upstream: a
+        processing-complete call for a folded event from
+        _handle_message_while_active.
+        """
+        if getattr(event, "_gateway_accepted", False):
+            return False
+        session_key = self._event_session_key(event)
+        if session_key not in self._active_sessions:
+            return False
+        return self._pending_messages.get(session_key) is not event
 
     async def _ingest_media(
         self, message: Dict[str, Any]
