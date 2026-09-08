@@ -142,6 +142,28 @@ def test_sdist_comparison_ignores_setuptools_metadata_only(tmp_path):
     ]
 
 
+def test_metadata_headers_count_but_long_descriptions_and_markdown_do_not(tmp_path):
+    # Header says the target; the body is the README, which names a dev
+    # version as an example: prose, not an embedding.
+    clean = b"Name: relay-hermes\nVersion: 1.0.0rc3\n\npip install --pre relay-hermes==1.0.0rc3.dev0\n"
+    (tmp_path / "PKG-INFO").write_bytes(clean)
+    (tmp_path / "METADATA").write_bytes(clean)
+    (tmp_path / "README.md").write_text("`1.0.0rc3.dev0` is a staging build\n")
+    assert rv.files_carrying_version(tmp_path, "1.0.0rc3.dev0") == []
+    # A header that still says the dev version is the embedding the scan exists for.
+    stale = b"Name: relay-hermes\nVersion: 1.0.0rc3.dev0\n\nbody\n"
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "PKG-INFO").write_bytes(stale)
+    (tmp_path / "sub" / "METADATA").write_bytes(stale)
+    # Any other file is scanned in full.
+    (tmp_path / "plugin.yaml").write_text("version: 1.0.0rc3.dev0\n")
+    assert rv.files_carrying_version(tmp_path, "1.0.0rc3.dev0") == [
+        "plugin.yaml",
+        "sub/METADATA",
+        "sub/PKG-INFO",
+    ]
+
+
 def test_files_carrying_version_finds_every_embedding(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "META").write_text("Version: 1.0.0rc3.dev0\n")

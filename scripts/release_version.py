@@ -271,19 +271,38 @@ def differing_files(left: dict[str, str], right: dict[str, str]) -> list[str]:
 
 
 VERBATIM_SOURCE_DIRS = ("scripts", "tests")
+METADATA_FILES = ("PKG-INFO", "METADATA")
+
+
+def embedded_bytes(path: Path) -> bytes:
+    """The part of a shipped file where a version could be embedded.
+
+    PKG-INFO and METADATA carry the version in their header block and then
+    the README verbatim as the long description; only the header is an
+    embedding. Markdown is prose: a README that names a version as an example
+    is content, not a place the build derived the version (the first staging
+    run failed on exactly that, 2026-09-08).
+    """
+    if path.suffix == ".md":
+        return b""
+    payload = path.read_bytes()
+    if path.name in METADATA_FILES:
+        return payload.split(b"\n\n", 1)[0]
+    return payload
 
 
 def files_carrying_version(
     directory: Path, version: str, skip_dirs: tuple[str, ...] = ()
 ) -> list[str]:
-    """Every file under ``directory`` whose bytes carry ``version``.
+    """Every file under ``directory`` whose embedded bytes carry ``version``.
 
     Relay-SDK's first release on main published nothing for one package
     because a generated file still embedded the staging version; this is the
     same closed door, run over the unpacked distributions. ``skip_dirs`` names
     directory components to leave out: the sdist ships ``scripts/`` and
     ``tests/`` verbatim (MANIFEST.in), and their fixtures and docstrings name
-    versions as examples, which is content and not an embedding.
+    versions as examples, which is content and not an embedding. What counts
+    as embedded in one file is ``embedded_bytes``.
     """
     needle = version.encode()
     found = []
@@ -291,7 +310,7 @@ def files_carrying_version(
         relative = path.relative_to(directory)
         if any(part in skip_dirs for part in relative.parts[:-1]):
             continue
-        if path.is_file() and needle in path.read_bytes():
+        if path.is_file() and needle in embedded_bytes(path):
             found.append(str(relative))
     return found
 
