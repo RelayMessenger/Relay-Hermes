@@ -1,0 +1,211 @@
+name: Release to PyPI
+
+# The one production release, the way Relay-SDK releases to npm (release.yml
+# there). Nothing is published by hand: the only deliberate act is merging
+# staging into main. main is staging's exact tree, so pyproject.toml there
+# says X.Y.Z[rcK].devN; this workflow strips `.devN`, skips the target if PyPI
+# already has it, and otherwise builds, checks, publishes and reads it back.
+# A `v<version>` git tag records the publish afterwards; it is never the
+# trigger.
+#
+# Two ways in, and only one of them can publish:
+#   push to main                -> derive, build, check, publish, verify, tag
+#   workflow_dispatch (dry_run) -> derive, build, twine check, stop
+#
+# The `pypi-release` environment holds the token and any approval rule the
+# owner sets on it. The publish step is the one both lanes share
+# (.github/actions/publish-pypi), so the switch to Trusted Publishing is the
+# repository variable PYPI_TRUSTED_PUBLISHING and no file here.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Derive, build, and twine check, then stop.
+        type: boolean
+        default: true
+        required: true
+      assume_published:
+        description: Dry-run proof only. Comma-separated versions to treat as already on PyPI.
+        type: string
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-hermes-release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Derive, publish, and record
+    if: github.repository == 'RelayMessenger/Relay-Hermes'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 45
+    environment: pypi-release
+    # contents: write records the tag; id-token: write is the OIDC token the
+    # Trusted Publishing path exchanges (PyPI: grant it at the job level).
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Refuse a manual run that is not a dry run
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run != true
+        run: |
+          echo "A manual run of this workflow only ever dry-runs." >&2
+          echo "Publishing happens when staging is merged into main." >&2
+          exit 1
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify main is staging's exact tree
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin main staging
+          test "$(git rev-parse HEAD)" = "$EVENT_SHA"
+          if [ "$EVENT_NAME" = "push" ]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          fi
+          # A promotion is a PR from staging to main merged without a merge
+          # commit, so main's tip is a commit staging already has. Anything
+          # else did not come through staging and does not release.
+          if ! git merge-base --is-ancestor HEAD origin/staging; then
+            echo "main's tip is not on staging; promote by a PR from staging to main" >&2
+            exit 1
+          fi
+          test -z "$(git status --porcelain)"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the pinned build tools
+        run: |
+          python -m pip install --disable-pip-version-check \
+            "build==1.6.0" "twine==7.0.0" "PyYAML==6.0.3" "pytest>=8"
+
+      - name: Prove the version derivation
+        run: python -m pytest -q tests/test_release_version.py tests/test_plugin_manifest.py
+
+      - name: Dry-run the release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELAY_ASSUME_PUBLISHED: ${{ inputs.assume_published }}
+        run: python scripts/release_version.py release --dry-run
+
+      - name: Derive the release version
+        id: plan
+        if: github.event_name == 'push'
+        run: python scripts/release_version.py release --write
+
+      - name: Build the release distributions
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          STAGING_VERSION: ${{ steps.plan.outputs.staging_version }}
+        run: |
+          mkdir -p release/dist release/provenance
+          python -m build --outdir release/dist
+          python scripts/release_version.py verify-dist \
+            --dist release/dist --version "$RELEASE_VERSION" --forbid "$STAGING_VERSION"
+          (
+            cd release
+            sha256sum dist/* > provenance/SHA256SUMS
+            sha256sum --check provenance/SHA256SUMS
+          )
+
+      - name: Clean-install the exact wheel and sdist
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          wheel_venv="${RUNNER_TEMP}/relay-hermes-release-wheel"
+          sdist_venv="${RUNNER_TEMP}/relay-hermes-release-sdist"
+          python -m venv "$wheel_venv"
+          python -m venv "$sdist_venv"
+          "$wheel_venv/bin/python" -m pip install \
+            "release/dist/relay_hermes-${RELEASE_VERSION}-py3-none-any.whl"
+          "$sdist_venv/bin/python" -m pip install \
+            "release/dist/relay_hermes-${RELEASE_VERSION}.tar.gz"
+          for clean_venv in "$wheel_venv" "$sdist_venv"; do
+            (
+              cd "$RUNNER_TEMP"
+              "$clean_venv/bin/python" - <<'PY'
+          import os
+          from importlib.metadata import entry_points, version
+
+          assert version("relay-hermes") == os.environ["RELEASE_VERSION"]
+          entrypoint = next(
+              item
+              for item in entry_points().select(group="hermes_agent.plugins")
+              if item.name == "relay-hermes"
+          )
+          assert entrypoint.value == "relay_hermes"
+          PY
+            )
+          done
+
+      - name: Publish
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        uses: ./.github/actions/publish-pypi
+        with:
+          packages-dir: release/dist
+          trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
+          token: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Read the release back from PyPI
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          python scripts/release_version.py verify-published \
+            --dist release/dist --version "$RELEASE_VERSION"
+
+      - name: Record the release tag
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${REPOSITORY}"
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
+          existing="$(curl -sS "${auth[@]}" "${api}/git/ref/tags/${RELEASE_TAG}" \
+            | python -c 'import json,sys; print(json.load(sys.stdin).get("object", {}).get("sha", ""))')"
+          if [ -n "$existing" ]; then
+            # A tag on another commit means the version was released before
+            # from a different tree; that is a fault, not a reconcile.
+            test "$existing" = "$RELEASE_SHA"
+            echo "tag ${RELEASE_TAG} already records ${RELEASE_SHA}"
+            exit 0
+          fi
+          status="$(curl -sS -o created.json -w '%{http_code}' "${auth[@]}" \
+            -X POST "${api}/git/refs" \
+            -d "{\"ref\":\"refs/tags/${RELEASE_TAG}\",\"sha\":\"${RELEASE_SHA}\"}")"
+          test "$status" = "201" || { cat created.json >&2; exit 1; }
+          rm -f created.json
+          echo "tag ${RELEASE_TAG} records ${RELEASE_SHA}"
+
+      - name: Retain the release
+        if: always() && github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ github.sha }}-${{ github.run_attempt }}
+          path: release/
+          if-no-files-found: ignore
+          retention-days: 90

@@ -246,6 +246,70 @@ The runtime contract used here is:
 Relay vocabulary in the adapter is Contact, Handle, Chat, Message, and
 Participant.
 
+## Releasing
+
+Nothing is published by hand. There are two lanes, the same two Relay-SDK
+uses for npm, in PEP 440:
+
+1. Every merge to `staging` publishes a development build. The
+   `Publish staging to PyPI` workflow decides the next version from what PyPI
+   holds, commits `release: version the staging package automatically` to
+   `staging` (it rewrites `pyproject.toml` and `plugin.yaml`, nothing else),
+   runs the full CI at that commit, and uploads the wheel and sdist. The
+   version is the target with a `.devN` suffix: `1.0.0rc3.dev0`,
+   `1.0.0rc3.dev1`, and so on while the target is the candidate `1.0.0rc3`;
+   `1.0.0.dev0` once the target is `1.0.0`.
+2. A promotion is a pull request from `staging` to `main`, merged without a
+   merge commit, so `main` is always a commit `staging` already has. The
+   `Release to PyPI` workflow on `main` strips `.devN`, publishes the target
+   (`1.0.0rc3`, later `1.0.0`), reads it back from PyPI, and records the tag
+   `v1.0.0rc3`. A target PyPI already has is skipped, so a second promotion
+   of the same tree publishes nothing.
+
+`pip install relay-hermes` never selects a `.dev` release. `pip install --pre
+relay-hermes` does, and `pip install relay-hermes==1.0.0rc3.dev0` names one
+exactly. `plugin.yaml` carries the same version in its manifest form:
+`1.0.0-rc.3.dev.0` for `1.0.0rc3.dev0`, `1.0.0-rc.3` for `1.0.0rc3`,
+`1.0.0-dev.0` for `1.0.0.dev0`.
+
+To aim at a different target, edit the version in `pyproject.toml` (and the
+manifest form in `plugin.yaml`) in a normal pull request to `staging`:
+`1.0.0` or `1.0.0.dev0` ends the candidate line and starts the GA line,
+`1.1.0` starts a minor. The staging lane keeps a hand-written unpublished
+version as written and carries on from there. The rules are the table at the
+top of `scripts/release_version.py`, and every pull request rehearses both
+lanes against live PyPI without publishing (`Rehearse the staging bump` and
+`Rehearse the release` in CI).
+
+### Credentials
+
+Both lanes publish through one step, `.github/actions/publish-pypi`. Which
+credential it uses is the repository variable `PYPI_TRUSTED_PUBLISHING`:
+
+- unset (today): the project-scoped `PYPI_API_TOKEN` secret, attestations
+  off (PEP 740 attestations only work through Trusted Publishing);
+- `true`: PyPI Trusted Publishing over OIDC, no token, attestations on.
+
+To switch, register two trusted publishers on the `relay-hermes` project
+(PyPI: project settings, Publishing, GitHub), one per lane. Every field is
+exact:
+
+| Field | Staging lane | Release lane |
+| --- | --- | --- |
+| Owner | `RelayMessenger` | `RelayMessenger` |
+| Repository name | `Relay-Hermes` | `Relay-Hermes` |
+| Workflow name | `publish-staging.yml` | `release.yml` |
+| Environment name | `pypi-staging` | `pypi-release` |
+
+Then set the repository variable `PYPI_TRUSTED_PUBLISHING` to `true`
+(GitHub: Settings, Secrets and variables, Actions, Variables). No file
+changes. The two workflow names are the calling workflows on purpose: PyPI
+cannot match a reusable workflow, so the shared step is a composite action
+inside those jobs. The `pypi-staging` and `pypi-release` environments are
+where any approval rule goes; the older `pypi-rc` environment belongs to the
+manual `Publish release candidate` workflow, which stays until the two lanes
+have each published once and is then removed.
+
 ## Development
 
 Python 3.11 through 3.13 are supported.

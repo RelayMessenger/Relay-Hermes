@@ -9,7 +9,9 @@ in hermes config").
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -19,6 +21,15 @@ yaml = pytest.importorskip("yaml")
 
 MANIFEST = Path(__file__).resolve().parents[1] / "plugin.yaml"
 OPENAPI_COMMIT = "1a2245dd775f781b57e0d1f6f3146ebd384c90c3"
+WORKFLOWS = MANIFEST.parent / ".github" / "workflows"
+PUBLISH_ACTION = MANIFEST.parent / ".github" / "actions" / "publish-pypi" / "action.yml"
+
+_spec = importlib.util.spec_from_file_location(
+    "release_version", MANIFEST.parent / "scripts" / "release_version.py"
+)
+release_version = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = release_version
+_spec.loader.exec_module(release_version)
 OPENAPI_SHA256 = (
     "5458497fe8db4ee7dfe6bef67f2803137575d3ea4d835748290a5c9f8d906791"
 )
@@ -125,12 +136,18 @@ def test_pip_entrypoint_uses_current_hermes_module_convention():
 
 
 def test_staging_package_and_manifest_versions_match(manifest):
+    # The staging lane rewrites both files on every publish, so no literal
+    # version is pinned here: pyproject.toml carries PEP 440 (1.0.0rc3,
+    # 1.0.0rc3.dev0, 1.0.0.dev0, 1.0.0) and plugin.yaml carries its manifest
+    # form (1.0.0-rc.3, 1.0.0-rc.3.dev.0, 1.0.0-dev.0, 1.0.0), one to one.
     metadata = tomllib.loads(
         (MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert metadata["project"]["version"] == "1.0.0rc2"
+    version = metadata["project"]["version"]
+    assert release_version.parse_version(version)
+    assert manifest["version"] == release_version.manifest_form(version)
+    assert release_version.pep440_form(manifest["version"]) == version
     assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
-    assert manifest["version"] == "1.0.0-rc.2"
 
 
 def test_locked_openapi_snapshot_is_exact_and_provenanced():
@@ -157,10 +174,9 @@ def test_locked_openapi_snapshot_is_exact_and_provenanced():
 
 
 def test_hosted_workflows_pin_every_external_action_to_a_sha():
-    workflows = MANIFEST.parent / ".github" / "workflows"
     uses_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
     sha_pattern = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-    for path in sorted(workflows.glob("*.yml")):
+    for path in [*sorted(WORKFLOWS.glob("*.yml")), PUBLISH_ACTION]:
         text = path.read_text(encoding="utf-8")
         uses = uses_pattern.findall(text)
         assert uses, path.name
@@ -170,7 +186,8 @@ def test_hosted_workflows_pin_every_external_action_to_a_sha():
             for value in external
         ), path.name
         parsed = yaml.safe_load(text)
-        for job in parsed["jobs"].values():
+        jobs = parsed["jobs"].values() if "jobs" in parsed else [parsed["runs"]]
+        for job in jobs:
             for step in job.get("steps", []):
                 assert "${{" not in step.get("run", ""), path.name
 
@@ -231,6 +248,70 @@ def test_reusable_ci_covers_full_release_compatibility():
     assert 'python scripts/check-openapi.py "$RELAY_OPENAPI_SNAPSHOT"' in text
     assert "setuptools==84.0.0" in text
     assert "build==1.6.0" in text
+
+
+def test_ci_reads_the_version_from_the_tree_and_rehearses_both_lanes():
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    jobs = yaml.safe_load(text)["jobs"]
+    # The staging lane rewrites the version on every publish; a literal here
+    # would go red on the first bump commit.
+    assert "EXPECTED_PACKAGE_VERSION:" not in text
+    assert text.count('python scripts/release_version.py show | tee -a "$GITHUB_ENV"') == 2
+    assert 'os.environ["EXPECTED_MANIFEST_VERSION"]' in text
+    assert set(jobs) == {"build", "test", "staging-bump-dry-run", "release-dry-run"}
+    assert "python scripts/release_version.py staging --dry-run" in text
+    assert "python scripts/release_version.py release --dry-run" in text
+    assert "grep -q '^release plan only: skip$' plan-b.txt" in text
+    assert text.count('run: test -z "$(git status --porcelain)"') == 2
+
+
+def test_release_lanes_share_one_publish_step_switched_by_a_variable():
+    action = PUBLISH_ACTION.read_text(encoding="utf-8")
+    steps = yaml.safe_load(action)["runs"]["steps"]
+    publishers = [step for step in steps if "pypa/gh-action-pypi-publish" in step.get("uses", "")]
+    assert len(publishers) == 2
+    token, oidc = publishers
+    assert token["if"] == "inputs.trusted-publishing == ''"
+    assert token["with"]["password"] == "${{ inputs.token }}"
+    assert token["with"]["attestations"] is False
+    assert oidc["if"] == "inputs.trusted-publishing == 'true'"
+    assert "password" not in oidc["with"]
+    assert oidc["with"]["attestations"] is True
+    assert publishers[0]["uses"] == publishers[1]["uses"]
+    assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", action)
+
+    lanes = {
+        "publish-staging.yml": ("staging", "pypi-staging", "publish"),
+        "release.yml": ("main", "pypi-release", "release"),
+    }
+    for name, (branch, environment, job_name) in lanes.items():
+        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        parsed = yaml.safe_load(text)
+        assert parsed[True]["push"]["branches"] == [branch], name
+        job = parsed["jobs"][job_name]
+        assert job["environment"] == environment, name
+        assert job["permissions"]["id-token"] == "write", name
+        publish = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/publish-pypi")
+        assert publish["with"]["trusted-publishing"] == "${{ vars.PYPI_TRUSTED_PUBLISHING }}", name
+        assert publish["with"]["token"] == "${{ secrets.PYPI_API_TOKEN }}", name
+        assert "github.repository == 'RelayMessenger/Relay-Hermes'" in text, name
+        assert "python scripts/release_version.py verify-published" in text, name
+        assert "password:" not in text, name
+        assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", text), name
+
+    staging = (WORKFLOWS / "publish-staging.yml").read_text(encoding="utf-8")
+    assert "release: version the staging package automatically" in staging
+    assert "python scripts/release_version.py staging --write" in staging
+    assert "git add pyproject.toml plugin.yaml" in staging
+    assert yaml.safe_load(staging)["jobs"]["validate"]["uses"] == "./.github/workflows/ci.yml"
+    assert staging.count("relay-hermes-validated-rc") == 1
+
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "python scripts/release_version.py release --write" in release
+    assert "git merge-base --is-ancestor HEAD origin/staging" in release
+    assert "A manual run of this workflow only ever dry-runs." in release
+    assert "--forbid \"$STAGING_VERSION\"" in release
+    assert 'ref="refs/tags/${RELEASE_TAG}"' in release or "refs/tags/${RELEASE_TAG}" in release
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])
