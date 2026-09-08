@@ -254,33 +254,25 @@ def _bubble_chunks(content: str) -> List[str]:
 
 
 def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fold adjacent text parts until the Message fits the 100-part cap.
+    """Preserve paragraphs without posting forbidden adjacent text parts.
 
-    Later seams fold first, so early bubbles keep their shape and only the
-    tail arrives merged. Paragraphs rejoin with a blank line, so nothing is
-    lost. A merge that would push the part past ``MERGE_UNIT_BUDGET``
-    moves to an earlier seam instead, and media parts never merge, so the
-    result can still exceed the cap; ``_commit`` decides what happens then.
+    Media boundaries stay intact. Text that cannot merge within the UTF-16
+    limit stays separate here; _commit gives it a new Message boundary.
     """
-    parts = [dict(part) for part in parts]
-    while len(parts) > MAX_PARTS_PER_POST:
-        for index in range(len(parts) - 1, 0, -1):
-            prev, last = parts[index - 1], parts[index]
-            if prev.get("type") != "text" or last.get("type") != "text":
-                continue
-            if (
-                utf16_len(prev["value"])
-                + 2
-                + utf16_len(last["value"])
-                > MERGE_UNIT_BUDGET
-            ):
-                continue
+    folded: List[Dict[str, Any]] = []
+    for part in parts:
+        last = dict(part)
+        prev = folded[-1] if folded else None
+        if (
+            prev is not None
+            and prev.get("type") == last.get("type") == "text"
+            and utf16_len(prev["value"]) + 2 + utf16_len(last["value"])
+            <= MERGE_UNIT_BUDGET
+        ):
             prev["value"] = f"{prev['value']}\n\n{last['value']}"
-            parts.pop(index)
-            break
         else:
-            break
-    return parts
+            folded.append(last)
+    return folded
 
 
 def _explicit_reply_to_mode(config) -> str:
@@ -1020,12 +1012,24 @@ class RelayAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send ordered parts in current MessageContent batches."""
         parts = _fold_parts(parts)
+        batches: List[List[Dict[str, Any]]] = []
+        batch: List[Dict[str, Any]] = []
+        for part in parts:
+            if batch and (
+                len(batch) == MAX_PARTS_PER_POST
+                or batch[-1].get("type") == part.get("type") == "text"
+            ):
+                batches.append(batch)
+                batch = []
+            batch.append(part)
+        if batch:
+            batches.append(batch)
         first: Optional[SendResult] = None
-        for ordinal, start in enumerate(range(0, len(parts), MAX_PARTS_PER_POST)):
+        for ordinal, batch in enumerate(batches):
             result = await self._post_message(
                 chat_id,
-                parts[start:start + MAX_PARTS_PER_POST],
-                reply_to=self._reply_anchor(chat_id, reply_to) if start == 0 else None,
+                batch,
+                reply_to=self._reply_anchor(chat_id, reply_to) if ordinal == 0 else None,
                 idempotency_ordinal=ordinal,
             )
             if not result.success:

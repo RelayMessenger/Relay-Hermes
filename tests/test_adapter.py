@@ -175,8 +175,7 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
     expected = {
         "chat_id": event.source.chat_id,
         "parts": [
-            {"type": "text", "value": "one"},
-            {"type": "text", "value": "two"},
+            {"type": "text", "value": "one\n\ntwo"},
         ],
         "reply_to": {"message_id": event.message_id},
         "timeout": None,
@@ -371,9 +370,10 @@ def test_bubble_chunking_uses_utf16_and_preserves_code_fences(plugin):
 def test_part_folding_stays_under_the_contract_limit_without_merging_media(plugin):
     parts = [{"type": "text", "value": str(index)} for index in range(101)]
     folded = plugin._fold_parts(parts)
-    assert len(folded) == 100
-    assert folded[0] == {"type": "text", "value": "0"}
-    assert folded[-1] == {"type": "text", "value": "99\n\n100"}
+    assert folded == [{
+        "type": "text",
+        "value": "\n\n".join(str(index) for index in range(101)),
+    }]
 
     media = [{"type": "media", "url": f"https://files.example/{index}"}
              for index in range(101)]
@@ -395,9 +395,44 @@ def test_hosted_image_batch_is_one_ordered_message(plugin, tmp_path):
     assert client.calls[0]["parts"] == [
         {"type": "media", "url": "https://files.example/one.png"},
         {"type": "media", "url": "https://files.example/two.png"},
-        {"type": "text", "value": "first"},
-        {"type": "text", "value": "second"},
+        {"type": "text", "value": "first\n\nsecond"},
     ]
+
+
+def test_long_text_batches_never_post_adjacent_text_parts_and_retry_keys_are_stable(
+    plugin, tmp_path,
+):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-long-text")
+    paragraphs = ["😀" * 5_000, "second paragraph", "third paragraph"]
+
+    async def run():
+        await adapter.on_processing_start(event)
+        first = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
+                                   reply_to=event.message_id)
+        original = list(client.calls)
+        client.calls.clear()
+        await adapter.on_processing_start(event)
+        replayed = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
+                                      reply_to=event.message_id)
+        return first, replayed, original
+
+    first, replayed, original = asyncio.run(run())
+    assert first.success and replayed.success
+    assert len(original) == 2
+    assert original == client.calls
+    assert len({call["idempotency_key"] for call in original}) == 2
+    assert original[0]["reply_to"] == {"message_id": event.message_id}
+    assert original[1]["reply_to"] is None
+    assert "\n\n".join(part["value"] for call in original for part in call["parts"]) == "\n\n".join(paragraphs)
+    for call in original:
+        assert len(call["parts"]) <= plugin.MAX_PARTS_PER_POST
+        assert all(plugin.utf16_len(part["value"]) <= plugin.MAX_MESSAGE_LENGTH
+                   for part in call["parts"])
+        assert not any(a["type"] == b["type"] == "text"
+                       for a, b in zip(call["parts"], call["parts"][1:]))
 
 
 def test_audio_file_uses_attachment_upload_then_idempotent_message_route(
