@@ -31,12 +31,12 @@ manifest to be reproduced from the final commit.
   (superseded; CI now pins `b2aa855b626ff8688eb34b95c60ee8b6a4af3679`)
 - Relay Server OpenAPI commit tested here:
   `9b4d5bb32cc749c6fd271969948c385300d404d6`
-  (superseded; the locked contract is now
-  `99906995625ddc00348064a585ada1649313b0fc`)
+  (superseded; `contracts/relay-server/README.md` names the pinned
+  commit today)
 - OpenAPI SHA-256 tested here:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
-  (superseded; the locked contract now hashes
-  `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8`)
+  (superseded; `contracts/relay-server/README.md` gives its SHA-256
+  today)
 
 ## Results derived from raw logs
 

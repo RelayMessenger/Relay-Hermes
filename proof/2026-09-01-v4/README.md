@@ -46,26 +46,26 @@ staging helper, and contract harness are unchanged from the audited base.
 
 The snapshot checked in for this run was
 `contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml`.
-That path is gone. The tree now carries
-`contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml`,
-described in `contracts/relay-server/README.md`.
+That path is gone. `contracts/relay-server/README.md` names the
+snapshot the tree carries today.
 
 - Source repository: `RelayMessenger/Relay-Server`
 - Source commit for this run: `9b4d5bb32cc749c6fd271969948c385300d404d6`
-  (superseded by `99906995625ddc00348064a585ada1649313b0fc`)
+  (superseded; `contracts/relay-server/README.md` names the pinned
+  commit today)
 - Source path: `contracts/developer/openapi.yaml`
 - Byte length for this run: `117289`
-  (superseded; the snapshot in the tree is `152428` bytes)
+  (superseded; `contracts/relay-server/README.md` gives the current
+  byte length)
 - SHA-256 for this run:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
-  (superseded; the snapshot in the tree hashes
-  `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8`)
+  (superseded; `contracts/relay-server/README.md` gives its SHA-256
+  today)
 
 `raw/02-source.log` proves the file checked in at that time was byte-identical
 to workspace input `_runtime/relay-openapi-locked-9b4d5bb.yaml`. It says nothing
-about the `99906995625ddc00348064a585ada1649313b0fc` snapshot now in the tree;
-`contracts/relay-server/README.md` and `scripts/check-openapi.py` cover that
-one.
+about the snapshot now in the tree; `contracts/relay-server/README.md` and
+`scripts/check-openapi.py` cover that one.
 `raw/04-contract-workflow.log` proves the harness accepts those exact bytes,
 normal CI validates the local path before building, and the RC contract job
 validates the same local path without a Relay-Server checkout or
