@@ -1068,6 +1068,23 @@ class RelayAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
 
+    def format_tool_event(self, event: Any, *, mode: str = "all", preview_max_len: int = 40):
+        """Eat tool-progress chrome.
+
+        Relay bubbles are permanent and cannot be edited, so every tool line
+        the base adapter would render ("⚙️ terminal ...") lands as its own
+        message beside the answer. Hermes has no plugin-side way to declare
+        the quiet defaults its built-in iMessage adapters get
+        (``_PLATFORM_DEFAULTS`` in gateway/display_config.py at b2aa855 is
+        a private module table with no registry field behind it), so the
+        adapter refuses the lines itself; ``gateway/stream_dispatch.py``
+        drops an event whose rendering is None. The remaining chatter
+        (interim commentary, heartbeats, streaming previews, the busy-ack
+        detail) has no adapter-side switch; the README lists the
+        ``display.platforms.relayapp`` keys that turn it off.
+        """
+        return None
+
     @staticmethod
     def _is_silence(content: str) -> bool:
         stripped = (content or "").strip()

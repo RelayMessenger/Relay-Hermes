@@ -141,6 +141,40 @@ gateway:
         reply_to_mode: auto
 ```
 
+### Display defaults
+
+Hermes keeps a built-in table of per-platform display defaults
+(`gateway/display_config.py`); its iMessage adapters (`bluebubbles`,
+`photon`) sit in the quiet tier there, with tool progress, interim
+commentary, heartbeats, and streaming previews off, because those inboxes
+cannot edit a message once sent. A plugin cannot add a row to that table, so
+`relayapp` inherits the global defaults, which were written for platforms
+that edit in place.
+
+The adapter itself refuses tool-progress lines (`format_tool_event` returns
+`None`). Everything else is a user setting. To read like iMessage, set these
+under `display.platforms.relayapp` in `~/.hermes/config.yaml` (key names from
+`hermes_cli/config_defaults.py` and `gateway/display_config.py`; an unset key
+falls through to the global `display.<key>`):
+
+```yaml
+display:
+  platforms:
+    relayapp:
+      tool_progress: off
+      interim_assistant_messages: false
+      long_running_notifications: false
+      streaming: false
+      busy_ack_detail: false
+      tool_preview_length: 0
+```
+
+`display.busy_input_mode` (default `interrupt`) is global, not per platform,
+and is left alone: a message that arrives while Hermes is mid-turn is folded
+into that turn. The adapter marks it Read at intake, leaves the reply
+unquoted, and settles its durable inbox row, so it reads as it does on
+iMessage.
+
 Relay resolves the token, API origin, chat allowlist, state directory, and
 delivery settings through Hermes's shared adapter credential reader. The primary
 profile uses its own process environment during unscoped startup. A secondary

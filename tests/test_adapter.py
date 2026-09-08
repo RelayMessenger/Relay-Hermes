@@ -486,6 +486,20 @@ def test_dispatch_settles_only_a_folded_event(
     assert inbox.retried == []
 
 
+def test_tool_progress_lines_are_eaten_for_relay(plugin, tmp_path):
+    """Relay bubbles cannot be edited, so tool chrome would land as its own
+    permanent message. Hermes drops an event the adapter renders as None."""
+    from gateway.platforms.base import BasePlatformAdapter
+    from gateway.stream_events import ToolCallChunk
+
+    adapter = make_adapter(plugin, tmp_path)
+    chunk = ToolCallChunk(tool_name="terminal", preview="ls")
+    # The base rendering is real chrome; this adapter refuses it.
+    assert BasePlatformAdapter.format_tool_event(adapter, chunk)
+    assert adapter.format_tool_event(chunk) is None
+    assert adapter.format_tool_event(chunk, mode="verbose", preview_max_len=0) is None
+
+
 def _event_with_message_id(plugin, adapter, event_id, message_id):
     from gateway.platforms.base import MessageEvent, MessageType
 
