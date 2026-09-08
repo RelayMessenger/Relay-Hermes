@@ -854,3 +854,109 @@ def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
     finally:
         profile_a._inbox.close()
         profile_b._inbox.close()
+
+
+def assert_batch_contract(plugin, calls):
+    for call in calls:
+        parts = call["parts"]
+        assert 1 <= len(parts) <= 100
+        assert sum(p["type"] == "media" and "url" in p for p in parts) <= 40
+        assert not any(a["type"] == b["type"] == "text"
+                       for a, b in zip(parts, parts[1:]))
+        assert all(plugin.utf16_len(p["value"]) <= 10_000
+                   for p in parts if p["type"] == "text")
+
+
+def test_standalone_long_paragraphs_and_fixed_clock_keys(plugin, monkeypatch):
+    import httpx
+    from gateway.config import PlatformConfig
+
+    requests = []
+    real_client = plugin.RelayClient
+
+    def respond(request):
+        import json
+        body = json.loads(request.content)
+        key = request.headers["Idempotency-Key"]
+        requests.append({"parts": body["message"]["parts"], "key": key})
+        return httpx.Response(200, json={"message": {"id": "first-id"}})
+
+    def client(token, base_url):
+        instance = real_client(token, base_url)
+        instance._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        return instance
+
+    monkeypatch.setattr(plugin, "RelayClient", client)
+    monkeypatch.setattr(plugin.time, "time_ns", lambda: 123456)
+    paragraphs = ["😀" * 5000, "b" * 9999, "last", "paragraph"]
+    result = asyncio.run(plugin._standalone_send(
+        PlatformConfig(extra={"token": "fixture"}), "chat-id", "\n\n".join(paragraphs)))
+    assert result.get("success"), result
+    assert_batch_contract(plugin, requests)
+    assert len(requests) == 3
+    original = list(requests)
+    requests.clear()
+    replay = asyncio.run(plugin._standalone_send(
+        PlatformConfig(extra={"token": "fixture"}), "chat-id", "\n\n".join(paragraphs)))
+    assert replay == result
+    assert requests == original
+    assert [r["key"] for r in requests] == [
+        f"hermes-cron-chat-id-123456-{i}" for i in range(3)]
+    assert "\n\n".join(p["value"] for r in requests for p in r["parts"]) == "\n\n".join(paragraphs)
+
+
+@pytest.mark.parametrize("uploaded,count,sizes", [(False, 41, [40, 1]),
+                                                   (True, 100, [100]),
+                                                   (True, 101, [100, 1])])
+def test_image_batch_caps_and_replay(plugin, tmp_path, monkeypatch, uploaded, count, sizes):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-image-batches")
+
+    async def upload(path):
+        return "01993d50-ef7b-7b37-886b-23fd80c7ec16", None
+
+    monkeypatch.setattr(adapter, "_upload_attachment", upload)
+    images = [(f"file:///fixture/{i}" if uploaded else f"https://files.example/{i}", "")
+              for i in range(count)]
+
+    async def run():
+        await adapter.on_processing_start(event)
+        await adapter.send_multiple_images(event.source.chat_id, images)
+        original = list(client.calls)
+        client.calls.clear()
+        await adapter.on_processing_start(event)
+        await adapter.send_multiple_images(event.source.chat_id, images)
+        return original
+
+    original = asyncio.run(run())
+    assert_batch_contract(plugin, original)
+    assert [len(c["parts"]) for c in original] == sizes
+    assert original == client.calls
+    assert len({c["idempotency_key"] for c in original}) == len(sizes)
+    assert sum(len(c["parts"]) for c in original) == count
+
+
+def test_shared_batching_mixed_boundaries_and_first_anchor(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-mixed-batches")
+    media = [{"type": "media", "url": f"https://files.example/{i}"} for i in range(41)]
+    attachment = {"type": "media", "attachment_id": "01993d50-ef7b-7b37-886b-23fd80c7ec16"}
+    parts = [{"type": "text", "value": "first"}, {"type": "text", "value": "paragraph"},
+             *media[:40], attachment, {"type": "text", "value": "😀" * 5000},
+             {"type": "text", "value": "next"}, media[40],
+             {"type": "text", "value": "last"}]
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter._commit(event.source.chat_id, parts, event.message_id)
+
+    assert asyncio.run(run()).success
+    assert_batch_contract(plugin, client.calls)
+    assert [p for c in client.calls for p in c["parts"]] == plugin._fold_parts(parts)
+    assert client.calls[0]["reply_to"] == {"message_id": event.message_id}
+    assert all(c["reply_to"] is None for c in client.calls[1:])
+    assert len({c["idempotency_key"] for c in client.calls}) == len(client.calls)
