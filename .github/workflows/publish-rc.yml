@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  EXPECTED_PACKAGE_VERSION: 1.0.0rc1
+  EXPECTED_PACKAGE_VERSION: 1.0.0rc2
   RELAY_OPENAPI_COMMIT: 99906995625ddc00348064a585ada1649313b0fc
   RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
