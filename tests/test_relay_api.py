@@ -571,6 +571,10 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
     )
     connections = []
     sleeps = []
+    ready_connections = []
+
+    async def on_ready():
+        ready_connections.append(len(connections))
 
     def connect(
         url,
@@ -597,6 +601,7 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
             connect_factory=connect,
             sleep=sleep,
             random_fn=lambda: 1.0,
+            on_ready=on_ready,
         ))
 
     assert raised.value.reason == "revoked"
@@ -617,6 +622,7 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
         (30.0, 60.0),
     ]
     assert sleeps == [0.5, 0.5]
+    assert ready_connections == [1, 2, 3]
 
 
 def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():

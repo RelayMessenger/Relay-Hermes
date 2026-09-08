@@ -936,6 +936,7 @@ async def run_websocket_loop(
     client: RelayClient,
     inbox: DurableInbox,
     on_accepted: Callable[[], Any] = lambda: None,
+    on_ready: Callable[[], Any] = lambda: None,
     on_full_sync: Optional[FullSyncHandler] = None,
     should_continue: Callable[[], bool] = lambda: True,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -960,9 +961,10 @@ async def run_websocket_loop(
                 ping_interval=HEARTBEAT_PING_INTERVAL_SECONDS,
                 ping_timeout=HEARTBEAT_PONG_TIMEOUT_SECONDS,
             ) as socket:
-                def mark_ready() -> None:
+                def mark_ready() -> Any:
                     nonlocal attempt
                     attempt = 0
+                    return on_ready()
 
                 await consume_websocket(
                     socket,

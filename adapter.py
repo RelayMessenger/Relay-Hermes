@@ -120,6 +120,7 @@ DEFAULT_REPLY_TO_MODE = "auto"
 # either way.
 GROUP_CHAT_POLICIES = {"mentions", "all"}
 DEFAULT_GROUP_CHAT_POLICY = "mentions"
+WEBSOCKET_READY_TIMEOUT_SECONDS = 30.0
 
 # Pinned Hermes ``gateway.slash_access.policy_for_source`` ignores
 # ``source.profile`` and reads only the process runner's primary config. There
@@ -402,6 +403,7 @@ class RelayAdapter(BasePlatformAdapter):
         self._receive_task: Optional[asyncio.Task] = None
         self._process_task: Optional[asyncio.Task] = None
         self._inbox_wake = asyncio.Event()
+        self._websocket_ready = asyncio.Event()
 
         # chat_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
@@ -468,7 +470,27 @@ class RelayAdapter(BasePlatformAdapter):
             self._inbox.close()
             return False
 
+        self._websocket_ready.clear()
+        self._running = True
         self._receive_task = asyncio.create_task(self._run_websocket())
+        ready_task = asyncio.create_task(self._websocket_ready.wait())
+        try:
+            await asyncio.wait(
+                {ready_task, self._receive_task},
+                timeout=WEBSOCKET_READY_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not self._websocket_ready.is_set() or self._receive_task.done():
+                if not self.has_fatal_error:
+                    logger.warning("[%s] WebSocket did not become ready", self.name)
+                await self.disconnect()
+                return False
+        except asyncio.CancelledError:
+            await self.disconnect()
+            raise
+        finally:
+            ready_task.cancel()
+            await asyncio.gather(ready_task, return_exceptions=True)
         self._process_task = asyncio.create_task(self._process_inbox())
         self._inbox_wake.set()
         self._mark_connected()
@@ -518,6 +540,7 @@ class RelayAdapter(BasePlatformAdapter):
                 client=self._client,
                 inbox=self._inbox,
                 on_accepted=self._inbox_wake.set,
+                on_ready=self._websocket_ready.set,
                 on_full_sync=self._on_full_sync,
                 should_continue=lambda: self._running,
                 log=lambda line: logger.warning("[%s] %s", self.name, line),
