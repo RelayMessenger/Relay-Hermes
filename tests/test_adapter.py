@@ -378,6 +378,76 @@ def test_read_is_sent_at_intake_before_any_processing_hook(plugin, tmp_path):
     assert client.reads == [inbound.chat_id], "processing start must not send a second Read"
 
 
+def test_auto_quote_ignores_a_folded_message_but_quotes_an_older_turn_starter(
+    plugin, tmp_path
+):
+    """Under Hermes's default busy_input_mode: interrupt a second message
+    that lands mid-turn is folded into the running turn: it never reaches
+    on_processing_start, and the reply stays anchored to the turn starter."""
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+
+    async def capture_dispatch(event):
+        pass
+
+    adapter._dispatch_turn = capture_dispatch
+
+    def inbound_with(message_id, event_id):
+        payload = relay_event(event_id)
+        payload["data"]["id"] = message_id
+        return api.parse_inbound(payload)
+
+    async def folded_then_reply():
+        # "Nice" starts a turn.
+        starter = message_event(plugin, adapter, "event-nice")
+        await adapter.on_processing_start(starter)
+        # "Whatsup gang" arrives mid-turn: intake runs, no processing hook.
+        folded = inbound_with("01993d50-ef7b-7b37-886b-23fd80c7ec99", "event-whatsup")
+        assert await adapter._on_inbound(folded) is True
+        # Hermes anchors the reply to the turn starter.
+        await adapter.send(chat_id, "hey!", reply_to=starter.message_id)
+
+    asyncio.run(folded_then_reply())
+    assert client.calls[-1]["reply_to"] is None
+
+    async def older_turn_starter():
+        first = message_event(plugin, adapter, "event-first")
+        await adapter.on_processing_start(first)
+        second = inbound_with("01993d50-ef7b-7b37-886b-23fd80c7ec98", "event-second")
+        assert await adapter._on_inbound(second) is True
+        await adapter.on_processing_start(
+            _event_with_message_id(plugin, adapter, "event-second", second.message_id)
+        )
+        # A reply that answers the FIRST message, which is no longer the last
+        # turn starter, still quotes it.
+        await adapter.send(chat_id, "about the first one", reply_to=first.message_id)
+
+    asyncio.run(older_turn_starter())
+    assert client.calls[-1]["reply_to"] == {"message_id": "01993d50-ef7b-7b37-886b-23fd80c7ec11"}
+
+
+def _event_with_message_id(plugin, adapter, event_id, message_id):
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    return MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=adapter.build_source(
+            chat_id="01993d50-ef7b-7b37-886b-23fd80c7ec10",
+            chat_name="Relay Chat",
+            chat_type="dm",
+            user_id="01993d50-ef7b-7b37-886b-23fd80c7ec12",
+            user_name="Advait",
+            message_id=message_id,
+        ),
+        message_id=message_id,
+        raw_message=relay_event(event_id),
+    )
+
+
 def test_failed_read_receipt_never_blocks_intake(plugin, tmp_path):
     api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)

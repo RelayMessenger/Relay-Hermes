@@ -754,11 +754,6 @@ class RelayAdapter(BasePlatformAdapter):
     async def _on_inbound(self, inbound: InboundRelayMessage) -> bool:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
         chat_id = inbound.chat_id
-        if chat_id and inbound.message_id:
-            if len(self._last_inbound) > 500:
-                self._last_inbound.pop(next(iter(self._last_inbound)), None)
-            self._last_inbound[chat_id] = inbound.message_id
-
         is_group = inbound.is_group
         cache = self._group_chats if is_group else self._direct_chats
         if len(cache) > 1000:
@@ -854,6 +849,14 @@ class RelayAdapter(BasePlatformAdapter):
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
         _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        # Only a message that actually started a turn moves the "auto" quote
+        # anchor. A message Hermes folded into a running turn never reaches
+        # this hook, so it does not; see _reply_anchor for the rule.
+        chat_id = str(event.source.chat_id or "")
+        if chat_id and event.message_id:
+            if len(self._last_inbound) > 500:
+                self._last_inbound.pop(next(iter(self._last_inbound)), None)
+            self._last_inbound[chat_id] = str(event.message_id)
 
     async def on_processing_complete(
         self,
@@ -1077,6 +1080,14 @@ class RelayAdapter(BasePlatformAdapter):
             return reply_to != self._last_inbound.get(chat_id)
         return True
 
+    # The "auto" quote rule. ``_last_inbound[chat_id]`` is the newest message
+    # that STARTED a Hermes turn (written in on_processing_start), not the
+    # newest message that arrived. Hermes anchors a reply to the message that
+    # started its turn, so a reply to the last turn-starter is unquoted, and
+    # a reply to an older turn-starter is quoted. A message Hermes folded into
+    # a running turn (default busy_input_mode: interrupt) never started a turn
+    # and never moves the anchor, so the reply that answers both the starter
+    # and the folded message lands unquoted, as it does on iMessage.
     def _reply_anchor(
         self, chat_id: str, reply_to: Optional[str]
     ) -> Optional[Dict[str, Any]]:
