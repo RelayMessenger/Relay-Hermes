@@ -449,49 +449,6 @@ class RecordingInbox:
         self.retried.append(event_id)
 
 
-@pytest.mark.parametrize(
-    "hermes_outcome,expect_completed",
-    [
-        ("folded", True),      # busy session, redirect swallowed the text
-        ("queued", False),     # busy session, event became the pending turn
-        ("overflow", False),   # busy session, accepted into the invisible FIFO
-        ("started", False),    # idle session, a turn started for this event
-    ],
-)
-def test_dispatch_settles_only_a_folded_event(
-    plugin, tmp_path, hermes_outcome, expect_completed
-):
-    """Hermes calls no processing hook for a message it folds into a running
-    turn, so the durable row would stay dispatched and replay on restart. An
-    event Hermes accepted anywhere is left for its own hooks to settle."""
-    adapter = make_adapter(plugin, tmp_path)
-    inbox = RecordingInbox()
-    adapter._inbox = inbox
-    event = message_event(plugin, adapter, "event-fold")
-    session_key = adapter._event_session_key(event)
-
-    async def fake_handle_message(incoming):
-        incoming._gateway_accepted = False
-        if hermes_outcome == "folded":
-            adapter._active_sessions[session_key] = asyncio.Event()
-        elif hermes_outcome == "queued":
-            adapter._active_sessions[session_key] = asyncio.Event()
-            adapter._pending_messages[session_key] = incoming
-            incoming._gateway_accepted = True
-        elif hermes_outcome == "overflow":
-            adapter._active_sessions[session_key] = asyncio.Event()
-            incoming._gateway_accepted = True
-        elif hermes_outcome == "started":
-            adapter._active_sessions[session_key] = asyncio.Event()
-            incoming._gateway_accepted = True
-
-    adapter.handle_message = fake_handle_message
-    asyncio.run(adapter._dispatch_turn(event))
-
-    assert inbox.completed == (["event-fold"] if expect_completed else [])
-    assert inbox.retried == []
-
-
 def test_tool_progress_lines_are_eaten_for_relay(plugin, tmp_path):
     """Relay bubbles cannot be edited, so tool chrome would land as its own
     permanent message. Hermes drops an event the adapter renders as None."""
@@ -1292,3 +1249,280 @@ def test_primary_multiplex_startup_uses_own_process_credentials(
         ss.set_multiplex_active(was_multiplex)
         ss.reset_secret_scope(secret_token)
         reset_hermes_home_override(home_token)
+
+
+# -- Settlement on quiescence, 409 reuse, and the quote rule (fold lifecycle) --
+
+
+def _relay_error(plugin_api, status, detail, code=1005):
+    from relay_hermes.relay_api import RelayResponse
+
+    return plugin_api.RelayClient._error_for(
+        "POST", "/v1/chats/x/messages",
+        RelayResponse(status, {
+            "success": False,
+            "error": {"status": status, "code": code, "message": detail,
+                      "doc_url": "https://docs.relayapp.im/error/codes"},
+        }),
+    )
+
+
+def _event_for(plugin, adapter, event_id, message_id):
+    return _event_with_message_id(plugin, adapter, event_id, message_id)
+
+
+def _busy_hermes(adapter, session_key, *, accept=None):
+    """Stand in for the pinned handle_message on a busy session.
+
+    ``accept`` is None for a redirect (nothing accepted, base.py:3505 never
+    runs), "pending" for the queued follow-up (base.py:3578), "debounce" for
+    queue-mode text buffered before the pending slot (base.py:3573)."""
+
+    async def fake_handle_message(incoming):
+        incoming._gateway_accepted = False
+        adapter._active_sessions[session_key] = asyncio.Event()
+        if accept == "pending":
+            adapter._pending_messages[session_key] = incoming
+            incoming._gateway_accepted = True
+        elif accept == "debounce":
+            from gateway.platforms.base import TextDebounceState
+
+            adapter._text_debounce_store()[session_key] = TextDebounceState(
+                event=incoming, task=None, first_ts=0.0, last_ts=0.0,
+            )
+
+    adapter.handle_message = fake_handle_message
+
+
+@pytest.mark.parametrize("accept", [None, "pending", "debounce"])
+def test_dispatch_settles_nothing_synchronously(plugin, tmp_path, accept):
+    """Whatever Hermes did with the event, _dispatch_turn touches no row."""
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    event = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    _busy_hermes(adapter, adapter._event_session_key(event), accept=accept)
+
+    asyncio.run(adapter._dispatch_turn(event))
+
+    assert inbox.completed == []
+    assert inbox.retried == []
+
+
+def test_follow_up_run_inside_the_first_turn_settles_at_that_turns_completion(
+    plugin, tmp_path
+):
+    """Message 2 lands while message 1's turn is starting: Hermes queues it
+    (pending, _gateway_accepted=True), then pops it and runs it as a
+    follow-up INSIDE message 1's handler call, so only message 1's
+    on_processing_complete ever fires. Its row must settle there."""
+    from gateway.platforms.base import ProcessingOutcome
+
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
+    second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    session_key = adapter._event_session_key(first)
+
+    async def run():
+        # message 1 starts a turn of its own.
+        async def idle_hermes(incoming):
+            incoming._gateway_accepted = True
+            adapter._active_sessions[session_key] = asyncio.Event()
+            await adapter.on_processing_start(incoming)
+
+        adapter.handle_message = idle_hermes
+        await adapter._dispatch_turn(first)
+        # message 2 is queued behind it.
+        _busy_hermes(adapter, session_key, accept="pending")
+        await adapter._dispatch_turn(second)
+        assert inbox.completed == []
+        # Hermes pops the pending slot and runs it inside message 1's turn
+        # (run_turn.py _run_agent_queued_followup), then completes message 1.
+        assert adapter._pending_messages.pop(session_key) is second
+        await adapter.on_processing_complete(first, ProcessingOutcome.SUCCESS)
+
+    asyncio.run(run())
+    assert inbox.completed == ["event-one", "event-two"]
+    assert inbox.retried == []
+    assert adapter._handed == {}
+
+
+@pytest.mark.parametrize("held", ["pending", "debounce"])
+def test_a_row_hermes_still_holds_is_not_settled_by_another_completion(
+    plugin, tmp_path, held
+):
+    """Hermes fires on_processing_complete BEFORE it flushes the debounce
+    buffer and pops the pending slot (base.py _process_message_background),
+    so at that moment a held follow-up is still Hermes's. It stays
+    dispatched and settles at its own completion."""
+    from gateway.platforms.base import ProcessingOutcome
+
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
+    second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    session_key = adapter._event_session_key(first)
+
+    async def run():
+        await adapter.on_processing_start(first)
+        _busy_hermes(adapter, session_key, accept=held)
+        await adapter._dispatch_turn(second)
+        await adapter.on_processing_complete(first, ProcessingOutcome.SUCCESS)
+        assert inbox.completed == ["event-one"]
+        # Its own turn, later.
+        adapter._pending_messages.pop(session_key, None)
+        adapter._text_debounce_store().pop(session_key, None)
+        await adapter.on_processing_start(second)
+        await adapter.on_processing_complete(second, ProcessingOutcome.SUCCESS)
+
+    asyncio.run(run())
+    assert inbox.completed == ["event-one", "event-two"]
+    assert inbox.retried == []
+
+
+def test_a_redirected_row_settles_at_the_running_turns_completion(plugin, tmp_path):
+    """busy_input_mode: interrupt with the model request already live folds
+    the text into that request; Hermes accepts nothing and calls no hook."""
+    from gateway.platforms.base import ProcessingOutcome
+
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
+    second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    session_key = adapter._event_session_key(first)
+
+    async def run():
+        await adapter.on_processing_start(first)
+        _busy_hermes(adapter, session_key, accept=None)
+        await adapter._dispatch_turn(second)
+        assert inbox.completed == []
+        await adapter.on_processing_complete(first, ProcessingOutcome.SUCCESS)
+
+    asyncio.run(run())
+    assert inbox.completed == ["event-one", "event-two"]
+
+
+def test_a_failed_turn_retries_only_its_own_row(plugin, tmp_path):
+    from gateway.platforms.base import ProcessingOutcome
+
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
+    second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    session_key = adapter._event_session_key(first)
+
+    async def run():
+        await adapter.on_processing_start(first)
+        _busy_hermes(adapter, session_key, accept=None)
+        await adapter._dispatch_turn(second)
+        await adapter.on_processing_complete(first, ProcessingOutcome.FAILURE)
+
+    asyncio.run(run())
+    assert inbox.retried == ["event-one"]
+    assert inbox.completed == []
+    assert list(adapter._handed[session_key]) == ["event-two"]
+
+
+def test_idempotency_reuse_is_delivery_not_failure(plugin, tmp_path):
+    """Relay 409 "Idempotency key was already used for different message
+    content." (Relay-Server messaging.ts:743) means the first send under this
+    key was committed. Reporting failure makes Hermes resend as plain text on
+    the next ordinal (base.py _send_with_retry) and land a duplicate."""
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-replay")
+    error = _relay_error(
+        api, 409, "Idempotency key was already used for different message content.",
+    )
+    assert api.is_idempotency_reuse(error) is True
+
+    async def raising_send(chat_id, parts, *, idempotency_key, reply_to=None, timeout=None):
+        client.calls.append({"idempotency_key": idempotency_key})
+        raise error
+
+    client.send_message = raising_send
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter.send(event.source.chat_id, "regenerated words")
+
+    result = asyncio.run(run())
+    assert result.success is True
+    assert result.message_id is None
+    assert [c["idempotency_key"] for c in client.calls] == ["reply-event-replay-0"]
+
+
+@pytest.mark.parametrize("status,detail", [
+    (409, "This Chat has no active recipient."),   # same code 1005, messaging.ts:905
+    (403, "Idempotency key was already used for different message content."),
+])
+def test_other_conflicts_still_fail(plugin, tmp_path, status, detail):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-conflict")
+    error = _relay_error(api, status, detail)
+    assert api.is_idempotency_reuse(error) is False
+
+    async def raising_send(chat_id, parts, *, idempotency_key, reply_to=None, timeout=None):
+        raise error
+
+    client.send_message = raising_send
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter.send(event.source.chat_id, "words")
+
+    result = asyncio.run(run())
+    assert result.success is False
+    assert f"HTTP {status}" in result.error
+
+
+def test_auto_quote_rule_newest_inbound_or_turn_starter_is_unquoted(plugin, tmp_path):
+    """No quote when the anchor is the newest received message OR the message
+    that started the current turn; a quote only when it is neither."""
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    adapter._dispatch_turn = _noop_dispatch
+    chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+    starter_id = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
+    newest_id = "01993d50-ef7b-7b37-886b-23fd80c7ec99"
+
+    def inbound_with(message_id, event_id):
+        payload = relay_event(event_id)
+        payload["data"]["id"] = message_id
+        return api.parse_inbound(payload)
+
+    async def run():
+        # "Nice LONG" starts the turn; "Whatsup gang" arrives mid-turn.
+        await adapter.on_processing_start(message_event(plugin, adapter, "event-nice"))
+        assert await adapter._on_inbound(inbound_with(newest_id, "event-whatsup")) is True
+        # Hermes's busy ack is anchored to the newest inbound: no quote.
+        await adapter.send(chat_id, "↪ Redirected current run.", reply_to=newest_id)
+        ack = client.calls[-1]["reply_to"]
+        # The turn's reply is anchored to the turn starter: no quote.
+        await adapter.send(chat_id, "1. The sea is vast.", reply_to=starter_id)
+        reply = client.calls[-1]["reply_to"]
+        # A reply to something older than both: quoted.
+        await adapter.send(chat_id, "about the old one", reply_to=OLDER_MESSAGE_ID)
+        old = client.calls[-1]["reply_to"]
+        return ack, reply, old
+
+    ack, reply, old = asyncio.run(run())
+    assert ack is None
+    assert reply is None
+    assert old == {"message_id": OLDER_MESSAGE_ID}
+
+
+async def _noop_dispatch(event):
+    pass
