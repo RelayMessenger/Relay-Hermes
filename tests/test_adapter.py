@@ -216,6 +216,74 @@ def test_concurrent_sends_share_turn_ordinals_without_crossing_turns(plugin, tmp
     assert keys[6:] == [f"reply-event-a-{ordinal}" for ordinal in range(3)]
 
 
+@pytest.mark.parametrize("outcome", ["ready", "auth", "timeout", "cancelled"])
+def test_connect_waits_for_websocket_ready_and_cleans_failed_startup(
+    plugin, tmp_path, monkeypatch, outcome,
+):
+    adapter = make_adapter(plugin, tmp_path)
+    closed = []
+    connected = []
+
+    class Client(FakeClient):
+        def __init__(self, *args):
+            super().__init__()
+
+        def open(self):
+            pass
+
+        async def aclose(self):
+            closed.append(True)
+
+    monkeypatch.setattr(plugin, "RelayClient", Client)
+    monkeypatch.setattr(plugin, "WEBSOCKET_READY_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(adapter, "_mark_connected", lambda: connected.append(True))
+
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def websocket(**kwargs):
+            entered.set()
+            await release.wait()
+            if outcome == "auth":
+                raise plugin.RelayApiError("rejected", kind="auth", status=401)
+            kwargs["on_ready"]()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(plugin, "run_websocket_loop", websocket)
+        startup = asyncio.create_task(adapter.connect())
+        await asyncio.wait_for(entered.wait(), 5)
+        try:
+            assert not startup.done()
+            assert not connected
+            if outcome == "cancelled":
+                startup.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await startup
+            else:
+                if outcome != "timeout":
+                    release.set()
+                assert await startup is (outcome == "ready")
+            if outcome == "ready":
+                assert connected == [True]
+                assert adapter._process_task is not None
+            else:
+                assert not connected
+                assert adapter._receive_task is None
+                assert adapter._process_task is None
+                assert adapter._client is None
+                assert closed == [True]
+                if outcome == "auth":
+                    assert adapter.fatal_error_code == "relay_unauthorized"
+        finally:
+            await adapter.disconnect()
+            if not startup.done():
+                startup.cancel()
+            await asyncio.gather(startup, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path):
     from gateway.platforms.base import ProcessingOutcome
 
