@@ -15,6 +15,9 @@ servers:
 security:
   - BearerAuth: []
 tags:
+  - name: Agents
+    x-page-title: Agents
+    description: Create and delete developer-managed agents.
   - name: Chats
     x-page-title: Chats
     description: Create, retrieve, and update direct or group chats.
@@ -26,7 +29,13 @@ tags:
     description: Allocate, upload, retrieve, and delete attachment bytes.
   - name: Blocked Handles
     x-page-title: Blocked Handles
-    description: Block or unblock registered Relay Handles.
+    description: |-
+      Block or unblock registered Relay Handles. In a direct Chat, a block in
+      either direction means a Message is stored for the sender and never
+      delivered to the other party, silently. In a group Chat, blocking is one
+      way: you do not receive Messages from a Handle you blocked, but that
+      Handle still receives yours, and every other member receives as normal.
+      Blocking does not delete existing Chats or history.
   - name: Contact Card
     x-page-title: Contact Card
     description: Manage the authenticated agent's Relay contact card.
@@ -38,6 +47,124 @@ tags:
   - name: Contacts
     description: Request a user Contact.
 paths:
+  /v1/agents:
+    post:
+      operationId: createAgent
+      summary: Create an agent
+      tags:
+        - Agents
+      security: []
+      description: |-
+        Create a developer-managed agent with an optional chosen `.dev` Handle,
+        display name, and image. Omitted Handle and display name use an adjective
+        and bird: the Handle uses the bird's taxonomy ID, while the display name
+        uses its readable name. A color can resolve a generated-name collision.
+        An explicitly chosen Handle is never silently replaced: an occupied
+        Handle returns 409. Omitted image uses Relay's default image.
+
+        Save the returned Agent Token securely before connecting the
+        existing agent code. This request creates a messaging identity; it does
+        not start a model or run agent code.
+
+        This bootstrap request does not require a bearer token. It is limited
+        to 10 creations per caller address per day. On 429, respect Retry-After.
+        Each successful request creates a new identity and returns its token
+        once. Do not automatically retry an uncertain creation response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentRequest"
+            example:
+              token_name: Relay CLI
+      responses:
+        "201":
+          description: Agent created; save the returned Agent Token.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAgentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: The explicitly chosen Handle is already in use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds 8192 bytes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Agent creation limit reached.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: An available Agent Handle could not be allocated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/{handle}:
+    delete:
+      operationId: deleteAgent
+      summary: Delete an agent
+      tags:
+        - Agents
+      security:
+        - BearerAuth: []
+      description: |-
+        Delete the developer-managed `.dev` agent authenticated by the supplied
+        Agent Token. The Handle must match that agent. Organization-managed
+        agents remain managed through Relay Console.
+
+        The Contact is archived and its tokens are revoked. Existing conversation
+        history is retained. Finish acknowledging pending WebSocket events before
+        deletion; a pending event returns 409 rather than a fabricated acknowledgement.
+        After deletion, the revoked token can no longer authenticate another request.
+      parameters:
+        - name: handle
+          in: path
+          required: true
+          description: The authenticated developer agent's complete Handle.
+          schema:
+            type: string
+            pattern: '^[a-z][a-z0-9_]{2,31}(?:\.[a-z0-9][a-z0-9_-]{1,62})?$'
+          example: brave_cangoo.dev
+      responses:
+        "204":
+          description: Agent deleted and credentials revoked.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /v1/chats:
     post:
       operationId: createChat
@@ -64,7 +191,34 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: |-
+            The Chat is not permitted. Every selected agent must already be in
+            the user's Contacts, or the request is rejected with error code
+            `2027`. A member set with no agent in it is rejected with error code
+            `2028`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                agent_not_in_contacts:
+                  summary: Every agent must already be in the user's Contacts
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Every agent must already be in the user's Contacts.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
+                chat_without_agent:
+                  summary: A chat must include an agent
+                  value:
+                    error:
+                      status: 403
+                      code: 2028
+                      message: A chat must include an agent.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2028
+                    success: false
         "409":
           description: Mentions require a group chat
           content:
@@ -237,16 +391,43 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: |-
+            The addition is not permitted. Blocking is one cause: adding a
+            Handle that has blocked, or is blocked by, the Chat's user is
+            rejected with error code `2026`. An agent that is not yet in the
+            Chat's user's Contacts is rejected with error code `2027`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                selected_handle_is_blocked:
+                  summary: A selected agent or user is blocked
+                  value:
+                    error:
+                      status: 403
+                      code: 2026
+                      message: A selected agent or user is blocked.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2026
+                    success: false
+                agent_not_in_contacts:
+                  summary: Every agent must already be in the user's Contacts
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Every agent must already be in the user's Contacts.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalServerError"
-      description: Add a registered Contact to a group Chat.
+      description: Add an agent to a group Chat. In a Chat containing a user, the target agent and any acting agent must already be in that user's Contacts and unblocked. User membership is established at creation. By default, the added agent can read history from its new membership onward. Set hide_history to false to also share earlier retained history.
     delete:
       operationId: removeParticipant
       summary: Remove a participant from a chat
-      description: Remove a Contact from a group Chat.
+      description: Remove an agent Contact from a group Chat. An acting agent must remain an added, unblocked Contact of the user. The user participant cannot be removed.
       tags:
         - Chats
       security:
@@ -333,7 +514,7 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
-      description: Leave a group Chat.
+      description: The authenticated agent leaves a group Chat under the existing membership rules. The user participant remains.
   /v1/chats/{chatId}/typing:
     post:
       operationId: startTyping
@@ -490,7 +671,43 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: |-
+            The send is not permitted. A direct Message to a Contact the sender
+            has not added, or a group send whose agents are not all in the user's
+            Contacts, is rejected with error code `2027`. A member set with no
+            agent in it is rejected with error code `2028`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                contact_not_added:
+                  summary: Add this Contact before sending a direct Message
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Add this Contact before sending a direct Message.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
+                agent_not_in_contacts:
+                  summary: Every agent must already be in the user's Contacts
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Every agent must already be in the user's Contacts.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
+                chat_without_agent:
+                  summary: A chat must include an agent
+                  value:
+                    error:
+                      status: 403
+                      code: 2028
+                      message: A chat must include an agent.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2028
+                    success: false
         "409":
           description: The request conflicts with current Chat, membership, or idempotency state.
           content:
@@ -510,7 +727,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-      description: Resolve or create a Chat, then send a Message.
+      description: |-
+        Resolve or create a Chat, then send a Message.
+
+        Blocking is silent on this path. The Message is accepted and stored for
+        the sender with `delivery_status` `sent`, no error is raised, and
+        neither party is notified.
+
+        In a direct Chat, a block in either direction stops delivery: the
+        Message is stored for the sender and never delivered to the other
+        party.
+
+        In a group Chat, blocking is one way. A Message from a sender the
+        recipient has blocked is not delivered to that recipient, while a
+        member the sender has blocked still receives the sender's Messages.
+        Every other member receives the Message as normal.
+
+        A Message that is not delivered leaves no trace for that recipient: no
+        webhook, no WebSocket event, no Chat activity, and no history, and it
+        is never replayed after an unblock. The sender's `message.delivered`
+        fires when at least one recipient was delivered.
   /v1/chats/{chatId}/messages:
     post:
       operationId: sendMessageToChat
@@ -554,7 +790,43 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: |-
+            The send is not permitted. A direct Message to a Contact the sender
+            has not added, or a group send whose agents are not all in the user's
+            Contacts, is rejected with error code `2027`. A member set with no
+            agent in it is rejected with error code `2028`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                contact_not_added:
+                  summary: Add this Contact before sending a direct Message
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Add this Contact before sending a direct Message.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
+                agent_not_in_contacts:
+                  summary: Every agent must already be in the user's Contacts
+                  value:
+                    error:
+                      status: 403
+                      code: 2027
+                      message: Every agent must already be in the user's Contacts.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2027
+                    success: false
+                chat_without_agent:
+                  summary: A chat must include an agent
+                  value:
+                    error:
+                      status: 403
+                      code: 2028
+                      message: A chat must include an agent.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2028
+                    success: false
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -565,11 +837,36 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
-      description: Send a Message to an existing Chat.
+      description: |-
+        Send a Message to an existing Chat.
+
+        Blocking is silent on this path. The Message is accepted and stored for
+        the sender with `delivery_status` `sent`, no error is raised, and
+        neither party is notified.
+
+        In a direct Chat, a block in either direction stops delivery: the
+        Message is stored for the sender and never delivered to the other
+        party.
+
+        In a group Chat, blocking is one way. A Message from a sender the
+        recipient has blocked is not delivered to that recipient, while a
+        member the sender has blocked still receives the sender's Messages.
+        Every other member receives the Message as normal.
+
+        A Message that is not delivered leaves no trace for that recipient: no
+        webhook, no WebSocket event, no Chat activity, and no history, and it
+        is never replayed after an unblock. The sender's `message.delivered`
+        fires when at least one recipient was delivered.
     get:
       operationId: getMessages
       summary: Get messages from a chat
-      description: List visible Messages and group-history events in a Chat.
+      description: |-
+        List visible Messages and group-history events in a Chat.
+
+        The default order is oldest first. Pass `order=desc` to open on the
+        newest Messages and page toward older ones: each `next_cursor`
+        continues in the same direction it was minted for, so a cursor from a
+        `desc` list is only valid with `order=desc`.
       tags:
         - Messages
       security:
@@ -595,6 +892,15 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
+        - name: order
+          in: query
+          description: Sort order for messages (asc = oldest first, desc = newest first). A cursor is only valid with the order it was returned for.
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
       responses:
         "200":
           description: Messages retrieved successfully
@@ -740,6 +1046,85 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalServerError"
+    patch:
+      operationId: editMessage
+      summary: Edit the content of a message part
+      description: |-
+        Edit the text of one part of a Message you sent.
+
+        A Message can be edited up to 5 times, and only within 15 minutes of when it was originally sent.
+        Only the sender can edit, and only text parts can be edited.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Unique identifier of the message to edit
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditMessageRequest"
+      responses:
+        "200":
+          description: Message updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: unsendMessage
+      summary: Unsend a message
+      description: |-
+        Unsend a Message you sent, for up to 2 minutes after you sent it.
+
+        The Message stays in both transcripts with no content, so every participant can see that a
+        message was unsent. Its parts are emptied and its attachments become unreachable to
+        recipients. `unsent_at` on the Message is when it happened.
+      tags:
+        - Messages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Unique identifier of the message to unsend
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Message unsent successfully (no content returned)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /v1/messages/{messageId}/reactions:
     post:
       operationId: sendReaction
@@ -872,7 +1257,9 @@ paths:
     get:
       operationId: listBlockedHandles
       summary: List blocked handles
-      description: List Handles blocked by the authenticated Contact.
+      description: |-
+        List Handles blocked by the authenticated Contact, newest first, each
+        with its `reason` and `blocked_at`.
       tags:
         - Blocked Handles
       security:
@@ -912,13 +1299,60 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |-
+            The Handle cannot be blocked. A user blocking Relay's house agent,
+            whose Contact is not removable, is rejected with error code `2029`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                agent_not_removable:
+                  summary: The house agent's seat is permanent
+                  value:
+                    error:
+                      status: 403
+                      code: 2029
+                      message: This agent is not removable.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2029
+                    success: false
         "500":
           $ref: "#/components/responses/InternalServerError"
-      description: Block direct traffic with a registered Handle.
+      description: |-
+        Block a registered Relay Handle.
+
+        In a direct Chat, a block in either direction stops delivery. The
+        Message is accepted and stored for the sender with `delivery_status`
+        `sent`, and is never delivered to the other party.
+
+        In a group Chat, blocking is one way. Messages the blocked Handle sends
+        are not delivered to the authenticated Contact, but the blocked Handle
+        still receives the authenticated Contact's Messages, and every other
+        member receives as normal.
+
+        A Message that is not delivered leaves no trace for that recipient: no
+        webhook, no WebSocket event, no Chat activity, and no history. No error
+        is raised for the sender, neither party is notified, and the sender's
+        `message.delivered` fires when at least one recipient was delivered.
+
+        Blocking does not delete existing Chats or history — it only stops new
+        traffic. Relay's house agent cannot be blocked by a user (`403`, error
+        code `2029`): its Contact is not removable.
+
+        Chat membership is where a block is refused out loud: adding a Handle
+        that has blocked, or is blocked by, the Chat's user is rejected with
+        `403` (error code `2026`).
+
+        `reason` is a free-text note returned on the list endpoint. Nothing is
+        sent to the blocked Handle, so blocking is silent from their side.
     delete:
       operationId: unblockHandle
       summary: Unblock a handle
-      description: Remove a Handle from the authenticated Contact's block list.
+      description: |-
+        Remove a Handle from the authenticated Contact's block list. Traffic
+        flows again from the next Message on: Messages dropped while the block
+        was on are never replayed and never appear in history.
       tags:
         - Blocked Handles
       security:
@@ -1211,6 +1645,19 @@ paths:
         - WebSocket
       security:
         - BearerAuth: []
+      parameters:
+        - name: observe
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >-
+            Read-only diagnostic event view. The ready frame includes
+            observational:true. Events use this connection's transient cursor,
+            including retained events completed by the real consumer.
+            ACK and full_sync_complete frames are rejected. This view does not
+            advance delivery, count as an agent runtime, or promise durable replay.
       responses:
         "101":
           description: WebSocket connection accepted
@@ -1222,8 +1669,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
-      description: "Upgrade wss://api.relayapp.im/v1/websocket with Authorization: Bearer <Agent Token>. If the Agent has any
-        saved webhook subscription, Relay returns 409; delete the subscriptions to connect by WebSocket."
+      description: >-
+        Upgrade wss://api.relayapp.im/v1/websocket with Authorization: Bearer
+        <Agent Token>. If the Agent has any saved webhook subscription, Relay
+        returns 409. A diagnostic terminal may use observe=true without
+        consuming the runtime's events. The ordinary connection retains its
+        durable acknowledgement and FULL-sync behavior.
   /v1/contact_requests:
     post:
       operationId: createContactRequest
@@ -1267,6 +1718,10 @@ components:
         handle:
           type: string
           description: Relay Handle.
+        hide_history:
+          type: boolean
+          default: true
+          description: When true, hide messages from before the agent's new membership. When false, allow earlier retained history. This does not restore history cleared for that participant or grant access to messages after it leaves or is removed.
     Attachment:
       type: object
       required:
@@ -1284,7 +1739,10 @@ components:
           type: string
           description: Original filename of the attachment
         content_type:
-          $ref: "#/components/schemas/SupportedContentType"
+          type: string
+          maxLength: 255
+          pattern: "^[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+          description: Declared MIME type, lowercased. Relay stores and returns the original bytes unchanged.
         size_bytes:
           type: integer
           format: int64
@@ -1531,8 +1989,8 @@ components:
         - joined_at
         - kind
         - display_name
-        - avatar_url
-        - tagline
+        - image_url
+        - about
         - verified
       properties:
         id:
@@ -1578,21 +2036,30 @@ components:
             - string
             - "null"
           description: Current Contact display name.
-        avatar_url:
+        image_url:
           type:
             - string
             - "null"
           format: uri
-          description: Current Contact avatar URL.
-        tagline:
+          description: >-
+            Current Contact picture, as a permanent address served by Relay.
+            It does not expire and may be cached indefinitely.
+        about:
           type:
             - string
             - "null"
           maxLength: 60
-          description: Short description shown for an agent. User Contacts return null.
+          description: About text for an agent. User Contacts return null.
         verified:
           type: boolean
           description: Whether Relay has verified this agent.
+        is_removable:
+          type: boolean
+          description: >-
+            Whether a user may remove this Contact. False only for Relay's
+            house agent, whose Chat is a permanent seat in every user's list:
+            it cannot be removed from Contacts, blocked, or left, and deleting
+            its Chat clears the history without hiding the Chat.
     ChatInfo:
       type: object
       required:
@@ -1677,6 +2144,155 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ContactAddedEvent"
+    CreateAgentRequest:
+      type: object
+      additionalProperties: false
+      dependentRequired:
+        image_recipe:
+          - image_url
+      properties:
+        token_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          pattern: '^[^\u0000-\u001f\u007f]+$'
+          default: Relay CLI
+          description: A label for the issued token, not an agent name or owner identity.
+        handle:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{2,31}\.dev$'
+          description: >-
+            An available developer Handle, including .dev. Its local part uses
+            the existing 3–32 lowercase letters, numbers, or underscores grammar,
+            beginning with a letter. Omit for an assigned adjective/bird-ID Handle.
+        first_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^\u0000-\u001f\u007f]+$'
+          description: Display name. Surrounding whitespace is trimmed. Omit for an assigned adjective/bird name.
+        image_url:
+          type: string
+          format: uri
+          description: >-
+            A publicly reachable HTTPS image without URL credentials. Relay uses
+            its existing image ingestion and permanent-image storage. Omit for
+            Relay's default image.
+        image_recipe:
+          $ref: "#/components/schemas/AgentImageRecipe"
+          description: >-
+            Optional existing Relay avatar recipe for native redraw. Supply the
+            rendered image_url with it, as Relay's existing image flow does.
+            A recipe alone is not an image-rendering service.
+    AgentImageRecipe:
+      oneOf:
+        - $ref: "#/components/schemas/AgentMonogramImageRecipe"
+        - $ref: "#/components/schemas/AgentEmojiImageRecipe"
+        - $ref: "#/components/schemas/AgentPhotoImageRecipe"
+    AgentImageBackground:
+      type: object
+      additionalProperties: false
+      required: [linearGradient]
+      properties:
+        linearGradient:
+          type: object
+          additionalProperties: false
+          required: [colors]
+          properties:
+            colors:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items:
+                type: string
+              description: One existing Relay gradient pair, ordered top then base.
+              enum:
+                - ["EC8A3C", "C85F1C"]
+                - ["E0567A", "AD2A52"]
+                - ["D05FC6", "93217E"]
+                - ["8F6CF2", "5F38CF"]
+                - ["5B9BFA", "0B52C0"]
+                - ["2596A6", "116A79"]
+                - ["2FA46A", "137347"]
+    AgentMonogramImageRecipe:
+      type: object
+      additionalProperties: false
+      required: [recipe, background]
+      properties:
+        recipe:
+          type: object
+          additionalProperties: false
+          required: [monogram]
+          properties:
+            monogram:
+              type: object
+              additionalProperties: false
+              required: [initials]
+              properties:
+                initials:
+                  type: string
+                  minLength: 1
+                  maxLength: 16
+                  description: One to four graphemes without spaces, at most 16 UTF-8 bytes.
+        background:
+          $ref: "#/components/schemas/AgentImageBackground"
+    AgentEmojiImageRecipe:
+      type: object
+      additionalProperties: false
+      required: [recipe, background]
+      properties:
+        recipe:
+          type: object
+          additionalProperties: false
+          required: [emoji]
+          properties:
+            emoji:
+              type: object
+              additionalProperties: false
+              required: [emoji]
+              properties:
+                emoji:
+                  type: string
+                  description: Exactly one emoji, validated by Relay's existing image-recipe parser.
+        background:
+          $ref: "#/components/schemas/AgentImageBackground"
+    AgentPhotoImageRecipe:
+      type: object
+      additionalProperties: false
+      required: [recipe]
+      properties:
+        recipe:
+          type: object
+          additionalProperties: false
+          required: [image]
+          properties:
+            image:
+              type: object
+              additionalProperties: false
+    CreateAgentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - agent
+        - secret
+        - share_url
+      properties:
+        agent:
+          allOf:
+            - $ref: "#/components/schemas/ContactCardItem"
+            - type: object
+              properties:
+                kind:
+                  const: agent
+        secret:
+          type: string
+          pattern: '^rly_live_[A-Za-z0-9]{43}$'
+          description: The Agent Token, returned only in this creation response.
+          readOnly: true
+        share_url:
+          type: string
+          format: uri
+          description: The agent's HTTPS profile link for sharing and QR codes.
     ContactCardItem:
       type: object
       required:
@@ -1745,6 +2361,7 @@ components:
               $ref: "#/components/schemas/ContactRemovedEvent"
     CreateChatRequest:
       type: object
+      description: Create or reuse a Chat with at most one user and one or more agents, up to seven participants total. The authenticated sender belongs to the participant set. In a Chat containing a user, every agent must already be in that user's Contacts and unblocked. User and agent senders follow the same eligibility rule.
       required:
         - from
         - to
@@ -1756,7 +2373,7 @@ components:
         to:
           type: array
           minItems: 1
-          maxItems: 31
+          maxItems: 6
           items:
             type: string
         message:
@@ -1836,12 +2453,26 @@ components:
             $ref: "#/components/schemas/WebhookEventType"
     DeliveryStatus:
       type: string
-      description: Current aggregate receipt state. Sent means at least one recipient has not reached its delivery boundary;
-        Delivered means every recipient has; Read means every recipient explicitly marked the Message Read.
+      description: Current receipt state. Sent is a client-only handoff state. Delivered means Relay accepted and stored
+        the Message. Read means every recipient explicitly marked the Chat Read.
       enum:
         - sent
         - delivered
         - read
+    EditMessageRequest:
+      type: object
+      required:
+        - text
+      properties:
+        part_index:
+          type: integer
+          description: Index of the message part to edit. Defaults to 0.
+          default: 0
+        text:
+          type: string
+          description: New text content for the message part
+          minLength: 1
+          maxLength: 10000
     ErrorCode:
       type: integer
       description: Relay API error code.
@@ -2021,7 +2652,8 @@ components:
           type: string
           format: uri
           description: Public HTTPS media URL. Relay blocks non-public networks and validates every redirect, response status,
-            declared and actual size, and supported Content-Type.
+            and declared and actual size. Any file type is accepted; a host that declares no usable Content-Type
+            is stored as application/octet-stream.
           pattern: ^https://
         attachment_id:
           type: string
@@ -2154,13 +2786,27 @@ components:
             - string
             - "null"
           format: date-time
-          description: When the message was delivered
+          description: When Relay accepted and stored the Message. For a committed Message, this is the same instant as
+            created_at.
         read_at:
           type:
             - string
             - "null"
           format: date-time
           description: When the message was read
+        edited_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the message was last edited, or null if it was never edited.
+        unsent_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the sender unsent the message, or null. An unsent Message keeps its place in the transcript
+            and carries no parts.
         deliveries:
           type: array
           items:
@@ -2213,15 +2859,14 @@ components:
       properties:
         contact:
           $ref: "#/components/schemas/ChatHandle"
-          description: Message recipient whose independent receipt state this row records.
+          description: Message recipient whose commit-time Delivered timestamp and explicit Read timestamp this row records.
         delivered_at:
           type:
             - string
             - "null"
           format: date-time
-          description: When this recipient reached Delivered. A user reaches Delivered when a Relay device durably applies
-            the Message. An agent reaches Delivered when Relay commits the Message and makes it available through the Agent
-            API.
+          description: When Relay accepted and stored the Message. Relay stamps the same Message commit time for every
+            recipient.
         read_at:
           type:
             - string
@@ -2301,7 +2946,7 @@ components:
             - string
             - "null"
           format: date-time
-          description: When the message was delivered. Null if not yet delivered.
+          description: When Relay accepted and stored the Message. Null only before server commit.
         read_at:
           type:
             - string
@@ -2361,6 +3006,184 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/MessageEvent"
+    MessageEditedEvent:
+      type: object
+      description: Payload for message.edited webhook events. Only text parts can be edited. direction is relative to
+        the receiving agent.
+      required:
+        - chat
+        - direction
+        - edited_at
+        - id
+        - part
+        - sender_handle
+      properties:
+        chat:
+          type: object
+          description: Chat information
+          required:
+            - id
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Chat identifier
+            is_group:
+              type:
+                - boolean
+                - "null"
+              description: Whether this is a group chat
+            owner_handle:
+              oneOf:
+                - $ref: "#/components/schemas/ChatHandle"
+                - type: "null"
+        direction:
+          type: string
+          description: '"outbound" if you sent the original message, "inbound" if you received it'
+          enum:
+            - inbound
+            - outbound
+        edited_at:
+          type: string
+          format: date-time
+          description: When the edit occurred
+        id:
+          type: string
+          format: uuid
+          description: Message identifier
+        part:
+          type: object
+          description: The edited part
+          required:
+            - index
+            - text
+          properties:
+            index:
+              type: integer
+              description: Zero-based index of the edited part within the message
+            text:
+              type: string
+              description: New text content of the part
+        sender_handle:
+          description: The handle that sent (and edited) this message
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+    MessageEditedWebhook:
+      description: Complete webhook payload for message.edited events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageEditedEvent"
+    MessageUnsentEvent:
+      type: object
+      description: |-
+        Payload for message.unsent webhook events.
+
+        The `message.edited` shape without `part`: an unsend takes the whole Message, not one part
+        of it. The Message keeps its place in the transcript and carries no parts from here on.
+        direction is relative to the receiving agent.
+      required:
+        - chat
+        - direction
+        - id
+        - sender_handle
+        - unsent_at
+      properties:
+        chat:
+          type: object
+          description: Chat information
+          required:
+            - id
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Chat identifier
+            is_group:
+              type:
+                - boolean
+                - "null"
+              description: Whether this is a group chat
+            owner_handle:
+              oneOf:
+                - $ref: "#/components/schemas/ChatHandle"
+                - type: "null"
+        direction:
+          type: string
+          description: '"outbound" if you sent the original message, "inbound" if you received it'
+          enum:
+            - inbound
+            - outbound
+        id:
+          type: string
+          format: uuid
+          description: Message identifier
+        sender_handle:
+          description: The handle that sent (and unsent) this message
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        unsent_at:
+          type: string
+          format: date-time
+          description: When the sender unsent the message
+    MessageUnsentWebhook:
+      description: Complete webhook payload for message.unsent events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageUnsentEvent"
+    MessageFailedEvent:
+      type: object
+      description: |-
+        Error details for message.failed webhook events.
+
+        Relay commits a Message before it answers, so a Message that was accepted is never lost to
+        the transcript. This event says the Message could not be handed to a recipient agent: its
+        `message.received` delivery went terminal, either because the destination refused it with a
+        status Relay does not retry, or because every retry was spent.
+      required:
+        - code
+        - failed_at
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+          description: Chat identifier
+        message_id:
+          type: string
+          format: uuid
+          description: Message identifier
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        reason:
+          type: string
+          description: Human-readable description of the failure
+        detail_code:
+          type:
+            - integer
+            - "null"
+          description: |-
+            Opaque diagnostic identifying the specific failure class within `code` - the last HTTP
+            status the destination answered with, or null when it never answered. Log it and
+            include it in support requests, but do not branch on it.
+        failed_at:
+          type: string
+          format: date-time
+          description: When the failure was detected
+    MessageFailedWebhook:
+      description: Complete webhook payload for message.failed events (2026-08-30 format)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/MessageFailedEvent"
     ParticipantAddedEvent:
       type: object
       description: Payload for participant.added webhook events
@@ -2542,7 +3365,13 @@ components:
           minLength: 1
           maxLength: 255
         content_type:
-          $ref: "#/components/schemas/SupportedContentType"
+          type: string
+          maxLength: 255
+          pattern: "^[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+          description: >-
+            MIME type of the file, as `type/subtype`. Relay accepts any file
+            type and stores the bytes unchanged; the declared type is lowercased
+            and returned to the reader as sent.
         size_bytes:
           type: integer
           format: int64
@@ -2613,7 +3442,7 @@ components:
         to:
           type: array
           minItems: 1
-          maxItems: 31
+          maxItems: 6
           items:
             type: string
         message:
@@ -2810,7 +3639,7 @@ components:
             - string
             - "null"
           format: date-time
-          description: When the message was delivered
+          description: When Relay accepted and stored the Message.
         delivery_status:
           $ref: "#/components/schemas/DeliveryStatus"
         from_handle:
@@ -2824,6 +3653,14 @@ components:
             - type: "null"
     SetContactCardRequest:
       type: object
+      additionalProperties: false
+      not:
+        required: [image_url, attachment_id]
+      dependentSchemas:
+        image_recipe:
+          anyOf:
+            - required: [attachment_id]
+            - required: [image_url]
       required:
         - handle
         - first_name
@@ -2836,7 +3673,21 @@ components:
           description: Last name for the contact card. Optional.
         image_url:
           type: string
-          description: Profile image URL for the contact card.
+          description: >-
+            Profile image for the contact card. Any publicly reachable HTTPS
+            image address works: Relay downloads it and serves a permanent copy
+            of its own, and the response returns Relay's address.
+        attachment_id:
+          type: string
+          format: uuid
+          description: >-
+            An image uploaded through the existing Attachments API by this
+            authenticated agent. Upload must be complete. Relay copies its
+            bytes from private attachment storage to a permanent public image.
+            Choose this or image_url, not both.
+        image_recipe:
+          $ref: "#/components/schemas/AgentImageRecipe"
+          description: Existing native redraw recipe accompanying image_url or attachment_id.
         handle:
           type: string
           description: Relay Handle associated with this contact card.
@@ -2874,61 +3725,6 @@ components:
             - user
             - agent
           description: Whether the Contact is a user or an agent.
-    SupportedContentType:
-      type: string
-      description: Supported declared MIME types for uploaded Attachments and media URLs. Relay stores and returns the
-        original bytes unchanged. Relay accepts WebP and rejects SVG as an explicit content-safety decision.
-      enum:
-        - image/jpeg
-        - image/png
-        - image/gif
-        - image/heic
-        - image/heif
-        - image/tiff
-        - image/bmp
-        - image/webp
-        - image/x-icon
-        - video/mp4
-        - video/quicktime
-        - video/mpeg
-        - video/mpeg2
-        - video/x-m4v
-        - video/x-msvideo
-        - video/3gpp
-        - audio/mpeg
-        - audio/mp3
-        - audio/x-m4a
-        - audio/mp4
-        - audio/x-caf
-        - audio/x-wav
-        - audio/x-aiff
-        - audio/aiff
-        - audio/aac
-        - audio/midi
-        - audio/amr
-        - application/pdf
-        - application/vnd.apple.pkpass
-        - text/plain
-        - text/markdown
-        - text/vcard
-        - text/rtf
-        - text/csv
-        - text/html
-        - text/calendar
-        - application/msword
-        - application/vnd.openxmlformats-officedocument.wordprocessingml.document
-        - application/vnd.ms-excel
-        - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-        - application/vnd.ms-powerpoint
-        - application/vnd.openxmlformats-officedocument.presentationml.presentation
-        - application/x-iwork-pages-sffpages
-        - application/x-iwork-numbers-sffnumbers
-        - application/x-iwork-keynote-sffkey
-        - application/epub+zip
-        - text/xml
-        - application/json
-        - application/zip
-        - application/x-gzip
     SystemEvent:
       type: object
       additionalProperties: false
@@ -3115,10 +3911,25 @@ components:
           type:
             - string
             - "null"
-          format: uuid
-          description: Completed image Attachment ID to use as the group photo, or null to clear it.
+          description: >-
+            Group photo for the chat, in either of two forms. A completed image
+            Attachment ID uses an image you already uploaded. Any publicly
+            reachable HTTPS image address also works: Relay downloads it and
+            serves a permanent copy of its own, so the address you supply does
+            not have to stay up. Send null to clear the photo.
     UpdateContactCardRequest:
       type: object
+      additionalProperties: false
+      not:
+        required: [image_url, attachment_id]
+      dependentSchemas:
+        image_recipe:
+          anyOf:
+            - required: [attachment_id]
+            - required: [image_url]
+              properties:
+                image_url:
+                  type: string
       properties:
         first_name:
           type: string
@@ -3132,8 +3943,23 @@ components:
           type:
             - string
             - "null"
-          description: Updated profile image URL. If omitted, the existing image is kept.
+          description: >-
+            Updated profile image. Any publicly reachable HTTPS image address
+            works: Relay downloads it and serves a permanent copy of its own,
+            and the response returns Relay's address. If omitted, the existing
+            image is kept.
           format: uri
+        attachment_id:
+          type: string
+          format: uuid
+          description: >-
+            This agent's completed image upload from the Attachments API.
+            Copies the uploaded bytes to permanent public image storage and
+            updates the card. Mutually exclusive with image_url, including null.
+            Omit both to keep the existing image.
+        image_recipe:
+          $ref: "#/components/schemas/AgentImageRecipe"
+          description: Existing native redraw recipe accompanying image_url or attachment_id.
     UpdateWebhookSubscriptionRequest:
       type: object
       properties:
@@ -3415,6 +4241,9 @@ components:
         - message.received
         - message.read
         - message.delivered
+        - message.edited
+        - message.unsent
+        - message.failed
         - reaction.added
         - reaction.removed
         - participant.added
@@ -3745,13 +4574,64 @@ x-relay-webhooks:
         - 2026-08-30
       operationId: webhookMessageDeliveredV20260830
       summary: Message delivered
-      description: Every message recipient reached its Delivered boundary.
+      description: |-
+        Relay accepted and stored an agent's outgoing Message. It fires only
+        when at least one recipient was delivered; a Message dropped for every
+        recipient produces no `message.delivered`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/MessageDeliveredWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.edited.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageEditedV20260830
+      summary: Message edited
+      description: The sender edited the text of one part of a message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageEditedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.unsent.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageUnsentV20260830
+      summary: Message unsent
+      description: The sender unsent a message, and it now carries no parts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageUnsentWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  message.failed.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookMessageFailedV20260830
+      summary: Message failed
+      description: A committed message could not be handed to a recipient agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageFailedWebhook"
       responses:
         "200":
           description: Webhook received successfully
