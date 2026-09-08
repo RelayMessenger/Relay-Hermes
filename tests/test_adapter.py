@@ -117,6 +117,12 @@ def relay_event(event_id: str = "event-id") -> Dict[str, Any]:
     }
 
 
+# A message older than the turn starter. Under the default "auto" quote
+# rule a reply to the turn starter itself is unquoted, so tests that pin
+# where the anchor lands answer this older message instead.
+OLDER_MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec01"
+
+
 def message_event(plugin, adapter, event_id: str):
     from gateway.platforms.base import MessageEvent, MessageType
 
@@ -150,19 +156,19 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
         first = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         second = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         # A processing retry starts the same logical turn from ordinal zero.
         await adapter.on_processing_start(event)
         retried = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         return first, second, retried
 
@@ -177,7 +183,7 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
         "parts": [
             {"type": "text", "value": "one\n\ntwo"},
         ],
-        "reply_to": {"message_id": event.message_id},
+        "reply_to": {"message_id": OLDER_MESSAGE_ID},
         "timeout": None,
     }
     assert {key: value for key, value in client.calls[0].items()
@@ -349,7 +355,9 @@ def test_inbox_dispatches_agent_sender_like_user_sender(
     adapter._inbox.close()
 
 
-def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
+def test_read_is_sent_at_intake_before_any_processing_hook(plugin, tmp_path):
+    """A message Hermes folds into a running turn never reaches
+    on_processing_start, so Read must already be on the wire at intake."""
     api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)
     client = FakeClient()
@@ -363,12 +371,189 @@ def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
     inbound = api.parse_inbound(relay_event("event-read"))
     assert inbound is not None
 
-    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    async def intake_only():
+        assert await adapter._on_inbound(inbound) is True
+        # Let the fire-and-forget receipt task run; no processing hook yet.
+        await asyncio.sleep(0)
+        return list(client.reads)
+
+    assert asyncio.run(intake_only()) == [inbound.chat_id]
     assert len(dispatched) == 1
-    assert client.reads == []
 
     asyncio.run(adapter.on_processing_start(dispatched[0]))
-    assert client.reads == [inbound.chat_id]
+    assert client.reads == [inbound.chat_id], "processing start must not send a second Read"
+
+
+def test_auto_quote_ignores_a_folded_message_but_quotes_an_older_turn_starter(
+    plugin, tmp_path
+):
+    """Under Hermes's default busy_input_mode: interrupt a second message
+    that lands mid-turn is folded into the running turn: it never reaches
+    on_processing_start, and the reply stays anchored to the turn starter."""
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+
+    async def capture_dispatch(event):
+        pass
+
+    adapter._dispatch_turn = capture_dispatch
+
+    def inbound_with(message_id, event_id):
+        payload = relay_event(event_id)
+        payload["data"]["id"] = message_id
+        return api.parse_inbound(payload)
+
+    async def folded_then_reply():
+        # "Nice" starts a turn.
+        starter = message_event(plugin, adapter, "event-nice")
+        await adapter.on_processing_start(starter)
+        # "Whatsup gang" arrives mid-turn: intake runs, no processing hook.
+        folded = inbound_with("01993d50-ef7b-7b37-886b-23fd80c7ec99", "event-whatsup")
+        assert await adapter._on_inbound(folded) is True
+        # Hermes anchors the reply to the turn starter.
+        await adapter.send(chat_id, "hey!", reply_to=starter.message_id)
+
+    asyncio.run(folded_then_reply())
+    assert client.calls[-1]["reply_to"] is None
+
+    async def older_turn_starter():
+        first = message_event(plugin, adapter, "event-first")
+        await adapter.on_processing_start(first)
+        second = inbound_with("01993d50-ef7b-7b37-886b-23fd80c7ec98", "event-second")
+        assert await adapter._on_inbound(second) is True
+        await adapter.on_processing_start(
+            _event_with_message_id(plugin, adapter, "event-second", second.message_id)
+        )
+        # A reply that answers the FIRST message, which is no longer the last
+        # turn starter, still quotes it.
+        await adapter.send(chat_id, "about the first one", reply_to=first.message_id)
+
+    asyncio.run(older_turn_starter())
+    assert client.calls[-1]["reply_to"] == {"message_id": "01993d50-ef7b-7b37-886b-23fd80c7ec11"}
+
+
+class RecordingInbox:
+    """Stands in for the SQLite inbox: records lifecycle calls only."""
+
+    def __init__(self) -> None:
+        self.completed: List[str] = []
+        self.retried: List[str] = []
+
+    def complete(self, event_id: str, *, ignored: bool = False) -> None:
+        self.completed.append(event_id)
+
+    def retry(self, event_id: str, error: str) -> None:
+        self.retried.append(event_id)
+
+
+@pytest.mark.parametrize(
+    "hermes_outcome,expect_completed",
+    [
+        ("folded", True),      # busy session, redirect swallowed the text
+        ("queued", False),     # busy session, event became the pending turn
+        ("overflow", False),   # busy session, accepted into the invisible FIFO
+        ("started", False),    # idle session, a turn started for this event
+    ],
+)
+def test_dispatch_settles_only_a_folded_event(
+    plugin, tmp_path, hermes_outcome, expect_completed
+):
+    """Hermes calls no processing hook for a message it folds into a running
+    turn, so the durable row would stay dispatched and replay on restart. An
+    event Hermes accepted anywhere is left for its own hooks to settle."""
+    adapter = make_adapter(plugin, tmp_path)
+    inbox = RecordingInbox()
+    adapter._inbox = inbox
+    event = message_event(plugin, adapter, "event-fold")
+    session_key = adapter._event_session_key(event)
+
+    async def fake_handle_message(incoming):
+        incoming._gateway_accepted = False
+        if hermes_outcome == "folded":
+            adapter._active_sessions[session_key] = asyncio.Event()
+        elif hermes_outcome == "queued":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            adapter._pending_messages[session_key] = incoming
+            incoming._gateway_accepted = True
+        elif hermes_outcome == "overflow":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            incoming._gateway_accepted = True
+        elif hermes_outcome == "started":
+            adapter._active_sessions[session_key] = asyncio.Event()
+            incoming._gateway_accepted = True
+
+    adapter.handle_message = fake_handle_message
+    asyncio.run(adapter._dispatch_turn(event))
+
+    assert inbox.completed == (["event-fold"] if expect_completed else [])
+    assert inbox.retried == []
+
+
+def test_tool_progress_lines_are_eaten_for_relay(plugin, tmp_path):
+    """Relay bubbles cannot be edited, so tool chrome would land as its own
+    permanent message. Hermes drops an event the adapter renders as None."""
+    from gateway.platforms.base import BasePlatformAdapter
+    from gateway.stream_events import ToolCallChunk
+
+    adapter = make_adapter(plugin, tmp_path)
+    chunk = ToolCallChunk(tool_name="terminal", preview="ls")
+    # The base rendering is real chrome; this adapter refuses it.
+    assert BasePlatformAdapter.format_tool_event(adapter, chunk)
+    assert adapter.format_tool_event(chunk) is None
+    assert adapter.format_tool_event(chunk, mode="verbose", preview_max_len=0) is None
+
+
+def _event_with_message_id(plugin, adapter, event_id, message_id):
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    return MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=adapter.build_source(
+            chat_id="01993d50-ef7b-7b37-886b-23fd80c7ec10",
+            chat_name="Relay Chat",
+            chat_type="dm",
+            user_id="01993d50-ef7b-7b37-886b-23fd80c7ec12",
+            user_name="Advait",
+            message_id=message_id,
+        ),
+        message_id=message_id,
+        raw_message=relay_event(event_id),
+    )
+
+
+def test_failed_read_receipt_never_blocks_intake(plugin, tmp_path):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+
+    async def failing_mark_read(chat_id):
+        raise api.RelayApiError("read failed")
+
+    client.mark_read = failing_mark_read
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    inbound = api.parse_inbound(relay_event("event-read-fail"))
+
+    async def run():
+        assert await adapter._on_inbound(inbound) is True
+        tasks = list(adapter._read_tasks)
+        assert len(tasks) == 1
+        await asyncio.sleep(0)
+        # The receipt failure is logged and swallowed inside the task, never
+        # left as an unretrieved exception and never raised into intake.
+        assert tasks[0].done() and tasks[0].exception() is None
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
 
 
 def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
@@ -507,12 +692,12 @@ def test_long_text_batches_never_post_adjacent_text_parts_and_retry_keys_are_sta
     async def run():
         await adapter.on_processing_start(event)
         first = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
-                                   reply_to=event.message_id)
+                                   reply_to=OLDER_MESSAGE_ID)
         original = list(client.calls)
         client.calls.clear()
         await adapter.on_processing_start(event)
         replayed = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
-                                      reply_to=event.message_id)
+                                      reply_to=OLDER_MESSAGE_ID)
         return first, replayed, original
 
     first, replayed, original = asyncio.run(run())
@@ -520,7 +705,7 @@ def test_long_text_batches_never_post_adjacent_text_parts_and_retry_keys_are_sta
     assert len(original) == 2
     assert original == client.calls
     assert len({call["idempotency_key"] for call in original}) == 2
-    assert original[0]["reply_to"] == {"message_id": event.message_id}
+    assert original[0]["reply_to"] == {"message_id": OLDER_MESSAGE_ID}
     assert original[1]["reply_to"] is None
     assert "\n\n".join(part["value"] for call in original for part in call["parts"]) == "\n\n".join(paragraphs)
     for call in original:
@@ -1050,12 +1235,12 @@ def test_shared_batching_mixed_boundaries_and_first_anchor(plugin, tmp_path):
 
     async def run():
         await adapter.on_processing_start(event)
-        return await adapter._commit(event.source.chat_id, parts, event.message_id)
+        return await adapter._commit(event.source.chat_id, parts, OLDER_MESSAGE_ID)
 
     assert asyncio.run(run()).success
     assert_batch_contract(plugin, client.calls)
     assert [p for c in client.calls for p in c["parts"]] == plugin._fold_parts(parts)
-    assert client.calls[0]["reply_to"] == {"message_id": event.message_id}
+    assert client.calls[0]["reply_to"] == {"message_id": OLDER_MESSAGE_ID}
     assert all(c["reply_to"] is None for c in client.calls[1:])
     assert len({c["idempotency_key"] for c in client.calls}) == len(client.calls)
 

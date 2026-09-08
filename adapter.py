@@ -407,6 +407,9 @@ class RelayAdapter(BasePlatformAdapter):
 
         # chat_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
+        # Fire-and-forget Read receipts. asyncio keeps only weak references
+        # to tasks, so the set holds each one until it finishes.
+        self._read_tasks: set = set()
         # Chat kind, learned directly from each Relay Message event.
         self._group_chats: set = set()
         self._direct_chats: set = set()
@@ -751,11 +754,6 @@ class RelayAdapter(BasePlatformAdapter):
     async def _on_inbound(self, inbound: InboundRelayMessage) -> bool:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
         chat_id = inbound.chat_id
-        if chat_id and inbound.message_id:
-            if len(self._last_inbound) > 500:
-                self._last_inbound.pop(next(iter(self._last_inbound)), None)
-            self._last_inbound[chat_id] = inbound.message_id
-
         is_group = inbound.is_group
         cache = self._group_chats if is_group else self._direct_chats
         if len(cache) > 1000:
@@ -816,21 +814,49 @@ class RelayAdapter(BasePlatformAdapter):
             media_types=media_kinds,
         )
 
+        # Read at intake, the moment the message is accepted for Hermes, as
+        # the BlueBubbles adapter does for iMessage (mark_read right after
+        # handing the event over, before any busy routing). Hermes folds a
+        # message that arrives mid-turn into the running turn under its
+        # default busy_input_mode: interrupt and never calls a processing
+        # hook for it, so a Read tied to on_processing_start left every
+        # folded message at Delivered forever. Fire-and-forget: a failed
+        # receipt never blocks intake.
+        self._mark_read_in_background(chat_id)
         await self._dispatch_turn(event)
         return True
 
+    def _mark_read_in_background(self, chat_id: str) -> None:
+        if self._client is None or not chat_id:
+            return
+        task = asyncio.create_task(self._mark_read(chat_id))
+        self._read_tasks.add(task)
+        task.add_done_callback(self._read_tasks.discard)
+
+    async def _mark_read(self, chat_id: str) -> None:
+        try:
+            await self._client.mark_read(chat_id)
+        except Exception as exc:  # noqa: BLE001 - a receipt never breaks intake
+            logger.debug("[%s] Read receipt failed: %s", self.name, exc)
+
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Bind the turn and send Read when Hermes actually starts processing."""
+        """Bind the turn when Hermes actually starts processing.
+
+        Read is not sent here: this hook never runs for a message Hermes
+        folded into an already-running turn. Intake sends it instead.
+        """
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
         _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        # Only a message that actually started a turn moves the "auto" quote
+        # anchor. A message Hermes folded into a running turn never reaches
+        # this hook, so it does not; see _reply_anchor for the rule.
         chat_id = str(event.source.chat_id or "")
-        if self._client is not None and chat_id:
-            try:
-                await self._client.mark_read(chat_id)
-            except RelayApiError as exc:
-                logger.debug("[%s] Read receipt failed: %s", self.name, exc)
+        if chat_id and event.message_id:
+            if len(self._last_inbound) > 500:
+                self._last_inbound.pop(next(iter(self._last_inbound)), None)
+            self._last_inbound[chat_id] = str(event.message_id)
 
     async def on_processing_complete(
         self,
@@ -861,6 +887,47 @@ class RelayAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         finally:
             _TURN_EVENT.reset(token)
+        if event_id and self._folded_into_running_turn(event):
+            # No processing hook will ever run for this event, so nothing
+            # else can settle its durable row. Left dispatched, a restart
+            # requeues it (state.py open()) and Hermes answers it twice.
+            logger.debug(
+                "[%s] event %s folded into the running turn", self.name, event_id,
+            )
+            self._inbox.complete(event_id)
+
+    def _folded_into_running_turn(self, event: MessageEvent) -> bool:
+        """Did Hermes fold ``event`` into a turn that was already running?
+
+        Hermes has no hook for a fold (pinned b2aa855: handle_message routes
+        a busy session to _handle_message_while_active, which returns as
+        soon as the busy handler returns True and never enters
+        _process_message_background, where both processing hooks live). The
+        interim signal is read from the base adapter's own state after
+        handle_message returns:
+
+        - the session is still busy (``_active_sessions``, base.py:1838);
+        - the event was not queued as the next turn (``_pending_messages``,
+          base.py:1839);
+        - and Hermes did not accept it anywhere: ``event._gateway_accepted``
+          is reset to False on entry (base.py:3482) and set True only when a
+          turn starts for it (base.py:3505), when it is queued in the pending
+          slot (base.py:3566, 3578; run_busy.py:314) or in the gateway's
+          overflow list, which this adapter cannot see (run_busy.py:55). A
+          successful redirect or steer sets nothing.
+
+        An event Hermes accepted somewhere is never reported folded: it has
+        or will have its own turn and its own on_processing_complete. Losing
+        a message is worse than replaying one. The clean fix is upstream: a
+        processing-complete call for a folded event from
+        _handle_message_while_active.
+        """
+        if getattr(event, "_gateway_accepted", False):
+            return False
+        session_key = self._event_session_key(event)
+        if session_key not in self._active_sessions:
+            return False
+        return self._pending_messages.get(session_key) is not event
 
     async def _ingest_media(
         self, message: Dict[str, Any]
@@ -964,10 +1031,17 @@ class RelayAdapter(BasePlatformAdapter):
         # allocation from its increment.
         next_ordinal = entry.next_ordinal
         entry.next_ordinal += 1
-        # A retry can regenerate different words. The logical operation is
-        # still event + send ordinal; changing the key with the body could
-        # create a duplicate message instead of surfacing an idempotency
-        # conflict.
+        # The key is event + the ordinal of this send within the turn
+        # attempt, never the body: a retried attempt can regenerate different
+        # words for the same logical send. Since PR 8 every send() call takes
+        # the next ordinal, so a Hermes processing retry (on_processing_start
+        # again, counter back at zero) reproduces the same key only while it
+        # makes the same sends in the same order. Any extra send in the first
+        # attempt shifts every later ordinal: a long-running notice after
+        # Hermes's 180 s HERMES_AGENT_NOTIFY_INTERVAL (gateway/run_turn.py),
+        # a _send_with_retry re-call (gateway/platforms/base.py), or a busy
+        # ack. A retry that ran past one of those lands on a different key,
+        # and Relay stores a new message instead of returning the old one.
         return reply_idempotency_key(entry.event_id, next_ordinal)
 
     async def send(
@@ -1000,6 +1074,23 @@ class RelayAdapter(BasePlatformAdapter):
         if not parts:
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
+
+    def format_tool_event(self, event: Any, *, mode: str = "all", preview_max_len: int = 40):
+        """Eat tool-progress chrome.
+
+        Relay bubbles are permanent and cannot be edited, so every tool line
+        the base adapter would render ("⚙️ terminal ...") lands as its own
+        message beside the answer. Hermes has no plugin-side way to declare
+        the quiet defaults its built-in iMessage adapters get
+        (``_PLATFORM_DEFAULTS`` in gateway/display_config.py at b2aa855 is
+        a private module table with no registry field behind it), so the
+        adapter refuses the lines itself; ``gateway/stream_dispatch.py``
+        drops an event whose rendering is None. The remaining chatter
+        (interim commentary, heartbeats, streaming previews, the busy-ack
+        detail) has no adapter-side switch; the README lists the
+        ``display.platforms.relayapp`` keys that turn it off.
+        """
+        return None
 
     @staticmethod
     def _is_silence(content: str) -> bool:
@@ -1054,6 +1145,14 @@ class RelayAdapter(BasePlatformAdapter):
             return reply_to != self._last_inbound.get(chat_id)
         return True
 
+    # The "auto" quote rule. ``_last_inbound[chat_id]`` is the newest message
+    # that STARTED a Hermes turn (written in on_processing_start), not the
+    # newest message that arrived. Hermes anchors a reply to the message that
+    # started its turn, so a reply to the last turn-starter is unquoted, and
+    # a reply to an older turn-starter is quoted. A message Hermes folded into
+    # a running turn (default busy_input_mode: interrupt) never started a turn
+    # and never moves the anchor, so the reply that answers both the starter
+    # and the folded message lands unquoted, as it does on iMessage.
     def _reply_anchor(
         self, chat_id: str, reply_to: Optional[str]
     ) -> Optional[Dict[str, Any]]:
