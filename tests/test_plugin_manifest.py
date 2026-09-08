@@ -230,7 +230,7 @@ def test_reusable_ci_covers_full_release_compatibility():
     assert text.count(OPENAPI_RELATIVE_PATH) == 1
     assert 'python scripts/check-openapi.py "$RELAY_OPENAPI_SNAPSHOT"' in text
     assert "setuptools==84.0.0" in text
-    assert "build==1.3.0" in text
+    assert "build==1.6.0" in text
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])
