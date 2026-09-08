@@ -204,3 +204,24 @@ def test_check_tree_refuses_a_manifest_that_disagrees(tmp_path):
 
 def test_the_real_tree_is_consistent():
     assert rv.check_tree(SCRIPT.parents[1]) == rv.read_tree(SCRIPT.parents[1])[0]
+
+
+def test_verify_dist_hands_twine_absolute_paths_whatever_the_cwd(tmp_path, monkeypatch):
+    dist = tmp_path / "release" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "relay_hermes-1.0.0rc3.dev0-py3-none-any.whl").write_bytes(b"w")
+    (dist / "relay_hermes-1.0.0rc3.dev0.tar.gz").write_bytes(b"s")
+    seen = []
+    monkeypatch.setattr(rv, "run", lambda args, cwd: seen.append((args, cwd)))
+    monkeypatch.chdir(tmp_path)
+    rv.verify_dist(Path("release/dist"), "1.0.0rc3.dev0", None)
+    [(args, cwd)] = seen
+    assert args[1:5] == ["-m", "twine", "check", "--strict"]
+    files = [Path(item) for item in args[5:]]
+    assert len(files) == 2
+    assert all(path.is_absolute() and path.is_file() for path in files), files
+    assert all(path.is_file() for path in files) and Path(cwd).is_absolute()
+    # Any extra file in the directory is refused before twine runs.
+    (dist / "stray.txt").write_bytes(b"x")
+    with pytest.raises(SystemExit, match="expected exactly"):
+        rv.verify_dist(Path("release/dist"), "1.0.0rc3.dev0", None)
