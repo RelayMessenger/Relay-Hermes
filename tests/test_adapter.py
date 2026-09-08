@@ -777,6 +777,8 @@ def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
         try:
             seed = plugin._env_enablement()
             if seed is None:
+                assert plugin.check_requirements() is False
+                assert plugin.validate_config(PlatformConfig()) is False
                 return None, None
             config = PlatformConfig(extra=seed)
             return plugin.RelayAdapter(config), config
@@ -960,3 +962,52 @@ def test_shared_batching_mixed_boundaries_and_first_anchor(plugin, tmp_path):
     assert client.calls[0]["reply_to"] == {"message_id": event.message_id}
     assert all(c["reply_to"] is None for c in client.calls[1:])
     assert len({c["idempotency_key"] for c in client.calls}) == len(client.calls)
+
+
+@pytest.mark.parametrize("token", ["primary-relay-token", None])
+def test_primary_multiplex_startup_uses_own_process_credentials(
+    plugin, tmp_path, monkeypatch, token,
+):
+    from types import SimpleNamespace
+
+    from agent import secret_scope as ss
+    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from gateway.platform_registry import PlatformEntry, platform_registry
+    from gateway.run import GatewayRunner
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("RELAY_STATE_DIR", str(tmp_path / "relay"))
+    monkeypatch.setenv("RELAY_ALLOWED_CONTACTS", "primary-contact")
+    monkeypatch.setenv("RELAY_BASE_URL", "https://api.relayapp.im")
+    if token is None:
+        monkeypatch.delenv("RELAY_AGENT_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("RELAY_AGENT_TOKEN", token)
+    home_token = set_hermes_home_override(str(tmp_path))
+    secret_token = ss.set_secret_scope(None)
+    was_multiplex = ss.is_multiplex_active()
+    previous_entry = platform_registry.get("relayapp")
+    ss.set_multiplex_active(True)
+    try:
+        plugin.register(SimpleNamespace(
+            register_platform=lambda **kwargs: platform_registry.register(PlatformEntry(**kwargs)),
+        ))
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = GatewayConfig(multiplex_profiles=True)
+        adapter = runner._create_adapter(Platform("relayapp"), PlatformConfig(enabled=True))
+        if token is None:
+            assert adapter is None
+        else:
+            assert adapter is not None
+            assert adapter._token == token
+            assert adapter._allowed_contacts == {"primary-contact"}
+            assert adapter._inbox.path.parent == tmp_path / "relay"
+        assert ss.current_secret_scope() is None
+    finally:
+        if previous_entry is not None:
+            platform_registry.register(previous_entry)
+        else:
+            platform_registry.unregister("relayapp")
+        ss.set_multiplex_active(was_multiplex)
+        ss.reset_secret_scope(secret_token)
+        reset_hermes_home_override(home_token)

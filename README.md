@@ -140,9 +140,10 @@ gateway:
 ```
 
 Relay resolves the token, API origin, chat allowlist, state directory, and
-delivery settings through Hermes's active profile secret scope. In a
-multiplexed gateway, a missing value never falls through to another profile's
-process environment. The default state path is under the active profile home,
+delivery settings through Hermes's shared adapter credential reader. The primary
+profile uses its own process environment during unscoped startup. A secondary
+profile's installed secret scope remains authoritative: a missing value never
+falls through to the primary profile's process environment. The default state path is under the active profile home,
 so profile inboxes are distinct even when neither profile sets
 `RELAY_STATE_DIR`.
 
