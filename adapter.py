@@ -1031,10 +1031,17 @@ class RelayAdapter(BasePlatformAdapter):
         # allocation from its increment.
         next_ordinal = entry.next_ordinal
         entry.next_ordinal += 1
-        # A retry can regenerate different words. The logical operation is
-        # still event + send ordinal; changing the key with the body could
-        # create a duplicate message instead of surfacing an idempotency
-        # conflict.
+        # The key is event + the ordinal of this send within the turn
+        # attempt, never the body: a retried attempt can regenerate different
+        # words for the same logical send. Since PR 8 every send() call takes
+        # the next ordinal, so a Hermes processing retry (on_processing_start
+        # again, counter back at zero) reproduces the same key only while it
+        # makes the same sends in the same order. Any extra send in the first
+        # attempt shifts every later ordinal: a long-running notice after
+        # Hermes's 180 s HERMES_AGENT_NOTIFY_INTERVAL (gateway/run_turn.py),
+        # a _send_with_retry re-call (gateway/platforms/base.py), or a busy
+        # ack. A retry that ran past one of those lands on a different key,
+        # and Relay stores a new message instead of returning the old one.
         return reply_idempotency_key(entry.event_id, next_ordinal)
 
     async def send(
