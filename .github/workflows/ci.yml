@@ -23,7 +23,7 @@ env:
   SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
   HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
-  EXPECTED_PACKAGE_VERSION: 1.0.0rc1
+  EXPECTED_PACKAGE_VERSION: 1.0.0rc2
   RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
@@ -77,7 +77,7 @@ jobs:
           manifest = yaml.safe_load(Path("plugin.yaml").read_text())
           assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
           assert metadata["project"]["version"] == os.environ["EXPECTED_PACKAGE_VERSION"]
-          assert manifest["version"] == "1.0.0-rc.1"
+          assert manifest["version"] == "1.0.0-rc.2"
           PY
           mkdir -p release/dist release/provenance
           python -m build --outdir release/dist

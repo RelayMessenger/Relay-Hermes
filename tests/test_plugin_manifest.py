@@ -128,9 +128,9 @@ def test_staging_package_and_manifest_versions_match(manifest):
     metadata = tomllib.loads(
         (MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert metadata["project"]["version"] == "1.0.0rc1"
+    assert metadata["project"]["version"] == "1.0.0rc2"
     assert metadata["build-system"]["requires"] == ["setuptools==84.0.0"]
-    assert manifest["version"] == "1.0.0-rc.1"
+    assert manifest["version"] == "1.0.0-rc.2"
 
 
 def test_locked_openapi_snapshot_is_exact_and_provenanced():
