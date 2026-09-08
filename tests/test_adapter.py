@@ -117,6 +117,12 @@ def relay_event(event_id: str = "event-id") -> Dict[str, Any]:
     }
 
 
+# A message older than the turn starter. Under the default "auto" quote
+# rule a reply to the turn starter itself is unquoted, so tests that pin
+# where the anchor lands answer this older message instead.
+OLDER_MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec01"
+
+
 def message_event(plugin, adapter, event_id: str):
     from gateway.platforms.base import MessageEvent, MessageType
 
@@ -150,19 +156,19 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
         first = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         second = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         # A processing retry starts the same logical turn from ordinal zero.
         await adapter.on_processing_start(event)
         retried = await adapter.send(
             event.source.chat_id,
             "one\n\ntwo",
-            reply_to=event.message_id,
+            reply_to=OLDER_MESSAGE_ID,
         )
         return first, second, retried
 
@@ -177,7 +183,7 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
         "parts": [
             {"type": "text", "value": "one\n\ntwo"},
         ],
-        "reply_to": {"message_id": event.message_id},
+        "reply_to": {"message_id": OLDER_MESSAGE_ID},
         "timeout": None,
     }
     assert {key: value for key, value in client.calls[0].items()
@@ -686,12 +692,12 @@ def test_long_text_batches_never_post_adjacent_text_parts_and_retry_keys_are_sta
     async def run():
         await adapter.on_processing_start(event)
         first = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
-                                   reply_to=event.message_id)
+                                   reply_to=OLDER_MESSAGE_ID)
         original = list(client.calls)
         client.calls.clear()
         await adapter.on_processing_start(event)
         replayed = await adapter.send(event.source.chat_id, "\n\n".join(paragraphs),
-                                      reply_to=event.message_id)
+                                      reply_to=OLDER_MESSAGE_ID)
         return first, replayed, original
 
     first, replayed, original = asyncio.run(run())
@@ -699,7 +705,7 @@ def test_long_text_batches_never_post_adjacent_text_parts_and_retry_keys_are_sta
     assert len(original) == 2
     assert original == client.calls
     assert len({call["idempotency_key"] for call in original}) == 2
-    assert original[0]["reply_to"] == {"message_id": event.message_id}
+    assert original[0]["reply_to"] == {"message_id": OLDER_MESSAGE_ID}
     assert original[1]["reply_to"] is None
     assert "\n\n".join(part["value"] for call in original for part in call["parts"]) == "\n\n".join(paragraphs)
     for call in original:
@@ -1229,12 +1235,12 @@ def test_shared_batching_mixed_boundaries_and_first_anchor(plugin, tmp_path):
 
     async def run():
         await adapter.on_processing_start(event)
-        return await adapter._commit(event.source.chat_id, parts, event.message_id)
+        return await adapter._commit(event.source.chat_id, parts, OLDER_MESSAGE_ID)
 
     assert asyncio.run(run()).success
     assert_batch_contract(plugin, client.calls)
     assert [p for c in client.calls for p in c["parts"]] == plugin._fold_parts(parts)
-    assert client.calls[0]["reply_to"] == {"message_id": event.message_id}
+    assert client.calls[0]["reply_to"] == {"message_id": OLDER_MESSAGE_ID}
     assert all(c["reply_to"] is None for c in client.calls[1:])
     assert len({c["idempotency_key"] for c in client.calls}) == len(client.calls)
 
