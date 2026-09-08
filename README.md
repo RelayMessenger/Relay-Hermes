@@ -63,13 +63,21 @@ hermes plugins install RelayMessenger/Relay-Hermes --enable
 The same repository can be installed as a Python package. Its
 `hermes_agent.plugins` entry point registers the identical platform adapter.
 
-Create an Agent and copy its Agent Token from
-[Relay Console](https://console.relayapp.im), then save the token in
-`~/.hermes/.env`:
+Create the Agent with the
+[Relay CLI](https://www.npmjs.com/package/relaymessenger). It gives the Agent a `.dev` handle, saves the Agent Token in your Relay
+profile, and writes `RELAY_AGENT_TOKEN`, `RELAY_BASE_URL`, and
+`RELAY_STATE_DIR` into `~/.hermes/.env`:
 
-```dotenv
-RELAY_AGENT_TOKEN=your_agent_token
+```sh
+npx relaymessenger agents create \
+  --connect hermes \
+  --runtime-home "$HOME/.hermes" \
+  --runtime-state-dir "$HOME/.hermes/relay" \
+  --runtime-stopped --confirm-configure
 ```
+
+Stop Hermes first; `~/.hermes/config.yaml` must already exist. The CLI writes
+that one file and never starts Hermes. An Agent is created only this way.
 
 An Agent using this WebSocket must not have a saved webhook subscription.
 Relay rejects the WebSocket upgrade with HTTP `409` until those subscriptions

@@ -33,8 +33,9 @@ The tested archive contains the 23 files from source commit
   `26d892a3105044e1c4f2469d41759a8e3a90a3e3db7fcd9935365a156c4617aa`
 - Transferred source archive SHA-256:
   `f16a1275235a496ff8bf945c5868dbf058fd56deb80d437d25dc9644be3a0d22`
-- Pinned Hermes commit:
+- Hermes commit pinned for this run:
   `04224b2f82aabbe89525451089eb2677edfae179`
+  (superseded; CI now pins `b2aa855b626ff8688eb34b95c60ee8b6a4af3679`)
 
 The exact source diff is limited to the two workflows, workflow tests, contract
 metadata, the locked contract snapshot, and README contract documentation.
@@ -43,18 +44,28 @@ staging helper, and contract harness are unchanged from the audited base.
 
 ## Locked public OpenAPI
 
-The checked-in snapshot is
+The snapshot checked in for this run was
 `contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml`.
+That path is gone. The tree now carries
+`contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml`,
+described in `contracts/relay-server/README.md`.
 
 - Source repository: `RelayMessenger/Relay-Server`
-- Source commit: `9b4d5bb32cc749c6fd271969948c385300d404d6`
+- Source commit for this run: `9b4d5bb32cc749c6fd271969948c385300d404d6`
+  (superseded by `99906995625ddc00348064a585ada1649313b0fc`)
 - Source path: `contracts/developer/openapi.yaml`
-- Byte length: `117289`
-- SHA-256:
+- Byte length for this run: `117289`
+  (superseded; the snapshot in the tree is `152428` bytes)
+- SHA-256 for this run:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
+  (superseded; the snapshot in the tree hashes
+  `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8`)
 
-`raw/02-source.log` proves the checked-in file is byte-identical to workspace
-input `_runtime/relay-openapi-locked-9b4d5bb.yaml`.
+`raw/02-source.log` proves the file checked in at that time was byte-identical
+to workspace input `_runtime/relay-openapi-locked-9b4d5bb.yaml`. It says nothing
+about the `99906995625ddc00348064a585ada1649313b0fc` snapshot now in the tree;
+`contracts/relay-server/README.md` and `scripts/check-openapi.py` cover that
+one.
 `raw/04-contract-workflow.log` proves the harness accepts those exact bytes,
 normal CI validates the local path before building, and the RC contract job
 validates the same local path without a Relay-Server checkout or
@@ -105,3 +116,8 @@ archived state.
 `proof-manifest.sha256` separately hashes this README, `receipt.json`, and
 `raw/evidence.sha256`. It deliberately does not hash itself, avoiding
 self-reference while closing both summaries over all retained evidence.
+
+This README was corrected on 2026-09-08 to mark the superseded pins and
+the replaced snapshot path above, and `proof-manifest.sha256` was recomputed
+for the corrected text. `raw/`, `artifacts/`, `receipt.json`, and `raw/evidence.sha256`
+are unchanged and still record the original run.
