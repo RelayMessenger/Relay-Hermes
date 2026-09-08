@@ -257,7 +257,7 @@ def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Preserve paragraphs without posting forbidden adjacent text parts.
 
     Media boundaries stay intact. Text that cannot merge within the UTF-16
-    limit stays separate here; _commit gives it a new Message boundary.
+    limit stays separate here; _message_batches gives it a new Message boundary.
     """
     folded: List[Dict[str, Any]] = []
     for part in parts:
@@ -273,6 +273,28 @@ def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         else:
             folded.append(last)
     return folded
+
+
+def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Fold paragraphs and partition in order within MessageContent limits."""
+    batches: List[List[Dict[str, Any]]] = []
+    batch: List[Dict[str, Any]] = []
+    url_media_count = 0
+    for part in _fold_parts(parts):
+        is_url_media = part.get("type") == "media" and bool(part.get("url"))
+        if batch and (
+            len(batch) == MAX_PARTS_PER_POST
+            or (is_url_media and url_media_count == 40)
+            or batch[-1].get("type") == part.get("type") == "text"
+        ):
+            batches.append(batch)
+            batch = []
+            url_media_count = 0
+        batch.append(part)
+        url_media_count += int(is_url_media)
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 def _explicit_reply_to_mode(config) -> str:
@@ -1011,21 +1033,8 @@ class RelayAdapter(BasePlatformAdapter):
         self, chat_id: str, parts: List[Dict[str, Any]], reply_to: Optional[str]
     ) -> SendResult:
         """Send ordered parts in current MessageContent batches."""
-        parts = _fold_parts(parts)
-        batches: List[List[Dict[str, Any]]] = []
-        batch: List[Dict[str, Any]] = []
-        for part in parts:
-            if batch and (
-                len(batch) == MAX_PARTS_PER_POST
-                or batch[-1].get("type") == part.get("type") == "text"
-            ):
-                batches.append(batch)
-                batch = []
-            batch.append(part)
-        if batch:
-            batches.append(batch)
         first: Optional[SendResult] = None
-        for ordinal, batch in enumerate(batches):
+        for ordinal, batch in enumerate(_message_batches(parts)):
             result = await self._post_message(
                 chat_id,
                 batch,
@@ -1120,14 +1129,13 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
     ) -> None:
-        """Ship an image batch as ONE POST of contiguous media parts.
+        """Ship contiguous media parts in contract-bounded Message batches.
 
         Contiguous media parts commit as one stacked media message, which is
         how Relay renders a photo set; the base implementation loops one send
         per image and would land N separate bubbles. Alt texts follow the
         stack as text parts so the media stays contiguous. ``human_delay`` is
-        accepted for signature parity and ignored: one POST has no gaps to
-        pace.
+        accepted for signature parity and ignored.
         """
         parts: List[Dict[str, Any]] = []
         captions: List[str] = []
@@ -1303,7 +1311,7 @@ async def _standalone_send(
             "error": "relay standalone send: no Chat id (set RELAY_HOME_CHAT)"
         }
 
-    parts = _fold_parts([{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)])
+    parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)]
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
@@ -1316,10 +1324,10 @@ async def _standalone_send(
             # the clock, so two POSTs cannot collide on a coarse timer and
             # have the server dedupe the second away.
             stamp = time.time_ns()
-            for index, start in enumerate(range(0, len(parts), MAX_PARTS_PER_POST)):
+            for index, batch in enumerate(_message_batches(parts)):
                 body = await client.send_message(
                     chat_id,
-                    parts[start:start + MAX_PARTS_PER_POST],
+                    batch,
                     idempotency_key=f"hermes-cron-{chat_id}-{stamp}-{index}",
                 )
                 if first is None:
