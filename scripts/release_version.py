@@ -557,6 +557,11 @@ def mode_release(args: argparse.Namespace) -> None:
 
 
 def verify_dist(dist: Path, version: str, forbid: str | None) -> None:
+    # The workflows pass `release/dist` relative to the checkout; every path
+    # handed to a subprocess is absolute so no working directory can bend it
+    # (twine could not find `release/dist/...` from inside `release/dist`,
+    # run 34289625574, 2026-09-08).
+    dist = Path(dist).resolve()
     wheel = dist / f"{DIST_PREFIX}-{version}-py3-none-any.whl"
     sdist = dist / f"{DIST_PREFIX}-{version}.tar.gz"
     files = sorted(path for path in dist.iterdir() if path.is_file())
@@ -565,7 +570,7 @@ def verify_dist(dist: Path, version: str, forbid: str | None) -> None:
             f"{dist} holds {[path.name for path in files]}, expected exactly "
             f"{wheel.name} and {sdist.name}"
         )
-    run([sys.executable, "-m", "twine", "check", "--strict", str(wheel), str(sdist)], cwd=dist)
+    run([sys.executable, "-m", "twine", "check", "--strict", str(wheel), str(sdist)], cwd=ROOT)
     if forbid is None:
         say("no staging version to scan for")
         return
