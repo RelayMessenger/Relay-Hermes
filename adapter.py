@@ -407,6 +407,9 @@ class RelayAdapter(BasePlatformAdapter):
 
         # chat_id -> newest inbound message id, for "auto" quoting.
         self._last_inbound: Dict[str, str] = {}
+        # Fire-and-forget Read receipts. asyncio keeps only weak references
+        # to tasks, so the set holds each one until it finishes.
+        self._read_tasks: set = set()
         # Chat kind, learned directly from each Relay Message event.
         self._group_chats: set = set()
         self._direct_chats: set = set()
@@ -816,21 +819,41 @@ class RelayAdapter(BasePlatformAdapter):
             media_types=media_kinds,
         )
 
+        # Read at intake, the moment the message is accepted for Hermes, as
+        # the BlueBubbles adapter does for iMessage (mark_read right after
+        # handing the event over, before any busy routing). Hermes folds a
+        # message that arrives mid-turn into the running turn under its
+        # default busy_input_mode: interrupt and never calls a processing
+        # hook for it, so a Read tied to on_processing_start left every
+        # folded message at Delivered forever. Fire-and-forget: a failed
+        # receipt never blocks intake.
+        self._mark_read_in_background(chat_id)
         await self._dispatch_turn(event)
         return True
 
+    def _mark_read_in_background(self, chat_id: str) -> None:
+        if self._client is None or not chat_id:
+            return
+        task = asyncio.create_task(self._mark_read(chat_id))
+        self._read_tasks.add(task)
+        task.add_done_callback(self._read_tasks.discard)
+
+    async def _mark_read(self, chat_id: str) -> None:
+        try:
+            await self._client.mark_read(chat_id)
+        except Exception as exc:  # noqa: BLE001 - a receipt never breaks intake
+            logger.debug("[%s] Read receipt failed: %s", self.name, exc)
+
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Bind the turn and send Read when Hermes actually starts processing."""
+        """Bind the turn when Hermes actually starts processing.
+
+        Read is not sent here: this hook never runs for a message Hermes
+        folded into an already-running turn. Intake sends it instead.
+        """
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
         _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
-        chat_id = str(event.source.chat_id or "")
-        if self._client is not None and chat_id:
-            try:
-                await self._client.mark_read(chat_id)
-            except RelayApiError as exc:
-                logger.debug("[%s] Read receipt failed: %s", self.name, exc)
 
     async def on_processing_complete(
         self,

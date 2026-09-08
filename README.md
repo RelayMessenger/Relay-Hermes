@@ -15,7 +15,9 @@ For each Relay event, the plugin:
 2. sends a cumulative WebSocket ACK only after the commit;
 3. deduplicates replayed `event_id` values;
 4. starts a Hermes turn only for an inbound `message.received` event;
-5. explicitly marks the Chat Read when Hermes starts processing the turn;
+5. explicitly marks the Chat Read at intake, as soon as the message is
+   accepted for Hermes (before Hermes decides whether it starts a new turn
+   or folds the message into one already running);
 6. sends each Message through `POST /v1/chats/{chatId}/messages` with an
    `Idempotency-Key`.
 
@@ -176,7 +178,7 @@ The runtime contract used here is:
 - `GET /v1/websocket` for acknowledged agent events;
 - `GET /v1/chats` and `GET /v1/chats/{chatId}/messages` only for a
   server-directed FULL sync;
-- `POST /v1/chats/{chatId}/read` with no request body at processing start;
+- `POST /v1/chats/{chatId}/read` with no request body at intake;
 - `POST /v1/attachments`, followed by the allocated raw `PUT`, for local
   files;
 - `POST /v1/chats/{chatId}/messages` with `Idempotency-Key` for every Message

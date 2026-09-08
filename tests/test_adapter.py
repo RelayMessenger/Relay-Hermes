@@ -349,7 +349,9 @@ def test_inbox_dispatches_agent_sender_like_user_sender(
     adapter._inbox.close()
 
 
-def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
+def test_read_is_sent_at_intake_before_any_processing_hook(plugin, tmp_path):
+    """A message Hermes folds into a running turn never reaches
+    on_processing_start, so Read must already be on the wire at intake."""
     api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)
     client = FakeClient()
@@ -363,12 +365,48 @@ def test_read_waits_until_hermes_processing_actually_starts(plugin, tmp_path):
     inbound = api.parse_inbound(relay_event("event-read"))
     assert inbound is not None
 
-    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    async def intake_only():
+        assert await adapter._on_inbound(inbound) is True
+        # Let the fire-and-forget receipt task run; no processing hook yet.
+        await asyncio.sleep(0)
+        return list(client.reads)
+
+    assert asyncio.run(intake_only()) == [inbound.chat_id]
     assert len(dispatched) == 1
-    assert client.reads == []
 
     asyncio.run(adapter.on_processing_start(dispatched[0]))
-    assert client.reads == [inbound.chat_id]
+    assert client.reads == [inbound.chat_id], "processing start must not send a second Read"
+
+
+def test_failed_read_receipt_never_blocks_intake(plugin, tmp_path):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+
+    async def failing_mark_read(chat_id):
+        raise api.RelayApiError("read failed")
+
+    client.mark_read = failing_mark_read
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    inbound = api.parse_inbound(relay_event("event-read-fail"))
+
+    async def run():
+        assert await adapter._on_inbound(inbound) is True
+        tasks = list(adapter._read_tasks)
+        assert len(tasks) == 1
+        await asyncio.sleep(0)
+        # The receipt failure is logged and swallowed inside the task, never
+        # left as an unretrieved exception and never raised into intake.
+        assert tasks[0].done() and tasks[0].exception() is None
+
+    asyncio.run(run())
+    assert len(dispatched) == 1
 
 
 def test_full_sync_rebuilds_and_durably_checkpoints_adapter_state(
