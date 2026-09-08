@@ -21,7 +21,7 @@ concurrency:
 
 env:
   SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
-  HERMES_AGENT_COMMIT: 04224b2f82aabbe89525451089eb2677edfae179
+  HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
   EXPECTED_PACKAGE_VERSION: 1.0.0rc1
   RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml
