@@ -6,17 +6,17 @@ instead of checking out another repository during CI or publication.
 | Field | Value |
 | --- | --- |
 | Source repository | `https://github.com/RelayMessenger/Relay-Server` |
-| Source commit | `9b4d5bb32cc749c6fd271969948c385300d404d6` |
-| Source commit date | `2026-08-31T23:04:39-04:00` |
+| Source commit | `99906995625ddc00348064a585ada1649313b0fc` |
+| Source commit date | `2026-09-08T08:13:22-04:00` |
 | Source path | `contracts/developer/openapi.yaml` |
-| Local snapshot | `9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml` |
-| Byte length | `117289` |
-| SHA-256 | `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5` |
+| Local snapshot | `99906995625ddc00348064a585ada1649313b0fc/openapi.yaml` |
+| Byte length | `152428` |
+| SHA-256 | `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8` |
 
 The snapshot was copied byte-for-byte from the locked source. Validate both its
 identity and the Relay-Hermes contract expectations from the repository root:
 
 ```sh
 python scripts/check-openapi.py \
-  contracts/relay-server/9b4d5bb32cc749c6fd271969948c385300d404d6/openapi.yaml
+  contracts/relay-server/99906995625ddc00348064a585ada1649313b0fc/openapi.yaml
 ```
