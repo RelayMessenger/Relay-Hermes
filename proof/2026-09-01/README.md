@@ -26,12 +26,17 @@ manifest to be reproduced from the final commit.
   `f21b327721124287517290ab9b7d2d8f6921d6152d60680dff1a03fd36997ece`
 - Base commit:
   `cf99be34efb0b5527a6a9c8838423b462d282c34`
-- Hermes commit:
+- Hermes commit tested here:
   `04224b2f82aabbe89525451089eb2677edfae179`
-- Relay Server OpenAPI commit:
+  (superseded; CI now pins `b2aa855b626ff8688eb34b95c60ee8b6a4af3679`)
+- Relay Server OpenAPI commit tested here:
   `9b4d5bb32cc749c6fd271969948c385300d404d6`
-- OpenAPI SHA-256:
+  (superseded; the locked contract is now
+  `99906995625ddc00348064a585ada1649313b0fc`)
+- OpenAPI SHA-256 tested here:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
+  (superseded; the locked contract now hashes
+  `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8`)
 
 ## Results derived from raw logs
 
@@ -42,7 +47,7 @@ manifest to be reproduced from the final commit.
 | CPython 3.13.11 | `88 passed in 2.90s` |
 | Wrapper delegation plus state no-follow/replacement suite | 8 named tests passed |
 | Build backend | `setuptools==84.0.0` |
-| Build frontend | `build==1.3.0` |
+| Build frontend | `build==1.3.0` (superseded; CI now installs `build==1.6.0`) |
 | One wheel/sdist build | passed for `1.0.0rc1` |
 | Exact wheel clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
 | Exact sdist clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
@@ -81,3 +86,8 @@ It does **not** claim to cover this README or `receipt.json`.
 
 `proof-manifest.sha256` deliberately does not hash itself, so there is no
 self-reference.
+
+This README was corrected on 2026-09-08 to mark the superseded pins above, and
+`proof-manifest.sha256` was recomputed for the corrected text. `raw/`,
+`artifacts/`, `receipt.json`, and `raw/evidence.sha256` are unchanged and still
+record the original run.

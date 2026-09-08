@@ -4,10 +4,9 @@ label: Relay
 kind: platform
 version: 1.0.0-rc.1
 description: >
-  Connect Hermes Agent to Relay as an always-on agent. The plugin receives
-  Relay events over WebSocket, commits each event to a durable SQLite inbox
-  before cumulative ACK, deduplicates event_id, and sends idempotent replies
-  through Relay API v1.
+  Connect Hermes Agent to Relay as an always-on agent. Relay messages arrive
+  on a live connection, are saved before they are answered, are never answered
+  twice, and every reply is sent back to Relay.
 author: Companion, Inc.
 homepage: https://github.com/RelayMessenger/Relay-Hermes
 license: MIT

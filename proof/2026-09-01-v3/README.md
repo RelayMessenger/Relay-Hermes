@@ -18,8 +18,10 @@ state is `archived`.
 
 No hosted Relay environment, production endpoint, deployment, publication,
 Relay credential, publication credential, protected workflow secret, or hosted
-GitHub Actions run was used. No post-fix independent audit was run, so this
-worktree must not be pushed or published yet.
+GitHub Actions run was used. No post-fix independent audit had been run when
+this evidence was written, so the worktree was held back at that point. That
+hold is spent: the work was pushed and is on branch `staging` at
+`8597004ba2d34a659e64982ad3613179282db54c`.
 
 ## Exact corrected source
 
@@ -35,12 +37,17 @@ The tested archive contains the 21 files from commit
   `b3ca426a9e820e967203159e50797ef2d84992a7`
 - Corrected source commit:
   `bb7185916e65c6af2cf319993a560024e8c649df`
-- Pinned Hermes commit:
+- Hermes commit pinned for this run:
   `04224b2f82aabbe89525451089eb2677edfae179`
-- Relay Server OpenAPI commit:
+  (superseded; CI now pins `b2aa855b626ff8688eb34b95c60ee8b6a4af3679`)
+- Relay Server OpenAPI commit for this run:
   `9b4d5bb32cc749c6fd271969948c385300d404d6`
-- OpenAPI SHA-256:
+  (superseded; the locked contract is now
+  `99906995625ddc00348064a585ada1649313b0fc`)
+- OpenAPI SHA-256 for this run:
   `f62f431fc0daa48500926bf87753f81c3fdda25ab463b130ca97f2896367e0a5`
+  (superseded; the locked contract now hashes
+  `7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8`)
 
 ## Remaining HIGH closure
 
@@ -80,7 +87,7 @@ place and are included in the full and dedicated security suites.
 | Dedicated wrapper/slash/profile/state security suite | 18 named tests passed |
 | Exact pinned-Hermes primary/secondary `/update` test | passed |
 | Build backend | `setuptools==84.0.0` |
-| Build frontend | `build==1.3.0` |
+| Build frontend | `build==1.3.0` (superseded; CI now installs `build==1.6.0`) |
 | Retained wheel/sdist distribution build | one pair, passed for `1.0.0rc1` |
 | Exact wheel clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
 | Exact sdist clean installs | passed with `pip check` on 3.11, 3.12, and 3.13 |
@@ -116,3 +123,8 @@ It does not claim to cover this README or `receipt.json`.
 `proof-manifest.sha256` separately hashes this README, `receipt.json`, and
 `raw/evidence.sha256`. It deliberately does not hash itself, avoiding
 self-reference while closing both summaries over all retained evidence.
+
+This README was corrected on 2026-09-08 to mark the superseded pins and the
+spent push hold above, and `proof-manifest.sha256` was recomputed for the
+corrected text. `raw/`, `artifacts/`, `receipt.json`, and `raw/evidence.sha256`
+are unchanged and still record the original run.
