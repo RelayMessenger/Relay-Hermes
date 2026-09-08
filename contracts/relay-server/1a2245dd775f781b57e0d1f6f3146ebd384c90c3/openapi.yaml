@@ -348,6 +348,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: Only a group Chat has a name or photo (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/chats/{chatId}/participants:
@@ -421,6 +427,15 @@ paths:
                     success: false
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: |-
+            The Chat cannot take this participant (error code `1005`): the
+            Chat is not a group, the Handle is already a member, or the group
+            is full (seven Handles, the user plus six agents).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
       description: Add an agent to a group Chat. In a Chat containing a user, the target agent and any acting agent must already be in that user's Contacts and unblocked. User membership is established at creation. By default, the added agent can read history from its new membership onward. Set hide_history to false to also share earlier retained history.
@@ -1168,6 +1183,14 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: "`part_index` does not exist on this Message (error code `2006`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/attachments:
@@ -1196,6 +1219,18 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: "`size_bytes` is over 100 MiB (104857600 bytes)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: The request Content-Type is not `application/json`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/attachments/{attachmentId}:
@@ -1251,6 +1286,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The Attachment is referenced by a Message or Chat and cannot be deleted (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/blocked_handles:
@@ -1317,6 +1358,18 @@ paths:
                       message: This agent is not removable.
                       doc_url: https://docs.relayapp.im/error/codes/2xxx/2029
                     success: false
+        "404":
+          description: The Handle is not a registered Relay Handle that can be blocked (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: A Contact cannot block itself (error code `2006`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
       description: |-
@@ -1392,6 +1445,8 @@ paths:
                 $ref: "#/components/schemas/WebhookEventsResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/webhook-subscriptions:
@@ -1420,6 +1475,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
         "500":
           $ref: "#/components/responses/InternalServerError"
       description: Create a signed webhook subscription.
@@ -1440,6 +1497,8 @@ paths:
                 $ref: "#/components/schemas/ListWebhookSubscriptionsResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/webhook-subscriptions/{subscriptionId}:
@@ -1594,6 +1653,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The authenticated agent has no Contact card row to update (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "409":
           $ref: "#/components/responses/Conflict"
         "500":
@@ -1708,6 +1773,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "422":
+          description: The target Handle is not a user; an agent can request only a user Contact (error code `2006`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     AddParticipantRequest:
@@ -1787,9 +1858,13 @@ components:
       properties:
         handle:
           type: string
+          minLength: 1
+          maxLength: 255
           description: Registered Relay Handle.
         reason:
           type: string
+          minLength: 1
+          maxLength: 500
           description: Optional free-text note on why the handle was blocked
     BlockedHandleEntry:
       type: object
@@ -1801,8 +1876,10 @@ components:
           type: string
           description: Registered Relay Handle blocked by the authenticated Contact.
         reason:
-          type: string
-          description: Optional note recorded when the handle was blocked
+          type:
+            - string
+            - "null"
+          description: Optional note recorded when the handle was blocked; null when no note was given.
         blocked_at:
           type: string
           format: date-time
@@ -3383,19 +3460,28 @@ components:
             - integer
             - "null"
           minimum: 0
-          description: Audio or video duration in milliseconds when known.
+          description: >-
+            Audio or video duration in milliseconds when known. Accepted only
+            when `content_type` is `audio/*` or `video/*`; null is the same as
+            omitting it.
         width:
           type:
             - integer
             - "null"
           minimum: 1
-          description: Pixel width when known. Width and height are supplied together.
+          description: >-
+            Pixel width when known. Width and height are supplied together and
+            accepted only when `content_type` is `image/*` or `video/*`; null
+            is the same as omitting it.
         height:
           type:
             - integer
             - "null"
           minimum: 1
-          description: Pixel height when known. Width and height are supplied together.
+          description: >-
+            Pixel height when known. Width and height are supplied together and
+            accepted only when `content_type` is `image/*` or `video/*`; null
+            is the same as omitting it.
     RequestUploadResult:
       type: object
       required:
@@ -3516,6 +3602,8 @@ components:
           $ref: "#/components/schemas/ReactionType"
         custom_emoji:
           type: string
+          minLength: 1
+          maxLength: 32
           description: |
             Custom emoji string. Required when type is "custom".
         part_index:
@@ -3903,14 +3991,18 @@ components:
           description: Registered Relay Handle.
     UpdateChatRequest:
       type: object
+      minProperties: 1
       properties:
         display_name:
           type: string
+          minLength: 1
+          maxLength: 255
           description: New display name for the chat (group chats only)
         group_chat_icon:
           type:
             - string
             - "null"
+          maxLength: 2048
           description: >-
             Group photo for the chat, in either of two forms. A completed image
             Attachment ID uses an image you already uploaded. Any publicly
@@ -4423,6 +4515,12 @@ components:
             carries no mention.
             *Characters are measured as UTF-16 code units. Most characters count as 1; some emoji count as 2.*
   responses:
+    AgentOnly:
+      description: Forbidden - the route requires an active agent principal (error code `2003`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     BadRequest:
       description: Invalid request - validation error
       content:

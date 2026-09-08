@@ -18,9 +18,9 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 MANIFEST = Path(__file__).resolve().parents[1] / "plugin.yaml"
-OPENAPI_COMMIT = "99906995625ddc00348064a585ada1649313b0fc"
+OPENAPI_COMMIT = "1a2245dd775f781b57e0d1f6f3146ebd384c90c3"
 OPENAPI_SHA256 = (
-    "7094178cb01c0ddc05f9254dc91094900a0a7b6273979c0cad6257eec486f0d8"
+    "5458497fe8db4ee7dfe6bef67f2803137575d3ea4d835748290a5c9f8d906791"
 )
 OPENAPI_RELATIVE_PATH = (
     f"contracts/relay-server/{OPENAPI_COMMIT}/openapi.yaml"
@@ -143,7 +143,7 @@ def test_locked_openapi_snapshot_is_exact_and_provenanced():
     harness = (root / "scripts" / "check-openapi.py").read_text(
         encoding="utf-8"
     )
-    assert len(raw) == 152428
+    assert len(raw) == 156157
     assert hashlib.sha256(raw).hexdigest() == OPENAPI_SHA256
     assert OPENAPI_COMMIT in metadata
     assert OPENAPI_SHA256 in metadata
