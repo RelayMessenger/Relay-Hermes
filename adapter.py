@@ -129,7 +129,13 @@ DEFAULT_GROUP_CHAT_POLICY = "mentions"
 # message before Hermes dispatch.
 NO_RELAY_SLASH_ADMIN = "!relay-hermes-slash-disabled"
 
-_TURN_EVENT: contextvars.ContextVar[Optional[Tuple[str, int]]] = (
+@dataclasses.dataclass
+class _TurnEvent:
+    event_id: str
+    next_ordinal: int = 0
+
+
+_TURN_EVENT: contextvars.ContextVar[Optional[_TurnEvent]] = (
     contextvars.ContextVar("relay_turn_event", default=None)
 )
 
@@ -795,7 +801,7 @@ class RelayAdapter(BasePlatformAdapter):
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        _TURN_EVENT.set((event_id, 0) if event_id else None)
+        _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
         chat_id = str(event.source.chat_id or "")
         if self._client is not None and chat_id:
             try:
@@ -824,7 +830,7 @@ class RelayAdapter(BasePlatformAdapter):
         """Hand one accepted turn to Hermes."""
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        token = _TURN_EVENT.set((event_id, 0) if event_id else None)
+        token = _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
         try:
             # handle_message creates the background turn task here. asyncio
             # copies this Context into that task, so overlapping Chats cannot
@@ -929,13 +935,17 @@ class RelayAdapter(BasePlatformAdapter):
         entry = _TURN_EVENT.get()
         if entry is None:
             return f"hermes-{chat_id}-{time.time_ns()}"
-        event_id, next_ordinal = entry
-        _TURN_EVENT.set((event_id, next_ordinal + 1))
+        # Child asyncio tasks inherit the same turn object. Replacing a tuple
+        # in their copied Contexts would allocate ordinal zero in every child
+        # and leave the parent's counter unchanged. No await separates this
+        # allocation from its increment.
+        next_ordinal = entry.next_ordinal
+        entry.next_ordinal += 1
         # A retry can regenerate different words. The logical operation is
         # still event + send ordinal; changing the key with the body could
         # create a duplicate message instead of surfacing an idempotency
         # conflict.
-        return reply_idempotency_key(event_id, next_ordinal)
+        return reply_idempotency_key(entry.event_id, next_ordinal)
 
     async def send(
         self,
