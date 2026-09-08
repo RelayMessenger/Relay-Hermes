@@ -188,6 +188,34 @@ def test_text_send_uses_current_parts_and_retry_stable_distinct_keys(
     assert client.calls[1]["idempotency_key"] == "reply-event-send-1"
 
 
+def test_concurrent_sends_share_turn_ordinals_without_crossing_turns(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+
+    async def turn(event_id):
+        event = message_event(plugin, adapter, event_id)
+        await adapter.on_processing_start(event)
+        results = await asyncio.gather(
+            adapter.send(event.source.chat_id, "first"),
+            adapter.send(event.source.chat_id, "second"),
+        )
+        results.append(await adapter.send(event.source.chat_id, "third"))
+        assert all(result.success for result in results)
+
+    async def run():
+        await asyncio.gather(turn("event-a"), turn("event-b"))
+        await turn("event-a")
+
+    asyncio.run(run())
+    keys = [call["idempotency_key"] for call in client.calls]
+    assert set(keys[:6]) == {
+        f"reply-event-{event}-{ordinal}"
+        for event in ("a", "b") for ordinal in range(3)
+    }
+    assert keys[6:] == [f"reply-event-a-{ordinal}" for ordinal in range(3)]
+
+
 def test_processing_lifecycle_keeps_event_until_hermes_finishes(plugin, tmp_path):
     from gateway.platforms.base import ProcessingOutcome
 
