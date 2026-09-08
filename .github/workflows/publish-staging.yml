@@ -14,9 +14,10 @@ name: Publish staging to PyPI
 #   validate  ci.yml at the bump commit: the exact-SHA guards, the contract
 #             snapshot check, the build, the Hermes matrix, and the retained
 #             distributions.
-#   publish   the retained distributions, rehashed, through the one shared
-#             publish step (.github/actions/publish-pypi), then a read-back
-#             from PyPI. The `pypi-staging` environment holds the token and
+#   publish   the retained distributions, rehashed and checked by the shared
+#             .github/actions/check-dist step, uploaded by
+#             pypa/gh-action-pypi-publish on the token or the OIDC path, then
+#             read back from PyPI. The `pypi-staging` environment holds the token and
 #             any approval rule the owner sets on it.
 #
 # A newer push to staging cancels a run in flight; the newer run re-derives
@@ -185,22 +186,39 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Rehash and recheck the exact validated bytes
-        run: |
-          python -m pip install --disable-pip-version-check "twine==7.0.0"
-          (
-            cd release
-            sha256sum --check provenance/SHA256SUMS
-          )
-          python scripts/release_version.py verify-dist \
-            --dist release/dist --version "$RELEASE_VERSION"
-
-      - name: Publish
-        uses: ./.github/actions/publish-pypi
+      - name: Check the distributions and the publishing switch
+        uses: ./.github/actions/check-dist
         with:
-          packages-dir: release/dist
+          dist-dir: release/dist
+          version: ${{ needs.bump.outputs.version }}
           trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
           token: ${{ secrets.PYPI_API_TOKEN }}
+
+      # The two upload steps below are the same in release.yml, word for
+      # word; tests/test_plugin_manifest.py holds them equal. They call the
+      # pypa action from the job on purpose (see .github/actions/check-dist).
+      - name: Publish with the project-scoped PyPI API token
+        if: vars.PYPI_TRUSTED_PUBLISHING != 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: release/dist
+          repository-url: https://upload.pypi.org/legacy/
+          attestations: false
+          skip-existing: false
+          verbose: false
+          print-hash: true
+
+      - name: Publish through PyPI Trusted Publishing
+        if: vars.PYPI_TRUSTED_PUBLISHING == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: release/dist
+          repository-url: https://upload.pypi.org/legacy/
+          attestations: true
+          skip-existing: false
+          verbose: false
+          print-hash: true
 
       - name: Read the release back from PyPI
         run: |

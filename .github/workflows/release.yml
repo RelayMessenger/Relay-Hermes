@@ -13,9 +13,10 @@ name: Release to PyPI
 #   workflow_dispatch (dry_run) -> derive, build, twine check, stop
 #
 # The `pypi-release` environment holds the token and any approval rule the
-# owner sets on it. The publish step is the one both lanes share
-# (.github/actions/publish-pypi), so the switch to Trusted Publishing is the
-# repository variable PYPI_TRUSTED_PUBLISHING and no file here.
+# owner sets on it. The check before the upload is the step both lanes share
+# (.github/actions/check-dist) and the two upload steps are identical in both
+# lanes, so the switch to Trusted Publishing is the repository variable
+# PYPI_TRUSTED_PUBLISHING and no file here.
 
 on:
   push:
@@ -113,19 +114,24 @@ jobs:
 
       - name: Build the release distributions
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
-        env:
-          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
-          STAGING_VERSION: ${{ steps.plan.outputs.staging_version }}
         run: |
           mkdir -p release/dist release/provenance
           python -m build --outdir release/dist
-          python scripts/release_version.py verify-dist \
-            --dist release/dist --version "$RELEASE_VERSION" --forbid "$STAGING_VERSION"
           (
             cd release
             sha256sum dist/* > provenance/SHA256SUMS
             sha256sum --check provenance/SHA256SUMS
           )
+
+      - name: Check the distributions and the publishing switch
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
+        uses: ./.github/actions/check-dist
+        with:
+          dist-dir: release/dist
+          version: ${{ steps.plan.outputs.version }}
+          forbid: ${{ steps.plan.outputs.staging_version }}
+          trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
+          token: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Clean-install the exact wheel and sdist
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
@@ -158,13 +164,31 @@ jobs:
             )
           done
 
-      - name: Publish
-        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
-        uses: ./.github/actions/publish-pypi
+      # The two upload steps below are the same in publish-staging.yml, word
+      # for word; tests/test_plugin_manifest.py holds them equal. They call the
+      # pypa action from the job on purpose (see .github/actions/check-dist).
+      - name: Publish with the project-scoped PyPI API token
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true' && vars.PYPI_TRUSTED_PUBLISHING != 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: release/dist
+          repository-url: https://upload.pypi.org/legacy/
+          attestations: false
+          skip-existing: false
+          verbose: false
+          print-hash: true
+
+      - name: Publish through PyPI Trusted Publishing
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true' && vars.PYPI_TRUSTED_PUBLISHING == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: release/dist
-          trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
-          token: ${{ secrets.PYPI_API_TOKEN }}
+          repository-url: https://upload.pypi.org/legacy/
+          attestations: true
+          skip-existing: false
+          verbose: false
+          print-hash: true
 
       - name: Read the release back from PyPI
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'

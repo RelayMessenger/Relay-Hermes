@@ -283,8 +283,10 @@ lanes against live PyPI without publishing (`Rehearse the staging bump` and
 
 ### Credentials
 
-Both lanes publish through one step, `.github/actions/publish-pypi`. Which
-credential it uses is the repository variable `PYPI_TRUSTED_PUBLISHING`:
+Both lanes check the distributions through one shared step
+(`.github/actions/check-dist`) and then upload with the same two steps, one
+per credential. Which one runs is the repository variable
+`PYPI_TRUSTED_PUBLISHING`:
 
 - unset (today): the project-scoped `PYPI_API_TOKEN` secret, attestations
   off (PEP 740 attestations only work through Trusted Publishing);
@@ -303,9 +305,10 @@ exact:
 
 Then set the repository variable `PYPI_TRUSTED_PUBLISHING` to `true`
 (GitHub: Settings, Secrets and variables, Actions, Variables). No file
-changes. The two workflow names are the calling workflows on purpose: PyPI
-cannot match a reusable workflow, so the shared step is a composite action
-inside those jobs. The `pypi-staging` and `pypi-release` environments are
+changes. The two workflow names are the workflows that call the upload
+action directly, which is what PyPI matches; a reusable workflow cannot be a
+trusted publisher, and the upload action cannot run from inside a composite
+action. The `pypi-staging` and `pypi-release` environments are
 where any approval rule goes; the older `pypi-rc` environment belongs to the
 manual `Publish release candidate` workflow, which stays until the two lanes
 have each published once and is then removed.

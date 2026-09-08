@@ -22,7 +22,7 @@ yaml = pytest.importorskip("yaml")
 MANIFEST = Path(__file__).resolve().parents[1] / "plugin.yaml"
 OPENAPI_COMMIT = "1a2245dd775f781b57e0d1f6f3146ebd384c90c3"
 WORKFLOWS = MANIFEST.parent / ".github" / "workflows"
-PUBLISH_ACTION = MANIFEST.parent / ".github" / "actions" / "publish-pypi" / "action.yml"
+CHECK_ACTION = MANIFEST.parent / ".github" / "actions" / "check-dist" / "action.yml"
 
 _spec = importlib.util.spec_from_file_location(
     "release_version", MANIFEST.parent / "scripts" / "release_version.py"
@@ -176,10 +176,10 @@ def test_locked_openapi_snapshot_is_exact_and_provenanced():
 def test_hosted_workflows_pin_every_external_action_to_a_sha():
     uses_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
     sha_pattern = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-    for path in [*sorted(WORKFLOWS.glob("*.yml")), PUBLISH_ACTION]:
+    for path in [*sorted(WORKFLOWS.glob("*.yml")), CHECK_ACTION]:
         text = path.read_text(encoding="utf-8")
         uses = uses_pattern.findall(text)
-        assert uses, path.name
+        assert uses or path == CHECK_ACTION, path.name
         external = [value for value in uses if not value.startswith("./")]
         assert all(
             sha_pattern.fullmatch(value)
@@ -265,39 +265,59 @@ def test_ci_reads_the_version_from_the_tree_and_rehearses_both_lanes():
     assert text.count('run: test -z "$(git status --porcelain)"') == 2
 
 
-def test_release_lanes_share_one_publish_step_switched_by_a_variable():
-    action = PUBLISH_ACTION.read_text(encoding="utf-8")
+def test_release_lanes_share_one_check_step_and_identical_gated_uploads():
+    # The check is a composite action of shell steps only. pypa's publish
+    # action is a Docker action that names its image after the repository it
+    # runs from; inside a composite that became RelayMessenger/Relay-Hermes
+    # and Docker refused it (run 34290221859), so the composite may never
+    # `uses:` anything.
+    action = CHECK_ACTION.read_text(encoding="utf-8")
     steps = yaml.safe_load(action)["runs"]["steps"]
-    publishers = [step for step in steps if "pypa/gh-action-pypi-publish" in step.get("uses", "")]
-    assert len(publishers) == 2
-    token, oidc = publishers
-    assert token["if"] == "inputs.trusted-publishing == ''"
-    assert token["with"]["password"] == "${{ inputs.token }}"
-    assert token["with"]["attestations"] is False
-    assert oidc["if"] == "inputs.trusted-publishing == 'true'"
-    assert "password" not in oidc["with"]
-    assert oidc["with"]["attestations"] is True
-    assert publishers[0]["uses"] == publishers[1]["uses"]
+    assert all("uses" not in step and step["shell"] == "bash" for step in steps)
+    assert "python scripts/release_version.py verify-dist" in action
+    assert "sha256sum --check provenance/SHA256SUMS" in action
+    assert "PYPI_TRUSTED_PUBLISHING must be unset or exactly 'true'" in action
     assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", action)
 
     lanes = {
-        "publish-staging.yml": ("staging", "pypi-staging", "publish"),
-        "release.yml": ("main", "pypi-release", "release"),
+        "publish-staging.yml": ("staging", "pypi-staging", "publish", ""),
+        "release.yml": (
+            "main",
+            "pypi-release",
+            "release",
+            "github.event_name == 'push' && steps.plan.outputs.publish == 'true' && ",
+        ),
     }
-    for name, (branch, environment, job_name) in lanes.items():
+    uploads = {}
+    for name, (branch, environment, job_name, gate) in lanes.items():
         text = (WORKFLOWS / name).read_text(encoding="utf-8")
         parsed = yaml.safe_load(text)
         assert parsed[True]["push"]["branches"] == [branch], name
         job = parsed["jobs"][job_name]
         assert job["environment"] == environment, name
         assert job["permissions"]["id-token"] == "write", name
-        publish = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/publish-pypi")
-        assert publish["with"]["trusted-publishing"] == "${{ vars.PYPI_TRUSTED_PUBLISHING }}", name
-        assert publish["with"]["token"] == "${{ secrets.PYPI_API_TOKEN }}", name
+        check = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/check-dist")
+        assert check["with"]["trusted-publishing"] == "${{ vars.PYPI_TRUSTED_PUBLISHING }}", name
+        assert check["with"]["token"] == "${{ secrets.PYPI_API_TOKEN }}", name
+        publishers = [
+            step for step in job["steps"] if "pypa/gh-action-pypi-publish" in step.get("uses", "")
+        ]
+        assert len(publishers) == 2, name
+        token, oidc = publishers
+        assert token["if"] == gate + "vars.PYPI_TRUSTED_PUBLISHING != 'true'", name
+        assert oidc["if"] == gate + "vars.PYPI_TRUSTED_PUBLISHING == 'true'", name
+        # The two lanes carry the same upload steps, word for word, so one
+        # variable flips both.
+        uploads[name] = [(step["name"], step["uses"], step["with"]) for step in publishers]
         assert "github.repository == 'RelayMessenger/Relay-Hermes'" in text, name
         assert "python scripts/release_version.py verify-published" in text, name
-        assert "password:" not in text, name
         assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", text), name
+    assert uploads["publish-staging.yml"] == uploads["release.yml"]
+    (_, _, token_with), (_, _, oidc_with) = uploads["release.yml"]
+    assert token_with["password"] == "${{ secrets.PYPI_API_TOKEN }}"
+    assert token_with["attestations"] is False
+    assert "password" not in oidc_with
+    assert oidc_with["attestations"] is True
 
     staging = (WORKFLOWS / "publish-staging.yml").read_text(encoding="utf-8")
     assert "release: version the staging package automatically" in staging
@@ -310,8 +330,8 @@ def test_release_lanes_share_one_publish_step_switched_by_a_variable():
     assert "python scripts/release_version.py release --write" in release
     assert "git merge-base --is-ancestor HEAD origin/staging" in release
     assert "A manual run of this workflow only ever dry-runs." in release
-    assert "--forbid \"$STAGING_VERSION\"" in release
-    assert 'ref="refs/tags/${RELEASE_TAG}"' in release or "refs/tags/${RELEASE_TAG}" in release
+    assert "forbid: ${{ steps.plan.outputs.staging_version }}" in release
+    assert "refs/tags/${RELEASE_TAG}" in release
 
 
 @pytest.mark.parametrize("name", ["plugin.yaml", "README.md"])
