@@ -844,6 +844,8 @@ def test_pinned_hermes_multi_profile_slash_dispatch_denies_update_everywhere(
 
     api = importlib.import_module("relay_hermes.relay_api")
     from gateway.config import GatewayConfig, PlatformConfig
+    if not hasattr(plugin.BasePlatformAdapter, "set_owner_profile"):
+        pytest.skip("this Hermes has no multiplexed profiles (added after 0.19.0)")
     from gateway.slash_access import policy_for_source
 
     primary_config = PlatformConfig(extra={
@@ -1301,7 +1303,7 @@ def test_dispatch_settles_nothing_synchronously(plugin, tmp_path, accept):
     inbox = RecordingInbox()
     adapter._inbox = inbox
     event = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
-    _busy_hermes(adapter, adapter._event_session_key(event), accept=accept)
+    _busy_hermes(adapter, adapter._relay_session_key(event), accept=accept)
 
     asyncio.run(adapter._dispatch_turn(event))
 
@@ -1323,7 +1325,7 @@ def test_follow_up_run_inside_the_first_turn_settles_at_that_turns_completion(
     adapter._inbox = inbox
     first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
     second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
-    session_key = adapter._event_session_key(first)
+    session_key = adapter._relay_session_key(first)
 
     async def run():
         # message 1 starts a turn of its own.
@@ -1364,7 +1366,7 @@ def test_a_row_hermes_still_holds_is_not_settled_by_another_completion(
     adapter._inbox = inbox
     first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
     second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
-    session_key = adapter._event_session_key(first)
+    session_key = adapter._relay_session_key(first)
 
     async def run():
         await adapter.on_processing_start(first)
@@ -1393,7 +1395,7 @@ def test_a_redirected_row_settles_at_the_running_turns_completion(plugin, tmp_pa
     adapter._inbox = inbox
     first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
     second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
-    session_key = adapter._event_session_key(first)
+    session_key = adapter._relay_session_key(first)
 
     async def run():
         await adapter.on_processing_start(first)
@@ -1414,7 +1416,7 @@ def test_a_failed_turn_retries_only_its_own_row(plugin, tmp_path):
     adapter._inbox = inbox
     first = _event_for(plugin, adapter, "event-one", "01993d50-ef7b-7b37-886b-23fd80c7ec21")
     second = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
-    session_key = adapter._event_session_key(first)
+    session_key = adapter._relay_session_key(first)
 
     async def run():
         await adapter.on_processing_start(first)

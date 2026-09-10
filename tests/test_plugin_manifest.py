@@ -256,9 +256,11 @@ def test_ci_reads_the_version_from_the_tree_and_rehearses_both_lanes():
     # The staging lane rewrites the version on every publish; a literal here
     # would go red on the first bump commit.
     assert "EXPECTED_PACKAGE_VERSION:" not in text
-    assert text.count('python scripts/release_version.py show | tee -a "$GITHUB_ENV"') == 2
+    assert text.count('python scripts/release_version.py show | tee -a "$GITHUB_ENV"') == 3
     assert 'os.environ["EXPECTED_MANIFEST_VERSION"]' in text
-    assert set(jobs) == {"build", "test", "staging-bump-dry-run", "release-dry-run"}
+    assert set(jobs) == {
+        "build", "test", "published-hermes", "staging-bump-dry-run", "release-dry-run",
+    }
     assert "python scripts/release_version.py staging --dry-run" in text
     assert "python scripts/release_version.py release --dry-run" in text
     assert "grep -q '^release plan only: skip$' plan-b.txt" in text
