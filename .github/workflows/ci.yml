@@ -23,6 +23,9 @@ env:
   SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
   HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
+  # The newest hermes-agent wheel on PyPI (2026-09-09) and the oldest Hermes
+  # relay_hermes.check_hermes() accepts. The git pin above is the newest.
+  HERMES_PUBLISHED_VERSION: 0.19.0
   RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/1a2245dd775f781b57e0d1f6f3146ebd384c90c3/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
@@ -272,6 +275,63 @@ jobs:
           assert entry is not None
           assert entry.required_env == ["RELAY_AGENT_TOKEN"]
           PY
+
+  # The plugin's users install Hermes from PyPI, which lags the git pin the
+  # suite above runs on (0.19.0 against 0.21.1 on 2026-09-09; 1.0.0rc3
+  # imported a module no published wheel had, and Hermes said only "No
+  # messaging platforms enabled"). This proves the exact wheel loads on the
+  # exact published Hermes, with nothing from the git checkout on the path.
+  published-hermes:
+    name: Validate the wheel on the published Hermes ${{ matrix.python-version }}
+    needs: build
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    env:
+      MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the exact source SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Read the package version from the tree
+        run: python scripts/release_version.py show | tee -a "$GITHUB_ENV"
+
+      - name: Download the one CI-built distribution pair
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.VALIDATED_ARTIFACT_NAME }}
+          path: release
+
+      - name: Install the published Hermes wheel and the exact plugin wheel
+        run: |
+          published_venv="${RUNNER_TEMP}/relay-hermes-published-${MATRIX_PYTHON_VERSION}"
+          python -m venv "$published_venv"
+          "$published_venv/bin/python" -m pip install --disable-pip-version-check \
+            "hermes-agent==${HERMES_PUBLISHED_VERSION}" \
+            "release/dist/relay_hermes-${EXPECTED_PACKAGE_VERSION}-py3-none-any.whl"
+          "$published_venv/bin/python" -m pip check
+          test "$("$published_venv/bin/python" -c 'from importlib.metadata import version; print(version("hermes-agent"))')" = "$HERMES_PUBLISHED_VERSION"
+          echo "HERMES_PUBLISHED_PYTHON=$published_venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Prove the plugin loads on the published Hermes
+        run: |
+          python -m pip install --disable-pip-version-check "pytest>=8"
+          python -m pytest -q tests/test_hermes_published_wheel.py tests/test_hermes_compat.py
 
   # The staging release proves itself before it can run: the version
   # decision publish-staging.yml would commit, derived here against live
