@@ -127,9 +127,9 @@ def test_current_event_parsing_and_mentions():
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
-    assert RELAY_OPENAPI_COMMIT == "1a2245dd775f781b57e0d1f6f3146ebd384c90c3"
+    assert RELAY_OPENAPI_COMMIT == "d4dc62372194bf929801229740346cdacfe2d5c9"
     assert RELAY_OPENAPI_SHA256 == (
-        "5458497fe8db4ee7dfe6bef67f2803137575d3ea4d835748290a5c9f8d906791"
+        "81d23529476ae77b3b7f7dfc931d2e0e421d3c91e20c59136e2deef9123f722e"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
