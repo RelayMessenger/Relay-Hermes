@@ -51,8 +51,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
+from agent.secret_scope import UnscopedSecretError
+from agent.secret_scope import get_secret as _scoped_get_secret
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms._shared import get_scoped_secret
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -62,6 +63,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.platforms.helpers import strip_markdown
+from gateway.session import build_session_key
 
 from .relay_api import (
     DEFAULT_BASE_URL,
@@ -94,6 +96,28 @@ from .state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_scoped_secret(name: str, default: Any = None) -> Any:
+    """Scope-aware credential read with the default-profile startup fallback.
+
+    Owned by the plugin: Hermes added ``gateway.platforms._shared`` with this
+    exact helper on 2026-09-02 (0.21), and the newest Hermes on PyPI, 0.19.0,
+    predates it. Before that module existed every Hermes adapter carried this
+    helper itself, which is the convention followed here. ``agent.secret_scope``
+    has shipped since before 0.19.0.
+
+    An installed profile secret scope is authoritative: a scoped miss returns
+    ``default`` and never borrows another profile's value from ``os.environ``.
+    The default profile starts unscoped under multiplexing, where ``get_secret``
+    raises ``UnscopedSecretError``; there ``os.environ`` is that profile's own
+    value, so fall back to it.
+    """
+    try:
+        value = _scoped_get_secret(name, default)
+    except UnscopedSecretError:
+        value = os.getenv(name)
+    return value if value is not None else default
 
 PLATFORM_NAME = "relayapp"
 PLATFORM_LABEL = "Relay"
@@ -811,12 +835,14 @@ class RelayAdapter(BasePlatformAdapter):
             message_id=inbound.message_id,
         )
 
+        # The sender rides on ``source`` (user_id/user_name above), which is
+        # what Hermes reads. MessageEvent grew mirror fields of the same name
+        # on 2026-08-29 (Hermes 0.21); nothing reads them, and the 0.19.0
+        # wheel's dataclass rejects them.
         event = MessageEvent(
             text=text or MEDIA_PLACEHOLDER,
             message_type=MessageType.PHOTO if media_paths else MessageType.TEXT,
             source=source,
-            user_id=inbound.sender_contact_id or None,
-            user_name=inbound.sender_contact_name or None,
             message_id=inbound.message_id or inbound.event_id,
             raw_message=inbound.event,
             timestamp=self._parse_timestamp(inbound.created_at),
@@ -874,10 +900,37 @@ class RelayAdapter(BasePlatformAdapter):
         # its row, so no other turn's completion may sweep it.
         event._relay_turn_started = True
         if event_id:
-            self._handed.get(self._event_session_key(event), {}).pop(event_id, None)
+            self._handed.get(self._relay_session_key(event), {}).pop(event_id, None)
         chat_id = str(event.source.chat_id or "")
         if chat_id and event.message_id:
             self._remember(self._turn_starter, chat_id, str(event.message_id))
+
+    def _relay_session_key(self, event: MessageEvent) -> str:
+        """The session lane of ``event``, which ``_handed`` groups rows by.
+
+        Owned by the plugin: Hermes 0.21 exposes this as
+        ``BasePlatformAdapter._event_session_key``, and the newest Hermes on
+        PyPI, 0.19.0, computes the same key inline in ``handle_message`` with
+        no profile namespace. Both build it from ``gateway.session
+        .build_session_key`` with the same two ``config.extra`` switches; the
+        profile is the event's own, else the adapter's owner profile.
+        """
+        extra = self.config.extra
+        source = event.source
+        profile = None
+        for candidate in (
+            getattr(source, "profile", None),
+            getattr(self, "_owner_profile", None),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                profile = candidate
+                break
+        return build_session_key(
+            source,
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            profile=profile,
+        )
 
     async def on_processing_complete(
         self,
@@ -911,7 +964,7 @@ class RelayAdapter(BasePlatformAdapter):
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        session_key = self._event_session_key(event)
+        session_key = self._relay_session_key(event)
         if event_id:
             self._handed.get(session_key, {}).pop(event_id, None)
             if outcome == ProcessingOutcome.SUCCESS:
@@ -980,7 +1033,7 @@ class RelayAdapter(BasePlatformAdapter):
         finally:
             _TURN_EVENT.reset(token)
         if event_id and not getattr(event, "_relay_turn_started", False):
-            session_key = self._event_session_key(event)
+            session_key = self._relay_session_key(event)
             if len(self._handed) > 500:
                 self._handed.pop(next(iter(self._handed)), None)
             self._handed.setdefault(session_key, {})[event_id] = str(
