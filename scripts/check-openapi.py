@@ -9,9 +9,9 @@ from pathlib import Path
 
 import yaml
 
-RELAY_OPENAPI_COMMIT = "1a2245dd775f781b57e0d1f6f3146ebd384c90c3"
+RELAY_OPENAPI_COMMIT = "d4dc62372194bf929801229740346cdacfe2d5c9"
 RELAY_OPENAPI_SHA256 = (
-    "5458497fe8db4ee7dfe6bef67f2803137575d3ea4d835748290a5c9f8d906791"
+    "81d23529476ae77b3b7f7dfc931d2e0e421d3c91e20c59136e2deef9123f722e"
 )
 
 
@@ -34,6 +34,7 @@ def check_openapi(path: Path) -> None:
         "/v1/websocket",
     }
     assert required_paths <= paths.keys()
+    assert "post" not in paths.get("/v1/agents", {}), "Anonymous Agent registration is retired"
     assert "/v1/events" not in paths
     assert "/v1/conversations" not in paths
 
