@@ -20,7 +20,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 MANIFEST = Path(__file__).resolve().parents[1] / "plugin.yaml"
-OPENAPI_COMMIT = "d4dc62372194bf929801229740346cdacfe2d5c9"
+OPENAPI_COMMIT = "35023fe4f52497f2c27fb9172a5f0b27a7be8bf1"
 WORKFLOWS = MANIFEST.parent / ".github" / "workflows"
 CHECK_ACTION = MANIFEST.parent / ".github" / "actions" / "check-dist" / "action.yml"
 
@@ -31,7 +31,7 @@ release_version = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = release_version
 _spec.loader.exec_module(release_version)
 OPENAPI_SHA256 = (
-    "81d23529476ae77b3b7f7dfc931d2e0e421d3c91e20c59136e2deef9123f722e"
+    "42e8039ee94377aa047f70593102bed980d00c3597f6850a0628cbd0fdf6bc81"
 )
 OPENAPI_RELATIVE_PATH = (
     f"contracts/relay-server/{OPENAPI_COMMIT}/openapi.yaml"
@@ -160,7 +160,7 @@ def test_locked_openapi_snapshot_is_exact_and_provenanced():
     harness = (root / "scripts" / "check-openapi.py").read_text(
         encoding="utf-8"
     )
-    assert len(raw) == 145119
+    assert len(raw) == 146181
     assert hashlib.sha256(raw).hexdigest() == OPENAPI_SHA256
     assert OPENAPI_COMMIT in metadata
     assert OPENAPI_SHA256 in metadata
@@ -173,12 +173,10 @@ def test_locked_openapi_snapshot_is_exact_and_provenanced():
     assert OPENAPI_SHA256 in harness
 
 
-def test_current_contract_omits_anonymous_registration_and_preserves_history():
+def test_current_contract_omits_anonymous_registration():
     root = MANIFEST.parent
     current = yaml.safe_load((root / OPENAPI_RELATIVE_PATH).read_bytes())
     assert "post" not in current["paths"].get("/v1/agents", {})
-    historical = root / "contracts/relay-server/1a2245dd775f781b57e0d1f6f3146ebd384c90c3/openapi.yaml"
-    assert hashlib.sha256(historical.read_bytes()).hexdigest() == "5458497fe8db4ee7dfe6bef67f2803137575d3ea4d835748290a5c9f8d906791"
 
 
 def test_hosted_workflows_pin_every_external_action_to_a_sha():

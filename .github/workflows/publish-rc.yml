@@ -17,8 +17,8 @@ concurrency:
 
 env:
   EXPECTED_PACKAGE_VERSION: 1.0.0rc2
-  RELAY_OPENAPI_COMMIT: d4dc62372194bf929801229740346cdacfe2d5c9
-  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/d4dc62372194bf929801229740346cdacfe2d5c9/openapi.yaml
+  RELAY_OPENAPI_COMMIT: 35023fe4f52497f2c27fb9172a5f0b27a7be8bf1
+  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/35023fe4f52497f2c27fb9172a5f0b27a7be8bf1/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
 jobs:
