@@ -722,7 +722,7 @@ def test_unmentioned_group_event_is_not_dispatched(plugin, tmp_path):
         "is_group": True,
         "owner_handle": {
             "id": "01993d50-ef7b-7b37-886b-23fd80c7ec13",
-            "handle": "helper.developer",
+            "handle": "helper",
             "joined_at": "2026-08-29T00:00:00Z",
             "kind": "agent",
             "is_me": True,
