@@ -25,7 +25,6 @@ Transport acknowledgement and Read are separate. A WebSocket ACK never marks
 a Chat Read.
 
 Relay-Hermes does not poll for events and does not expose a public HTTP server.
-It also does not add reactions, edits, or typing indicators.
 
 ### Recovery
 
@@ -52,42 +51,45 @@ validates the snapshot, atomically stores it with `full_sync_through`, and
 sends `full_sync_complete` only after the transaction commits. Historical
 Messages rebuild local indexes and never become new Hermes turns.
 
+## What works
+
+- Typing indicators while Hermes works.
+- Reactions in both directions.
+- Tool-approval answers. Reply exactly `/approve`, `/approve session`,
+  `/approve always`, or `/deny`. Other slash commands are ignored.
+- `message.failed` events are logged, not rejected.
+
+Edits and unsend are not supported.
+
 ## Install
 
-Hermes supports Git-installed directory plugins:
+Supported Hermes versions are 0.19.0 or newer, tested through 0.21.3.
+A newer minor version warns and runs. Install Hermes itself from
+[upstream source](https://github.com/NousResearch/hermes-agent#installation),
+not a wheel.
+
+Connect with the [Relay CLI](https://www.npmjs.com/package/relaymessenger),
+then start the gateway:
+
+```sh
+npx relaymessenger@staging connect hermes
+hermes gateway run
+```
+
+The CLI installs and enables the plugin. It writes the connection settings
+to `<HERMES_HOME>/.env` and offers to start the gateway for you.
+
+To install the plugin manually instead:
 
 ```sh
 hermes plugins install RelayMessenger/Relay-Hermes --enable
 ```
 
-The same repository can be installed as a Python package. Its
-`hermes_agent.plugins` entry point registers the identical platform adapter.
-
-Create the Agent with the
-[Relay CLI](https://www.npmjs.com/package/relaymessenger). It gives the Agent a `.dev` handle, saves the Agent Token in your Relay
-profile, and writes `RELAY_AGENT_TOKEN`, `RELAY_BASE_URL`, and
-`RELAY_STATE_DIR` into `~/.hermes/.env`:
-
-```sh
-npx relaymessenger agents create \
-  --connect hermes \
-  --runtime-home "$HOME/.hermes" \
-  --runtime-state-dir "$HOME/.hermes/relay" \
-  --runtime-stopped --confirm-configure
-```
-
-Stop Hermes first; `~/.hermes/config.yaml` must already exist. The CLI writes
-that one file and never starts Hermes. An Agent is created only this way.
+Then set the connection settings below in `<HERMES_HOME>/.env`.
 
 An Agent using this WebSocket must not have a saved webhook subscription.
 Relay rejects the WebSocket upgrade with HTTP `409` until those subscriptions
 are removed.
-
-Start Hermes in the foreground:
-
-```sh
-hermes gateway run
-```
 
 For an always-on installation, use Hermes's service commands:
 
@@ -101,13 +103,18 @@ generic connector platform.
 
 ## Configuration
 
-`RELAY_AGENT_TOKEN` is the only required setting.
+`HERMES_HOME` selects the Hermes home directory. It defaults to `~/.hermes`.
+The CLI writes these settings to `<HERMES_HOME>/.env`:
+
+- `RELAY_AGENT_TOKEN` is the required Agent Token.
+- `RELAY_BASE_URL` is the agent's API origin. The adapter default is `https://api.relayapp.im`.
+- `RELAY_STATE_DIR` is the durable inbox directory, set to `<HERMES_HOME>/relay`.
+- `RELAY_ALLOWED_CONTACTS` is an optional comma-separated list of Contact ids allowed to start turns. The CLI writes it only when set; unset allows all reachable Contacts.
+
+Additional adapter settings:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `RELAY_BASE_URL` | `https://api.relayapp.im` | Relay API origin |
-| `RELAY_ALLOWED_CONTACTS` | all reachable Contacts | Comma-separated Contact ids allowed to start turns |
-| `RELAY_STATE_DIR` | `<Hermes profile home>/relay` | Profile-scoped durable SQLite inbox directory |
 | `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy: `off`, `first`, `all`, or `auto` |
 | `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
 | `RELAY_HOME_CHAT` | unset | Chat id for cron and direct `hermes send` delivery |
@@ -119,35 +126,14 @@ replaced with the production default.
 
 ### Slash-command limitation
 
-Relay Contact chat is enabled, but Relay slash commands are disabled on the
-pinned Hermes core. Its slash-policy resolver reads the gateway runner's
-primary platform config and ignores `source.profile`, so a primary profile
-operator grant could otherwise authorize a secondary-profile Contact. The
-adapter therefore withholds every Relay message whose first non-whitespace
-character is `/` from Hermes, installs deny-only slash policy as defense in
-depth, and registers `relayapp` as ineligible for `/update`. This is consistent
-for primary and secondary profiles; use a trusted local CLI or authenticated
-dashboard for operator commands.
+Tool-approval answers listed above can reach Hermes from allowed Contacts.
+Other slash commands are ignored. The pinned Hermes core does not apply
+slash-command permissions per profile. Use a trusted local CLI or authenticated
+dashboard for operator commands. `relayapp` is ineligible for `/update`.
 
 `RELAY_OPERATOR_CONTACTS` and `operator_contacts` are not supported. Any old
 setting should be removed; it cannot safely grant Relay slash authority until
 the pinned Hermes policy becomes profile-aware.
-
-Non-secret settings can instead be placed under
-`gateway.platforms.relayapp.extra` in `~/.hermes/config.yaml`; environment
-variables take precedence:
-
-```yaml
-gateway:
-  platforms:
-    relayapp:
-      enabled: true
-      extra:
-        allowed_contacts:
-          - 01993d50-ef7b-7b37-886b-23fd80c7ec12
-        group_chat_policy: mentions
-        reply_to_mode: auto
-```
 
 ### Display defaults
 
@@ -160,10 +146,8 @@ cannot edit a message once sent. A plugin cannot add a row to that table, so
 that edit in place.
 
 The adapter itself refuses tool-progress lines (`format_tool_event` returns
-`None`). Everything else is a user setting. To read like iMessage, set these
-under `display.platforms.relayapp` in `~/.hermes/config.yaml` (key names from
-`hermes_cli/config_defaults.py` and `gateway/display_config.py`; an unset key
-falls through to the global `display.<key>`):
+`None`). Everything else is a user setting. To read like iMessage, use these Hermes
+display settings. An unset key falls through to the global `display.<key>`:
 
 ```yaml
 display:
@@ -213,7 +197,7 @@ Use a staging Agent Token, the staging API origin, and a separate inbox:
 ```sh
 export RELAY_AGENT_TOKEN='staging-agent-token'
 export RELAY_BASE_URL='https://api.staging.relayapp.im'
-export RELAY_STATE_DIR="$HOME/.hermes/relay-staging"
+export RELAY_STATE_DIR="${HERMES_HOME:-${HOME}/.hermes}/relay-staging"
 ./scripts/run-staging.sh
 ```
 
