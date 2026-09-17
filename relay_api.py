@@ -57,6 +57,7 @@ _UUID_PATTERN = re.compile(
 _WEBHOOK_EVENT_TYPES = {
     "message.sent",
     "message.received",
+    "message.failed",
     "message.read",
     "message.delivered",
     "reaction.added",
@@ -632,6 +633,18 @@ class RelayClient:
                 message_cursors.add(next_cursor)
                 cursor = next_cursor
         return chats
+
+    async def start_typing(self, chat_id: str) -> None:
+        await self._request("POST", f"/v1/chats/{quote(chat_id, safe='')}/typing")
+
+    async def stop_typing(self, chat_id: str) -> None:
+        await self._request("DELETE", f"/v1/chats/{quote(chat_id, safe='')}/typing")
+
+    async def send_reaction(self, message_id: str, emoji: str, *, operation: str) -> None:
+        await self._request(
+            "POST", f"/v1/messages/{quote(message_id, safe='')}/reactions",
+            body={"operation": operation, "type": "custom", "custom_emoji": emoji},
+        )
 
     async def send_message(
         self,

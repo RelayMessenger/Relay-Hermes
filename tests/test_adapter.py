@@ -1528,3 +1528,128 @@ def test_auto_quote_rule_newest_inbound_or_turn_starter_is_unquoted(plugin, tmp_
 
 async def _noop_dispatch(event):
     pass
+
+
+def test_typing_start_debounce_stop(plugin, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._client = AsyncMock()
+    clock = [10.0]
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: clock[0])
+
+    async def scenario():
+        await adapter.send_typing("chat")
+        clock[0] = 13.9
+        await adapter.send_typing("chat")
+        assert adapter._client.start_typing.await_count == 1
+        clock[0] = 14.0
+        await adapter.send_typing("chat")
+        assert adapter._client.start_typing.await_count == 2
+        await adapter.stop_typing("chat")
+        adapter._client.stop_typing.assert_awaited_once_with("chat")
+        await adapter.send_typing("chat")
+        assert adapter._client.start_typing.await_count == 3
+        adapter._client.stop_typing.side_effect = RuntimeError("offline")
+        await adapter.stop_typing("chat")
+        adapter._client.start_typing.side_effect = RuntimeError("offline")
+        await adapter.send_typing("chat")
+        assert "chat" not in adapter._typing_sent
+    asyncio.run(scenario())
+
+
+def test_reaction_outbound_add_remove(plugin, tmp_path):
+    from unittest.mock import AsyncMock, call
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._client = AsyncMock()
+    async def scenario():
+        await adapter._add_reaction("chat", "message", "\U0001f44d")
+        await adapter._remove_reaction("chat", "message")
+    asyncio.run(scenario())
+    assert adapter._client.send_reaction.await_args_list == [
+        call("message", "\U0001f44d", operation="add"),
+        call("message", "\U0001f44d", operation="remove"),
+    ]
+
+
+@pytest.mark.parametrize("action", ["added", "removed"])
+@pytest.mark.parametrize("registered", [True, False])
+def test_reaction_inbound_hook(plugin, tmp_path, action, registered):
+    from unittest.mock import AsyncMock, Mock
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox = Mock()
+    handler = AsyncMock()
+    if registered:
+        adapter.set_reaction_handler(handler)
+    payload = relay_event()
+    payload["event_type"] = "reaction." + action
+    payload["data"] = {
+        "chat_id": "chat", "message_id": "message", "part_index": 0,
+        "from_handle": {"id": "contact"}, "is_from_me": False,
+        "reaction_type": "custom", "custom_emoji": "\U0001f44d", "reacted_at": "now",
+    }
+    assert asyncio.run(adapter._handle_non_message_event(payload)) is True
+    if registered:
+        handler.assert_awaited_once_with({
+            "platform": "relayapp", "event_name": "reaction:" + action,
+            "reaction": "\U0001f44d", "user_id": "contact", "item_user_id": None,
+            "item_type": "message", "channel_id": "chat", "message_ts": "message",
+            "team_id": "", "event_ts": "now", "raw_event": payload,
+        })
+        adapter._inbox.complete.assert_called_once_with("event-id")
+    else:
+        adapter._inbox.complete.assert_called_once_with("event-id", ignored=True)
+
+
+@pytest.mark.parametrize("text,passes", [
+    ("/approve always", True), ("/approve", True), ("/approve session", True),
+    ("/deny", True), ("/status", False), ("/approve always extra", False),
+])
+def test_approval_answers_only(plugin, tmp_path, text, passes):
+    from unittest.mock import AsyncMock
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._dispatch_turn = AsyncMock()
+    payload = relay_event()
+    payload["data"]["parts"][0]["value"] = text
+    assert asyncio.run(adapter._on_inbound(plugin.parse_inbound(payload))) is passes
+    if passes:
+        result = adapter._dispatch_turn.await_args.args[0]
+        assert result.text == text
+        assert result.allow_gateway_control is True
+        assert result.is_command() is True
+    else:
+        adapter._dispatch_turn.assert_not_awaited()
+
+
+def test_message_failed_is_logged_and_ignored(plugin, tmp_path, caplog):
+    from unittest.mock import Mock
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox = Mock()
+    payload = relay_event()
+    payload.update(event_type="message.failed", data={"message_id": "failed-message"})
+    with caplog.at_level("INFO"):
+        assert asyncio.run(adapter._handle_non_message_event(payload)) is True
+    adapter._inbox.complete.assert_called_once_with("event-id", ignored=True)
+    assert "failed-message" in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["reaction.added", "message.failed"])
+def test_inbox_routes_non_message_events(plugin, tmp_path, kind):
+    from unittest.mock import AsyncMock, Mock
+    adapter = make_adapter(plugin, tmp_path)
+    payload = relay_event()
+    payload["event_type"] = kind
+    payload["data"] = {"message_id": "message", "chat_id": "chat",
+                       "from_handle": {"id": "contact"}, "reaction_type": "like"}
+    adapter._inbox = Mock()
+    adapter._inbox.next_pending.return_value = (payload["event_id"], payload)
+    adapter._message_handler = AsyncMock()
+    adapter.set_reaction_handler(AsyncMock())
+    adapter._running = True
+    def finish(*args, **kwargs):
+        adapter._running = False
+    adapter._inbox.complete.side_effect = finish
+    asyncio.run(adapter._process_inbox())
+    adapter._inbox.retry.assert_not_called()
+    adapter._inbox.complete.assert_called_once_with(
+        "event-id", **({"ignored": True} if kind == "message.failed" else {}))
+    assert adapter._reaction_handler.await_count == (1 if kind == "reaction.added" else 0)

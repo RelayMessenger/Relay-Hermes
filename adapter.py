@@ -350,8 +350,7 @@ def _explicit_reply_to_mode(config) -> str:
 class RelayAdapter(BasePlatformAdapter):
     """Durable WebSocket in, idempotent v1 Chats/Messages REST out.
 
-    Replies commit as canonical Messages. The adapter deliberately implements
-    no reactions, edits, typing indicators, or other Message effects.
+    Replies commit as canonical Messages, with typing and reaction hooks.
 
     A Message contains up to 100 ordered text or media parts. Group messages
     are answered only when their structured mention names this agent, unless
@@ -424,6 +423,8 @@ class RelayAdapter(BasePlatformAdapter):
             policy = ""
         self._group_chat_policy = policy or DEFAULT_GROUP_CHAT_POLICY
 
+        self._typing_sent: Dict[str, float] = {}
+        self._sent_reactions: Dict[Tuple[str, str], str] = {}
         self._client: Optional[RelayClient] = None
         self._receive_task: Optional[asyncio.Task] = None
         self._process_task: Optional[asyncio.Task] = None
@@ -758,6 +759,8 @@ class RelayAdapter(BasePlatformAdapter):
                 # Mark the handoff before calling handle_message(). Hermes can
                 # start and finish a fast background turn before it returns.
                 self._inbox.mark_dispatched(event_id)
+                if await self._handle_non_message_event(event):
+                    continue
                 inbound = parse_inbound(event)
                 if inbound is None:
                     self._inbox.complete(event_id, ignored=True)
@@ -775,6 +778,34 @@ class RelayAdapter(BasePlatformAdapter):
                 self._inbox.retry(event_id, str(exc))
                 logger.exception("[%s] Relay event %s failed", self.name, event_id)
                 await asyncio.sleep(1.0)
+
+    async def _handle_non_message_event(self, event: Dict[str, Any]) -> bool:
+        event_type = event.get("event_type")
+        event_id = event["event_id"]
+        data = event.get("data") or {}
+        if event_type == "message.failed":
+            logger.info("[%s] Relay message %s failed", self.name, data.get("message_id"))
+            self._inbox.complete(event_id, ignored=True)
+            return True
+        if event_type not in {"reaction.added", "reaction.removed"}:
+            return False
+        sender = data.get("from_handle") or {}
+        handler = self._reaction_handler
+        if handler is None or data.get("is_from_me") or not self._allow_contact(sender.get("id")):
+            self._inbox.complete(event_id, ignored=True)
+            return True
+        # Hermes Slack adapter's reaction hook envelope (including its field names).
+        action = "removed" if event_type == "reaction.removed" else "added"
+        await handler({
+            "platform": PLATFORM_NAME, "event_name": f"reaction:{action}",
+            "reaction": data.get("custom_emoji") or data.get("reaction_type"),
+            "user_id": sender.get("id"), "item_user_id": None,
+            "item_type": "message", "channel_id": data.get("chat_id"),
+            "message_ts": data.get("message_id"), "team_id": "",
+            "event_ts": data.get("reacted_at"), "raw_event": event,
+        })
+        self._inbox.complete(event_id)
+        return True
 
     def _addressed_in_group(self, inbound: InboundRelayMessage) -> bool:
         """Match a structured mention against ``chat.owner_handle``."""
@@ -803,10 +834,12 @@ class RelayAdapter(BasePlatformAdapter):
             return False
 
         text = render_text(inbound.message)
-        if _is_slash_message(text):
+        approval = re.fullmatch(r"/(approve|deny)(\s+(session|always))?", text) is not None
+        if _is_slash_message(text) and not (approval and self._allow_contact(inbound.sender_contact_id)):
             # Pinned Hermes resolves slash policy from the runner's primary
             # config and ignores source.profile. Do not let either a primary
-            # or secondary Relay Contact reach that unsafe dispatch seam.
+            # or secondary Relay Contact reach that unsafe dispatch seam,
+            # except the exact approval answers Hermes asks contacts to send.
             logger.info(
                 "[%s] Relay slash commands are disabled; ignoring %s",
                 self.name,
@@ -849,6 +882,9 @@ class RelayAdapter(BasePlatformAdapter):
             media_urls=media_paths,
             media_types=media_kinds,
         )
+
+        if approval:
+            event.allow_gateway_control = True
 
         # Read at intake, the moment the message is accepted for Hermes, as
         # the BlueBubbles adapter does for iMessage (mark_read right after
@@ -1462,14 +1498,41 @@ class RelayAdapter(BasePlatformAdapter):
             reply_to=reply_to,
         )
 
-    # Hermes calls these hooks. They intentionally remain no-ops: Relay-Hermes
-    # does not emit typing or other Message effects.
-
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        return None
+        if self._client is None:
+            return
+        now = time.monotonic()
+        # The vendored API states no TTL; use the four-second refresh interval.
+        if now - self._typing_sent.get(chat_id, float("-inf")) < 4.0:
+            return
+        try:
+            await self._client.start_typing(chat_id)
+            self._typing_sent[chat_id] = now
+        except Exception as exc:
+            logger.debug("[%s] Typing start failed: %s", self.name, exc)
 
     async def stop_typing(self, chat_id: str) -> None:
-        return None
+        self._typing_sent.pop(chat_id, None)
+        if self._client is None:
+            return
+        try:
+            await self._client.stop_typing(chat_id)
+        except Exception as exc:
+            logger.debug("[%s] Typing stop failed: %s", self.name, exc)
+
+    async def _add_reaction(self, chat_id: str, message_id: str, emoji: str) -> None:
+        if self._client is None:
+            return
+        await self._client.send_reaction(message_id, emoji, operation="add")
+        self._sent_reactions[(chat_id, message_id)] = emoji
+
+    async def _remove_reaction(self, chat_id: str, message_id: str) -> None:
+        key = (chat_id, message_id)
+        emoji = self._sent_reactions.get(key)
+        if self._client is None or emoji is None:
+            return
+        await self._client.send_reaction(message_id, emoji, operation="remove")
+        self._sent_reactions.pop(key, None)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {

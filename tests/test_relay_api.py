@@ -144,8 +144,7 @@ def test_relay_contract_versions_and_product_paths_stay_current():
         assert "/v1/events" not in text, name
         assert "/v1/conversations" not in text, name
     transport = (root / "relay_api.py").read_text(encoding="utf-8")
-    for message_effect_path in ("/reactions", "/typing", "/voicememo"):
-        assert message_effect_path not in transport
+    assert "/voicememo" not in transport
 
 
 def test_visible_at_text_is_not_a_structured_mention():
@@ -926,3 +925,35 @@ def test_text_helpers_use_utf16_units_and_preserve_fences():
         "```\na\n\nb\n```",
         "two",
     ]
+
+
+def test_typing_and_reaction_http_operations():
+    transport = FakeTransport([RelayResponse(202, {}) for _ in range(4)])
+    client = RelayClient(TOKEN, transport=transport)
+    async def scenario():
+        await client.start_typing("chat/id")
+        await client.stop_typing("chat/id")
+        await client.send_reaction("message/id", "\U0001f44d", operation="add")
+        await client.send_reaction("message/id", "\U0001f44d", operation="remove")
+    asyncio.run(scenario())
+    assert [(c["method"], c["path"], c["body"]) for c in transport.calls] == [
+        ("POST", "/v1/chats/chat%2Fid/typing", None),
+        ("DELETE", "/v1/chats/chat%2Fid/typing", None),
+        ("POST", "/v1/messages/message%2Fid/reactions",
+         {"operation": "add", "type": "custom", "custom_emoji": "\U0001f44d"}),
+        ("POST", "/v1/messages/message%2Fid/reactions",
+         {"operation": "remove", "type": "custom", "custom_emoji": "\U0001f44d"}),
+    ]
+
+
+def test_websocket_accepts_message_failed():
+    payload = event()
+    payload.update(event_type="message.failed", data={"message_id": MESSAGE_ID,
+                   "code": "DELIVERY_FAILED", "failed_at": "2026-09-17T00:00:00Z"})
+    order = []
+    inbox = OrderedInbox(order)
+    socket = FakeSocket([ready("40"), {"type": "event", "sequence": "41", "event": payload}], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=inbox))
+    assert inbox.events == [payload]
+    assert order == ["commit:41", "ack:41"]
