@@ -162,6 +162,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyMessages"
         "500":
           $ref: "#/components/responses/InternalServerError"
       parameters:
@@ -661,6 +663,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyMessages"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -764,6 +768,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyMessages"
         "500":
           $ref: "#/components/responses/InternalServerError"
       description: |-
@@ -950,6 +956,8 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyMessages"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/messages/{messageId}:
@@ -1564,7 +1572,10 @@ paths:
         <Agent Token>. If the Agent has any saved webhook subscription, Relay
         returns 409. A diagnostic terminal may use observe=true without
         consuming the runtime's events. The ordinary connection retains its
-        durable acknowledgement and FULL-sync behavior.
+        durable acknowledgement and FULL-sync behavior. The client owns the
+        heartbeat: send {"type":"ping"} every heartbeat_interval_ms and Relay
+        answers {"type":"pong"} from the edge runtime, without waking the
+        Agent's connection state. Relay never sends a ping frame.
 components:
   schemas:
     AddParticipantRequest:
@@ -3898,20 +3909,26 @@ components:
     WebSocketPingFrame:
       type: object
       additionalProperties: false
+      description: >-
+        Heartbeat, client to server. Send this frame every
+        heartbeat_interval_ms, serialized exactly as {"type":"ping"}. Relay
+        answers it in the edge runtime without waking the Agent's connection
+        state, so the reply costs nothing and arrives while the connection is
+        otherwise idle. Relay never sends a ping frame.
       required:
         - type
-        - sent_at
       properties:
         type:
           type: string
           enum:
             - ping
-        sent_at:
-          type: string
-          format: date-time
     WebSocketPongFrame:
       type: object
       additionalProperties: false
+      description: >-
+        Heartbeat reply, server to client, serialized exactly as
+        {"type":"pong"}. It answers each ping frame. A client that stops
+        sending pings is closed with 4408 after the heartbeat times out.
       required:
         - type
       properties:
@@ -4255,6 +4272,31 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    TooManyMessages:
+      description: |-
+        The sender is posting too fast. Relay caps one sender at 10 messages
+        in 10 seconds in one conversation and 300 in 10 seconds across all of
+        them, which allows a burst and then refuses with error code `2008`.
+        Wait `retry_after` seconds, which the `Retry-After` header repeats,
+        and send again. Nothing was stored, so a retry cannot duplicate the
+        Message.
+      headers:
+        Retry-After:
+          description: Seconds to wait before sending again.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              status: 429
+              code: 2008
+              message: Too many messages. Try again shortly.
+              doc_url: https://docs.relayapp.im/error/codes/2xxx/2008
+              retry_after: 10
+            success: false
     Unauthorized:
       description: Unauthorized - missing or invalid authentication
       content:
