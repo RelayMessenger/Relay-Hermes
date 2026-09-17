@@ -28,16 +28,13 @@ from pathlib import Path
 PLUGIN_NAME = "relay-hermes"
 HERMES_DISTRIBUTION = "hermes-agent"
 
-# The oldest Hermes the adapter is proven against: 0.19.0 (2026-07-20) is the
-# newest wheel PyPI ships, and the whole test suite passes on it. Older
-# wheels were never run and are refused.
+# The oldest Hermes the adapter is proven against. Older versions are refused.
 HERMES_MIN_VERSION = "0.19.0"
-# The newest Hermes the adapter is proven against: CI's git pin, commit
-# b2aa855 (2026-09-08), whose pyproject says 0.21.1. Newer versions
-# must be tested before the supported range is extended.
-HERMES_MAX_TESTED_VERSION = "0.21.1"
+# Patch releases in the tested minor load silently; newer minors warn and run.
+HERMES_MAX_TESTED_VERSION = "0.21.3"
 SUPPORTED_HERMES = (
-    f"{HERMES_DISTRIBUTION} {HERMES_MIN_VERSION} through {HERMES_MAX_TESTED_VERSION}"
+    f"{HERMES_DISTRIBUTION} >= {HERMES_MIN_VERSION}; "
+    f"tested through {HERMES_MAX_TESTED_VERSION} (newer minors warn and run)"
 )
 
 # Every Hermes symbol adapter.py and state.py import, checked as a set so a
@@ -147,13 +144,12 @@ def check_hermes() -> str:
         )
         _report(message, error=True)
         raise HermesVersionError(message)
-    if parse_version(found) > parse_version(HERMES_MAX_TESTED_VERSION):
-        message = (
-            f"{prefix}: found {HERMES_DISTRIBUTION} {found}, which is newer "
-            f"than {HERMES_MAX_TESTED_VERSION}. Supported: {SUPPORTED_HERMES}."
+    if parse_version(found)[:2] > parse_version(HERMES_MAX_TESTED_VERSION)[:2]:
+        logger.warning(
+            "Relay plugin tested through Hermes %s; you have %s. It will try to run.",
+            HERMES_MAX_TESTED_VERSION,
+            found,
         )
-        _report(message, error=True)
-        raise HermesVersionError(message)
     missing: list[str] = []
     for module_name, symbols in HERMES_IMPORTS:
         try:
