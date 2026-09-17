@@ -56,7 +56,7 @@ Messages rebuild local indexes and never become new Hermes turns.
 - Typing indicators while Hermes works.
 - Reactions in both directions.
 - Tool-approval answers. Reply exactly `/approve`, `/approve session`,
-  `/approve always`, or `/deny`. Other slash commands are ignored.
+  `/approve always`, or `/deny`.
 - `message.failed` events are logged, not rejected.
 
 Edits and unsend are not supported.
@@ -124,16 +124,9 @@ Additional adapter settings:
 loopback development. A configured invalid value fails closed and is never
 replaced with the production default.
 
-### Slash-command limitation
-
-Tool-approval answers listed above can reach Hermes from allowed Contacts.
-Other slash commands are ignored. The pinned Hermes core does not apply
-slash-command permissions per profile. Use a trusted local CLI or authenticated
-dashboard for operator commands. `relayapp` is ineligible for `/update`.
-
-`RELAY_OPERATOR_CONTACTS` and `operator_contacts` are not supported. Any old
-setting should be removed; it cannot safely grant Relay slash authority until
-the pinned Hermes policy becomes profile-aware.
+Slash commands work like on Telegram. To restrict who may run them, set
+`allow_admin_from` (and optionally `user_allowed_commands`) under
+`gateway.platforms.relayapp.extra` in Hermes's config, using Relay Contact ids.
 
 ### Display defaults
 

@@ -797,140 +797,26 @@ def test_ordinary_contacts_continue_to_dispatch_normal_chat(
     assert [event.text for event in dispatched] == ["hello"]
 
 
-def test_relay_slash_policy_is_always_deny_only(
-    plugin,
-    tmp_path,
-):
+@pytest.mark.parametrize("configured", [False, True])
+def test_relay_preserves_hermes_slash_policy(plugin, tmp_path, configured):
     from gateway.config import PlatformConfig
-    from gateway.slash_access import policy_from_extra
 
-    config = PlatformConfig(extra={
-        "token": "relay-test-token",
-        "state_dir": str(tmp_path),
-        # Every attempted legacy/native grant is retired by the adapter.
-        "operator_contacts": ["ordinary-contact"],
+    policy = {
         "allow_admin_from": ["ordinary-contact"],
         "group_allow_admin_from": ["ordinary-contact"],
-        "user_allowed_commands": ["update"],
-        "group_user_allowed_commands": ["update"],
-    })
-    adapter = plugin.RelayAdapter(config)
-    assert adapter._allow_contact("ordinary-contact") is True
-    assert "operator_contacts" not in config.extra
-    assert config.extra["allow_admin_from"] == [
-        plugin.NO_RELAY_SLASH_ADMIN
-    ]
-    assert config.extra["group_allow_admin_from"] == [
-        plugin.NO_RELAY_SLASH_ADMIN
-    ]
-    assert config.extra["user_allowed_commands"] == []
-    assert config.extra["group_user_allowed_commands"] == []
-
-    for scope in ("dm", "group"):
-        policy = policy_from_extra(config.extra, scope)
-        assert policy.enabled is True
-        assert policy.can_run("ordinary-contact", "update") is False
-        assert policy.can_run("ordinary-contact", "approvals") is False
-    assert plugin._is_slash_message("/update") is True
-    assert plugin._is_slash_message("  /help") is True
-    assert plugin._is_slash_message("ordinary chat") is False
-
-
-def test_pinned_hermes_multi_profile_slash_dispatch_denies_update_everywhere(
-    plugin,
-    tmp_path,
-):
-    """Pin the source.profile bug and prove Relay fails closed around it."""
-
-    api = importlib.import_module("relay_hermes.relay_api")
-    from gateway.config import GatewayConfig, PlatformConfig
-    if not hasattr(plugin.BasePlatformAdapter, "set_owner_profile"):
-        pytest.skip("this Hermes has no multiplexed profiles (added after 0.19.0)")
-    from gateway.slash_access import policy_for_source
-
-    primary_config = PlatformConfig(extra={
-        "token": "primary-token",
-        "state_dir": str(tmp_path / "primary-state"),
-        "allowed_contacts": ["primary-contact"],
-        # These attempted grants must not survive adapter construction.
-        "allow_admin_from": ["primary-contact", "secondary-contact"],
-        "user_allowed_commands": ["update"],
-    })
-    secondary_config = PlatformConfig(extra={
-        "token": "secondary-token",
-        "state_dir": str(tmp_path / "secondary-state"),
-        "allowed_contacts": ["secondary-contact"],
-        "allow_admin_from": ["secondary-contact"],
-        "user_allowed_commands": ["update"],
-    })
-    primary = plugin.RelayAdapter(primary_config)
-    secondary = plugin.RelayAdapter(secondary_config)
-    secondary.set_owner_profile("secondary")
-
-    # This is the exact pinned-Hermes seam: policy_for_source ignores
-    # source.profile and consults only gateway_config.platforms (the primary
-    # config). The primary deny-only policy therefore covers both sources.
-    gateway_config = GatewayConfig(
-        platforms={primary.platform: primary_config}
-    )
-    primary_source = primary.build_source(
-        chat_id="primary-chat",
-        chat_name="Primary",
-        chat_type="dm",
-        user_id="primary-contact",
-        user_name="Primary Contact",
-    )
-    primary_source.profile = "default"
-    secondary_source = secondary.build_source(
-        chat_id="secondary-chat",
-        chat_name="Secondary",
-        chat_type="dm",
-        user_id="secondary-contact",
-        user_name="Secondary Contact",
-    )
-    secondary_source.profile = "secondary"
-    assert policy_for_source(
-        gateway_config, primary_source
-    ).can_run("primary-contact", "update") is False
-    assert policy_for_source(
-        gateway_config, secondary_source
-    ).can_run("secondary-contact", "update") is False
-
-    dispatched = []
-
-    async def capture_dispatch(event):
-        dispatched.append(event)
-
-    primary._dispatch_turn = capture_dispatch
-    secondary._dispatch_turn = capture_dispatch
-
-    def inbound(event_id: str, contact_id: str, text: str):
-        payload = relay_event(event_id)
-        payload["data"]["sender_handle"]["id"] = contact_id
-        payload["data"]["parts"] = [{"type": "text", "value": text}]
-        parsed = api.parse_inbound(payload)
-        assert parsed is not None
-        return parsed
-
-    assert asyncio.run(primary._on_inbound(
-        inbound("primary-update", "primary-contact", "/update")
-    )) is False
-    assert asyncio.run(secondary._on_inbound(
-        inbound("secondary-update", "secondary-contact", "/update")
-    )) is False
-    assert dispatched == []
-
-    # The profile-independent slash block must not disable ordinary chat.
-    assert asyncio.run(primary._on_inbound(
-        inbound("primary-chat", "primary-contact", "hello primary")
-    )) is True
-    assert asyncio.run(secondary._on_inbound(
-        inbound("secondary-chat", "secondary-contact", "hello secondary")
-    )) is True
-    assert [event.text for event in dispatched] == [
-        "hello primary",
-        "hello secondary",
-    ]
+        "user_allowed_commands": ["status"],
+        "group_user_allowed_commands": ["status"],
+    }
+    extra = {"token": "relay-test-token", "state_dir": str(tmp_path)}
+    if configured:
+        extra.update(policy)
+    config = PlatformConfig(extra=extra)
+    plugin.RelayAdapter(config)
+    for key, value in policy.items():
+        if configured:
+            assert config.extra[key] == value
+        else:
+            assert key not in config.extra
 
 
 def test_invalid_configured_base_url_fails_closed_without_production_fallback(
@@ -1059,9 +945,7 @@ def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
     assert profile_a._base_url == "https://a.example.test"
     assert profile_a._allowed_contacts == {"a-contact"}
     assert profile_a._inbox.path.parent == profile_a_state
-    assert config_a.extra["allow_admin_from"] == [
-        plugin.NO_RELAY_SLASH_ADMIN
-    ]
+    assert "allow_admin_from" not in config_a.extra
     assert "operator_contacts" not in config_a.extra
 
     assert profile_b._token == "profile-b-token"
@@ -1069,9 +953,7 @@ def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
     assert profile_b._allowed_contacts == set()
     assert profile_b._inbox.path.parent == tmp_path / "profile-b" / "relay"
     assert config_b.extra["allowed_users"] == ["*"]
-    assert config_b.extra["allow_admin_from"] == [
-        plugin.NO_RELAY_SLASH_ADMIN
-    ]
+    assert "allow_admin_from" not in config_b.extra
 
     assert profile_a._inbox.path != profile_b._inbox.path
     assert profile_a._inbox.path.parent != process_state
@@ -1600,24 +1482,41 @@ def test_reaction_inbound_hook(plugin, tmp_path, action, registered):
         adapter._inbox.complete.assert_called_once_with("event-id", ignored=True)
 
 
-@pytest.mark.parametrize("text,passes", [
-    ("/approve always", True), ("/approve", True), ("/approve session", True),
-    ("/deny", True), ("/status", False), ("/approve always extra", False),
-])
-def test_approval_answers_only(plugin, tmp_path, text, passes):
-    from unittest.mock import AsyncMock
+@pytest.mark.parametrize("text", ["/status", "/approve always"])
+@pytest.mark.parametrize("allowed", [True, False])
+def test_slash_messages_use_contact_gate(plugin, tmp_path, monkeypatch, text, allowed):
+    from unittest.mock import AsyncMock, Mock
+
+    monkeypatch.setenv("RELAY_ALLOWED_CONTACTS", "allowed-contact")
     adapter = make_adapter(plugin, tmp_path)
     adapter._dispatch_turn = AsyncMock()
     payload = relay_event()
     payload["data"]["parts"][0]["value"] = text
-    assert asyncio.run(adapter._on_inbound(plugin.parse_inbound(payload))) is passes
-    if passes:
+    payload["data"]["sender_handle"]["id"] = (
+        "allowed-contact" if allowed else "outside-contact"
+    )
+    adapter._inbox = Mock()
+    adapter._inbox.next_pending.return_value = (payload["event_id"], payload)
+    adapter._message_handler = AsyncMock()
+    adapter._running = True
+
+    def finish(*args, **kwargs):
+        adapter._running = False
+
+    adapter._dispatch_turn.side_effect = finish
+    adapter._inbox.complete.side_effect = finish
+    asyncio.run(adapter._process_inbox())
+    adapter._inbox.retry.assert_not_called()
+    if allowed:
+        adapter._dispatch_turn.assert_awaited_once()
         result = adapter._dispatch_turn.await_args.args[0]
         assert result.text == text
         assert result.allow_gateway_control is True
         assert result.is_command() is True
+        adapter._inbox.complete.assert_not_called()
     else:
         adapter._dispatch_turn.assert_not_awaited()
+        adapter._inbox.complete.assert_called_once_with("event-id", ignored=True)
 
 
 def test_message_failed_is_logged_and_ignored(plugin, tmp_path, caplog):

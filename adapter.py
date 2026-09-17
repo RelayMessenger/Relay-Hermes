@@ -31,9 +31,8 @@ Configuration in ``~/.hermes/.env`` (or ``config.yaml`` under
 Relay authenticates senders server side. When ``RELAY_ALLOWED_CONTACTS`` is set,
 only those Contact ids are passed to Hermes; otherwise every Contact that can
 message the agent is accepted. Chat access never grants operator authority.
-Relay slash-command messages are not dispatched to Hermes on the pinned core:
-privileged command policy is not profile-aware there, so every Relay profile
-fails closed while ordinary chat continues.
+Slash commands pass to Hermes, whose ``allow_admin_from`` / ``user_allowed_commands``
+for the ``relayapp`` platform decide who may run them, as on Telegram.
 """
 
 from __future__ import annotations
@@ -147,14 +146,6 @@ GROUP_CHAT_POLICIES = {"mentions", "all"}
 DEFAULT_GROUP_CHAT_POLICY = "mentions"
 WEBSOCKET_READY_TIMEOUT_SECONDS = 30.0
 
-# Pinned Hermes ``gateway.slash_access.policy_for_source`` ignores
-# ``source.profile`` and reads only the process runner's primary config. There
-# is therefore no safe per-profile Relay operator decision. This impossible
-# Relay Contact id keeps Hermes's generic slash gate enabled and denied for
-# every profile as defense in depth; adapter intake also drops every slash
-# message before Hermes dispatch.
-NO_RELAY_SLASH_ADMIN = "!relay-hermes-slash-disabled"
-
 @dataclasses.dataclass
 class _TurnEvent:
     event_id: str
@@ -216,14 +207,7 @@ def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
 
 
 def _install_access_policy(config: PlatformConfig) -> set[str]:
-    """Preserve ordinary chat while forcing every Relay slash command closed.
-
-    Hermes's central chat authorization understands ``allowed_users`` while
-    its slash authorization reads only the primary profile config. Mirroring
-    the chat principals keeps normal Contact chat working. Overwriting every
-    admin and user command list with a deny policy prevents either a primary or
-    secondary Relay source from inheriting a cross-profile `/update` grant.
-    """
+    """Mirror the Contact allowlist into Hermes's central chat gate."""
 
     extra = dict(getattr(config, "extra", {}) or {})
     config.extra = extra
@@ -237,20 +221,7 @@ def _install_access_policy(config: PlatformConfig) -> set[str]:
     extra["allowed_users"] = chat_principals
     extra["allow_from"] = chat_principals
     extra["group_allow_from"] = chat_principals
-    # Retire both the former plugin vocabulary and Hermes-native attempted
-    # grants. Pinned Hermes cannot enforce them per source.profile.
-    extra.pop("operator_contacts", None)
-    extra["allow_admin_from"] = [NO_RELAY_SLASH_ADMIN]
-    extra["group_allow_admin_from"] = [NO_RELAY_SLASH_ADMIN]
-    extra["user_allowed_commands"] = []
-    extra["group_user_allowed_commands"] = []
     return allowed_contacts
-
-
-def _is_slash_message(text: str) -> bool:
-    """Return whether Relay must withhold this message from Hermes dispatch."""
-
-    return bool((text or "").lstrip().startswith("/"))
 
 
 _CHUNK_INDICATOR = re.compile(r"\s*\(\d+/\d+\)$")
@@ -834,18 +805,6 @@ class RelayAdapter(BasePlatformAdapter):
             return False
 
         text = render_text(inbound.message)
-        approval = re.fullmatch(r"/(approve|deny)(\s+(session|always))?", text) is not None
-        if _is_slash_message(text) and not (approval and self._allow_contact(inbound.sender_contact_id)):
-            # Pinned Hermes resolves slash policy from the runner's primary
-            # config and ignores source.profile. Do not let either a primary
-            # or secondary Relay Contact reach that unsafe dispatch seam,
-            # except the exact approval answers Hermes asks contacts to send.
-            logger.info(
-                "[%s] Relay slash commands are disabled; ignoring %s",
-                self.name,
-                inbound.message_id,
-            )
-            return False
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
@@ -882,9 +841,6 @@ class RelayAdapter(BasePlatformAdapter):
             media_urls=media_paths,
             media_types=media_kinds,
         )
-
-        if approval:
-            event.allow_gateway_control = True
 
         # Read at intake, the moment the message is accepted for Hermes, as
         # the BlueBubbles adapter does for iMessage (mark_read right after
