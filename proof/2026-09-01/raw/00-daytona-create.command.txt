@@ -1,1 +1,0 @@
-daytona create --name relay-hermes-final-corrections-20260901 --target us --snapshot daytona-large --auto-stop 120 --auto-archive 1440 --label purpose=relay-hermes-final-audit-corrections --label repository=Relay-Hermes
