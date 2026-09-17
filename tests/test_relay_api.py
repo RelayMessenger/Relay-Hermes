@@ -14,6 +14,8 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from relay_hermes.relay_api import (
+    HEARTBEAT_PING_FRAME,
+    HEARTBEAT_PONG_TIMEOUT_SECONDS,
     RelayClient,
     RelayFullSyncError,
     RelayResponse,
@@ -535,6 +537,119 @@ def test_websocket_replies_to_application_ping_without_moving_checkpoint():
     ]
 
 
+class FakeClock:
+    """A clock the test advances, so no test waits on a real 30 seconds."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: List[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.slept.append(delay)
+        # Hand the receive loop its turn before the clock moves, so an
+        # already-delivered pong is recorded at the time it arrived.
+        for _ in range(2):
+            await asyncio.sleep(0)
+        self.now += delay
+
+
+class SilentSocket:
+    """A server that never sends a frame: only the heartbeat can end this."""
+
+    def __init__(self) -> None:
+        self.sent: List[str] = []
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        await asyncio.Event().wait()  # pragma: no cover - never returns
+        raise StopAsyncIteration
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+
+
+class AutoPongSocket:
+    """Answers the first `pongs` text pings the way Cloudflare's auto-response
+    does, then goes quiet."""
+
+    def __init__(self, pongs: int) -> None:
+        self.sent: List[str] = []
+        self.pongs = pongs
+        self.inbound: asyncio.Queue = asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return await self.inbound.get()
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+        pings = len([frame for frame in self.sent if "ping" in frame])
+        if json.loads(raw).get("type") == "ping" and pings <= self.pongs:
+            self.inbound.put_nowait(json.dumps({"type": "pong"}))
+
+
+def test_websocket_heartbeat_sends_the_exact_relay_ping_text_each_interval():
+    # Cloudflare's WebSocket auto-response matches the request text byte for
+    # byte, so any extra whitespace here would never be answered.
+    assert HEARTBEAT_PING_FRAME == '{"type":"ping"}'
+    clock = FakeClock()
+    socket = AutoPongSocket(pongs=3)
+
+    with pytest.raises(RelayWebSocketDisconnect) as raised:
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox([]),
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        ))
+
+    assert socket.sent == ['{"type":"ping"}'] * 4
+    assert clock.slept == [30.0] * 5
+    assert raised.value.reason == "heartbeat_timeout"
+
+
+def test_websocket_consumes_a_pong_without_moving_the_checkpoint():
+    order: List[str] = []
+    socket = FakeSocket([
+        ready("40"),
+        {"type": "pong"},
+        {"type": "event", "sequence": "41", "event": event()},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox(order),
+        ))
+    assert order == ["commit:41", "ack:41"]
+    assert socket.sent == [{"type": "ack", "through_sequence": "41"}]
+
+
+def test_websocket_heartbeat_timeout_without_a_pong_is_retryable():
+    clock = FakeClock()
+    socket = SilentSocket()
+
+    with pytest.raises(RelayWebSocketDisconnect) as raised:
+        asyncio.run(consume_websocket(
+            socket,
+            inbox=OrderedInbox([]),
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        ))
+
+    assert raised.value.reason == "heartbeat_timeout"
+    # The reconnect path in run_websocket_loop keys off this.
+    assert raised.value.terminal is False
+    assert clock.now == HEARTBEAT_PONG_TIMEOUT_SECONDS
+    assert socket.sent == ['{"type":"ping"}']
+
+
 class FakeConnectionContext:
     def __init__(self, socket):
         self.socket = socket
@@ -580,13 +695,11 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
         *,
         additional_headers,
         ping_interval,
-        ping_timeout,
     ):
         connections.append((
             url,
             additional_headers,
             ping_interval,
-            ping_timeout,
         ))
         return FakeConnectionContext(sockets[len(connections) - 1])
 
@@ -615,11 +728,8 @@ def test_websocket_loop_reconnects_with_direct_token_then_stops_revoked():
         {"Authorization": f"Bearer {TOKEN}"},
     ]
     assert all("?" not in entry[0] for entry in connections)
-    assert [(entry[2], entry[3]) for entry in connections] == [
-        (30.0, 60.0),
-        (30.0, 60.0),
-        (30.0, 60.0),
-    ]
+    # Protocol pings are off; relay_api sends its own text heartbeat instead.
+    assert [entry[2] for entry in connections] == [None, None, None]
     assert sleeps == [0.5, 0.5]
     assert ready_connections == [1, 2, 3]
 
@@ -641,13 +751,11 @@ def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():
         *,
         additional_headers,
         ping_interval,
-        ping_timeout,
     ):
         connections.append((
             url,
             additional_headers,
             ping_interval,
-            ping_timeout,
         ))
         return FakeConnectionContext(socket)
 
@@ -660,8 +768,7 @@ def test_websocket_loop_stops_on_protocol_violation_without_reconnecting():
     assert connections == [(
         "wss://relay.test/v1/websocket",
         {"Authorization": f"Bearer {TOKEN}"},
-        30.0,
-        60.0,
+        None,
     )]
 
 
