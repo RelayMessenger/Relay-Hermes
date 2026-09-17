@@ -8,6 +8,7 @@ import json
 import logging
 import random as _random
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -45,6 +46,9 @@ TRANSIENT_BASE_DELAY_MS = 500
 TRANSIENT_MAX_DELAY_MS = 30_000
 HEARTBEAT_PING_INTERVAL_SECONDS = 30.0
 HEARTBEAT_PONG_TIMEOUT_SECONDS = 60.0
+# Cloudflare answers this exact text frame with {"type":"pong"} without
+# waking the Durable Object, and reads the last one's time for liveness.
+HEARTBEAT_PING_FRAME = json.dumps({"type": "ping"}, separators=(",", ":"))
 WEBSOCKET_WEBHOOK_CONFIGURED_CLOSE_CODE = 4410
 _SEQUENCE_PATTERN = re.compile(r"^(0|[1-9][0-9]*)$")
 _DNS_LABEL_PATTERN = re.compile(
@@ -774,203 +778,249 @@ async def consume_websocket(
     on_accepted: Callable[[], Any] = lambda: None,
     on_ready: Callable[[], Any] = lambda: None,
     on_full_sync: Optional[FullSyncHandler] = None,
+    ping_interval_seconds: float = HEARTBEAT_PING_INTERVAL_SECONDS,
+    pong_timeout_seconds: float = HEARTBEAT_PONG_TIMEOUT_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Commit before cumulative ACK; transport ACK never processes or Reads."""
 
-    ready = False
-    accepted_through: Optional[int] = None
-    full_sync_through: Optional[int] = None
-    full_sync_pending = False
-    async for raw in socket:
-        if not isinstance(raw, str):
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received a non-text frame"
-            )
-        try:
-            frame = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received invalid JSON"
-            ) from exc
-        frame_type = frame.get("type") if isinstance(frame, dict) else None
-        if frame_type == "ready":
-            checkpoint = frame.get("acked_through")
-            requires_full_sync = frame.get("full_sync_required")
-            required_through = frame.get("full_sync_through")
-            if (
-                ready
-                or set(frame) != {
-                    "type",
-                    "connection_id",
-                    "acked_through",
-                    "full_sync_required",
-                    "full_sync_through",
-                    "heartbeat_interval_ms",
-                    "max_in_flight",
-                }
-                or not isinstance(checkpoint, str)
-                or _SEQUENCE_PATTERN.fullmatch(checkpoint) is None
-                or not isinstance(requires_full_sync, bool)
-                or (
-                    requires_full_sync
-                    and (
-                        not isinstance(required_through, str)
-                        or _SEQUENCE_PATTERN.fullmatch(required_through) is None
-                    )
+    last_pong_at = monotonic()
+
+    async def receive() -> None:
+        nonlocal last_pong_at
+        ready = False
+        accepted_through: Optional[int] = None
+        full_sync_through: Optional[int] = None
+        full_sync_pending = False
+        async for raw in socket:
+            if not isinstance(raw, str):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received a non-text frame"
                 )
-                or (not requires_full_sync and required_through is not None)
-                or not isinstance(frame.get("connection_id"), str)
-                or _UUID_PATTERN.fullmatch(frame["connection_id"]) is None
-                or isinstance(frame.get("heartbeat_interval_ms"), bool)
-                or not isinstance(frame.get("heartbeat_interval_ms"), int)
-                or frame["heartbeat_interval_ms"] < 1
-                or isinstance(frame.get("max_in_flight"), bool)
-                or not isinstance(frame.get("max_in_flight"), int)
-                or frame["max_in_flight"] < 1
+            try:
+                frame = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received invalid JSON"
+                ) from exc
+            frame_type = frame.get("type") if isinstance(frame, dict) else None
+            if frame_type == "ready":
+                checkpoint = frame.get("acked_through")
+                requires_full_sync = frame.get("full_sync_required")
+                required_through = frame.get("full_sync_through")
+                if (
+                    ready
+                    or set(frame) != {
+                        "type",
+                        "connection_id",
+                        "acked_through",
+                        "full_sync_required",
+                        "full_sync_through",
+                        "heartbeat_interval_ms",
+                        "max_in_flight",
+                    }
+                    or not isinstance(checkpoint, str)
+                    or _SEQUENCE_PATTERN.fullmatch(checkpoint) is None
+                    or not isinstance(requires_full_sync, bool)
+                    or (
+                        requires_full_sync
+                        and (
+                            not isinstance(required_through, str)
+                            or _SEQUENCE_PATTERN.fullmatch(required_through) is None
+                        )
+                    )
+                    or (not requires_full_sync and required_through is not None)
+                    or not isinstance(frame.get("connection_id"), str)
+                    or _UUID_PATTERN.fullmatch(frame["connection_id"]) is None
+                    or isinstance(frame.get("heartbeat_interval_ms"), bool)
+                    or not isinstance(frame.get("heartbeat_interval_ms"), int)
+                    or frame["heartbeat_interval_ms"] < 1
+                    or isinstance(frame.get("max_in_flight"), bool)
+                    or not isinstance(frame.get("max_in_flight"), int)
+                    or frame["max_in_flight"] < 1
+                ):
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid ready frame"
+                    )
+                accepted_through = int(checkpoint)
+                full_sync_pending = requires_full_sync
+                full_sync_through = (
+                    int(required_through) if requires_full_sync else None
+                )
+                ready = True
+                result = on_ready()
+                if asyncio.iscoroutine(result):
+                    await result
+                continue
+            if frame_type == "disconnect":
+                reason = frame.get("reason")
+                if set(frame) != {"type", "reason"} or reason not in _DISCONNECT_REASONS:
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid disconnect frame"
+                    )
+                raise RelayWebSocketDisconnect(reason)
+            if frame_type == "ping":
+                if (
+                    set(frame) != {"type", "sent_at"}
+                    or not ready
+                    or not isinstance(frame.get("sent_at"), str)
+                ):
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid ping frame"
+                    )
+                await socket.send(json.dumps(
+                    {"type": "pong"},
+                    separators=(",", ":"),
+                ))
+                continue
+            if frame_type == "pong":
+                # The answer to our own heartbeat. Cloudflare replies before the
+                # Durable Object wakes, so a pong may arrive before "ready".
+                if set(frame) != {"type"}:
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid pong frame"
+                    )
+                last_pong_at = monotonic()
+                continue
+            if frame_type == "error":
+                code = frame.get("code")
+                message = frame.get("message")
+                fatal = frame.get("fatal")
+                retryable = frame.get("retryable")
+                if (
+                    set(frame) != {
+                        "type",
+                        "code",
+                        "message",
+                        "fatal",
+                        "retryable",
+                    }
+                    or not isinstance(code, str)
+                    or code not in _WEBSOCKET_ERROR_CODES
+                    or not isinstance(message, str)
+                    or not isinstance(fatal, bool)
+                    or not isinstance(retryable, bool)
+                ):
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid error frame"
+                    )
+                raise RelayWebSocketError(
+                    message,
+                    code=code,
+                    fatal=fatal,
+                    retryable=retryable,
+                )
+            if frame_type == "full_sync":
+                through = frame.get("through_sequence")
+                reason = frame.get("reason")
+                if (
+                    set(frame) != {"type", "through_sequence", "reason"}
+                    or not ready
+                    or not full_sync_pending
+                    or not isinstance(through, str)
+                    or _SEQUENCE_PATTERN.fullmatch(through) is None
+                    or int(through) != full_sync_through
+                    or reason != "checkpoint_outside_retention"
+                ):
+                    raise RelayWebSocketProtocolError(
+                        "Relay WebSocket received an invalid FULL sync frame"
+                    )
+                if on_full_sync is None:
+                    raise RelayFullSyncError(
+                        "Relay requires a FULL sync, but this consumer has no "
+                        "safe snapshot reconciler."
+                    )
+                await on_full_sync(through, reason)
+                await socket.send(json.dumps({
+                    "type": "full_sync_complete",
+                    "through_sequence": through,
+                }, separators=(",", ":")))
+                accepted_through = int(through)
+                full_sync_pending = False
+                full_sync_through = None
+                continue
+            if full_sync_pending and frame_type == "event":
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an event while FULL sync was pending"
+                )
+            if (
+                frame_type != "event"
+                or set(frame) != {"type", "sequence", "event"}
+                or not ready
             ):
                 raise RelayWebSocketProtocolError(
-                    "Relay WebSocket received an invalid ready frame"
+                    "Relay WebSocket received an invalid frame"
                 )
-            accepted_through = int(checkpoint)
-            full_sync_pending = requires_full_sync
-            full_sync_through = (
-                int(required_through) if requires_full_sync else None
-            )
-            ready = True
-            result = on_ready()
+            sequence = frame.get("sequence")
+            event = frame.get("event")
+            if (
+                not isinstance(sequence, str)
+                or _SEQUENCE_PATTERN.fullmatch(sequence) is None
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid sequence"
+                )
+            if (
+                not isinstance(event, dict)
+                or event.get("api_version") != RELAY_API_VERSION
+                or event.get("webhook_version") != RELAY_WEBHOOK_VERSION
+                or event.get("event_type") not in _WEBHOOK_EVENT_TYPES
+                or not isinstance(event.get("event_id"), str)
+                or _UUID_PATTERN.fullmatch(event["event_id"]) is None
+                or not isinstance(event.get("created_at"), str)
+                or not isinstance(event.get("trace_id"), str)
+                or not isinstance(event.get("agent_id"), str)
+                or _UUID_PATTERN.fullmatch(event["agent_id"]) is None
+                or not isinstance(event.get("data"), dict)
+            ):
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket received an invalid event"
+                )
+            sequence_number = int(sequence)
+            if accepted_through is None or sequence_number != accepted_through + 1:
+                raise RelayWebSocketProtocolError(
+                    "Relay WebSocket sequence is not contiguous"
+                )
+            inbox.accept(sequence, event)
+            accepted_through = sequence_number
+            await socket.send(json.dumps({
+                "type": "ack",
+                "through_sequence": sequence,
+            }, separators=(",", ":")))
+            result = on_accepted()
             if asyncio.iscoroutine(result):
                 await result
-            continue
-        if frame_type == "disconnect":
-            reason = frame.get("reason")
-            if set(frame) != {"type", "reason"} or reason not in _DISCONNECT_REASONS:
-                raise RelayWebSocketProtocolError(
-                    "Relay WebSocket received an invalid disconnect frame"
-                )
-            raise RelayWebSocketDisconnect(reason)
-        if frame_type == "ping":
-            if (
-                set(frame) != {"type", "sent_at"}
-                or not ready
-                or not isinstance(frame.get("sent_at"), str)
-            ):
-                raise RelayWebSocketProtocolError(
-                    "Relay WebSocket received an invalid ping frame"
-                )
-            await socket.send(json.dumps(
-                {"type": "pong"},
-                separators=(",", ":"),
-            ))
-            continue
-        if frame_type == "error":
-            code = frame.get("code")
-            message = frame.get("message")
-            fatal = frame.get("fatal")
-            retryable = frame.get("retryable")
-            if (
-                set(frame) != {
-                    "type",
-                    "code",
-                    "message",
-                    "fatal",
-                    "retryable",
-                }
-                or not isinstance(code, str)
-                or code not in _WEBSOCKET_ERROR_CODES
-                or not isinstance(message, str)
-                or not isinstance(fatal, bool)
-                or not isinstance(retryable, bool)
-            ):
-                raise RelayWebSocketProtocolError(
-                    "Relay WebSocket received an invalid error frame"
-                )
-            raise RelayWebSocketError(
-                message,
-                code=code,
-                fatal=fatal,
-                retryable=retryable,
-            )
-        if frame_type == "full_sync":
-            through = frame.get("through_sequence")
-            reason = frame.get("reason")
-            if (
-                set(frame) != {"type", "through_sequence", "reason"}
-                or not ready
-                or not full_sync_pending
-                or not isinstance(through, str)
-                or _SEQUENCE_PATTERN.fullmatch(through) is None
-                or int(through) != full_sync_through
-                or reason != "checkpoint_outside_retention"
-            ):
-                raise RelayWebSocketProtocolError(
-                    "Relay WebSocket received an invalid FULL sync frame"
-                )
-            if on_full_sync is None:
-                raise RelayFullSyncError(
-                    "Relay requires a FULL sync, but this consumer has no "
-                    "safe snapshot reconciler."
-                )
-            await on_full_sync(through, reason)
-            await socket.send(json.dumps({
-                "type": "full_sync_complete",
-                "through_sequence": through,
-            }, separators=(",", ":")))
-            accepted_through = int(through)
-            full_sync_pending = False
-            full_sync_through = None
-            continue
-        if full_sync_pending and frame_type == "event":
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received an event while FULL sync was pending"
-            )
-        if (
-            frame_type != "event"
-            or set(frame) != {"type", "sequence", "event"}
-            or not ready
-        ):
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received an invalid frame"
-            )
-        sequence = frame.get("sequence")
-        event = frame.get("event")
-        if (
-            not isinstance(sequence, str)
-            or _SEQUENCE_PATTERN.fullmatch(sequence) is None
-        ):
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received an invalid sequence"
-            )
-        if (
-            not isinstance(event, dict)
-            or event.get("api_version") != RELAY_API_VERSION
-            or event.get("webhook_version") != RELAY_WEBHOOK_VERSION
-            or event.get("event_type") not in _WEBHOOK_EVENT_TYPES
-            or not isinstance(event.get("event_id"), str)
-            or _UUID_PATTERN.fullmatch(event["event_id"]) is None
-            or not isinstance(event.get("created_at"), str)
-            or not isinstance(event.get("trace_id"), str)
-            or not isinstance(event.get("agent_id"), str)
-            or _UUID_PATTERN.fullmatch(event["agent_id"]) is None
-            or not isinstance(event.get("data"), dict)
-        ):
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket received an invalid event"
-            )
-        sequence_number = int(sequence)
-        if accepted_through is None or sequence_number != accepted_through + 1:
-            raise RelayWebSocketProtocolError(
-                "Relay WebSocket sequence is not contiguous"
-            )
-        inbox.accept(sequence, event)
-        accepted_through = sequence_number
-        await socket.send(json.dumps({
-            "type": "ack",
-            "through_sequence": sequence,
-        }, separators=(",", ":")))
-        result = on_accepted()
-        if asyncio.iscoroutine(result):
-            await result
-    raise RelayWebSocketClosed("Relay WebSocket closed")
+        raise RelayWebSocketClosed("Relay WebSocket closed")
+
+    async def heartbeat() -> None:
+        # One heartbeat, ours. The websockets library's protocol pings are off
+        # (ping_interval=None) because the server never sees them.
+        while True:
+            await sleep(ping_interval_seconds)
+            if monotonic() - last_pong_at >= pong_timeout_seconds:
+                raise RelayWebSocketDisconnect("heartbeat_timeout")
+            await socket.send(HEARTBEAT_PING_FRAME)
+
+    receive_task = asyncio.ensure_future(receive())
+    heartbeat_task = asyncio.ensure_future(heartbeat())
+    try:
+        done, _pending = await asyncio.wait(
+            (receive_task, heartbeat_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        receive_task.cancel()
+        heartbeat_task.cancel()
+        await asyncio.gather(
+            receive_task,
+            heartbeat_task,
+            return_exceptions=True,
+        )
+    # A frame-level verdict outranks the heartbeat's when both land together.
+    if receive_task in done:
+        return receive_task.result()
+    return heartbeat_task.result()
 
 
 async def run_websocket_loop(
@@ -1000,8 +1050,7 @@ async def run_websocket_loop(
                 additional_headers={
                     "Authorization": f"Bearer {client._token}",  # noqa: SLF001
                 },
-                ping_interval=HEARTBEAT_PING_INTERVAL_SECONDS,
-                ping_timeout=HEARTBEAT_PONG_TIMEOUT_SECONDS,
+                ping_interval=None,
             ) as socket:
                 def mark_ready() -> Any:
                     nonlocal attempt
