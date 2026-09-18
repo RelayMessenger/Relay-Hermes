@@ -35,6 +35,7 @@ from relay_hermes.relay_api import (
     parse_inbound,
     render_text,
     reply_idempotency_key,
+    split_buttons,
     run_websocket_loop,
     split_paragraphs,
     transient_delay_seconds,
@@ -165,15 +166,41 @@ def test_render_text_uses_value_and_link_parts():
     assert render_text(message) == "one\nhttps://example.com"
 
 
-def test_render_text_reads_a_button_tap_as_its_label():
+def test_render_text_reads_a_tap_as_text_and_its_own_buttons_as_nothing():
     message = event()["data"]
-    message["parts"] = [{"type": "button_reply", "id": "yes", "label": "Yes, 7pm works"}]
+    message["parts"] = [{"type": "text", "value": "Yes, 7pm works"}]
     assert render_text(message) == "Yes, 7pm works"
     message["parts"] = [
         {"type": "text", "value": "Dinner tonight?"},
-        {"type": "buttons", "items": [{"id": "yes", "label": "Yes"}]},
+        {"type": "buttons", "items": [{"label": "Yes"}, {"label": "Open", "url": "https://a.test"}]},
     ]
     assert render_text(message) == "Dinner tonight?"
+
+
+def test_split_buttons_lifts_the_block_and_keeps_the_words():
+    answer = "Which time?\n\n```buttons\n[{\"label\": \"9am\"}, {\"label\": \"Open\", \"url\": \"https://a.test\"}]\n```"
+    assert split_buttons(answer) == (
+        "Which time?",
+        {"type": "buttons", "items": [{"label": "9am"}, {"url": "https://a.test", "label": "Open"}]},
+        None,
+    )
+    assert split_buttons("plain words ") == ("plain words", None, None)
+    only = "```buttons\n[{\"label\": \"Continue\"}]\n```"
+    assert split_buttons(only) == ("", {"type": "buttons", "items": [{"label": "Continue"}]}, None)
+
+
+def test_split_buttons_leaves_a_bad_block_in_the_words_and_says_why():
+    for body, error in [
+        ("[{label: A}]", "the buttons block is not valid JSON"),
+        ("[]", "the buttons block has no items"),
+        ("[" + ",".join(['{"label": "x"}'] * 6) + "]", "the buttons block has 6 items; the most is 5"),
+        ('[{"url": "https://a.test"}]', "item 1 needs a label"),
+        ('[{"label": "' + "x" * 81 + '"}]', "item 1 label is over 80 characters"),
+        ('[{"label": "A", "id": "a"}]', "item 1 has unknown field id"),
+        ('[{"label": "A", "url": "ftp://a"}]', "item 1 url is not an http(s) URL"),
+    ]:
+        answer = "Pick\n\n```buttons\n" + body + "\n```"
+        assert split_buttons(answer) == (answer, None, error)
 
 
 def test_send_message_uses_chat_route_and_current_body():

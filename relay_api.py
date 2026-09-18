@@ -10,7 +10,7 @@ import random as _random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Tuple, Union
 from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
@@ -1235,11 +1235,107 @@ def render_text(message: Dict[str, Any]) -> str:
     for part in message.get("parts") or []:
         if not isinstance(part, dict):
             continue
+        # A tap arrives as ordinary text carrying the label. The agent's own
+        # buttons part reads as nothing, as on the server; its question is the
+        # text beside it.
         if part.get("type") in ("text", "link") and isinstance(part.get("value"), str):
             values.append(part["value"])
-        # A button tap reads as the label the person chose, the same text the
-        # server derives for a button_reply. The agent's own buttons part reads
-        # as nothing, as on the server; its question is the text beside it.
-        elif part.get("type") == "button_reply" and isinstance(part.get("label"), str):
-            values.append(part["label"])
     return "\n".join(values).strip()
+
+
+# Buttons under a message, the way the Relay SDK's ``splitButtons`` lifts them
+# out of an agent's words (Relay-SDK packages/sdk/src/buttons.ts, ported here
+# like the rest of this file). The model ends its answer with a fenced block
+# tagged ``buttons`` holding the part's ``items`` array; the block becomes the
+# buttons part and the words stay the text. Limits are the server's
+# (Discord's button limits): 1 to 5 items, label 1 to 80, url at most 2,048.
+BUTTONS_FENCE = "buttons"
+BUTTONS_MAX_ITEMS = 5
+BUTTON_LABEL_MAX_LENGTH = 80
+BUTTON_URL_MAX_LENGTH = 2_048
+
+# The same words every Relay runtime carries (the SDK's BUTTONS_GUIDANCE).
+BUTTONS_GUIDANCE = " ".join([
+    "Send buttons when your message ends with a question the person can answer by picking one of 2 to 5 short options you already know: yes or no, choosing between things you named, picking a next step, or a multiple-choice question in a quiz. Each label is a complete answer, so a tap replaces typing. Put the question in text beside the buttons.",
+    "Send one button when there is one thing to do next. A url button opens it inside the app: connect an account, sign in, open the page, pay. A plain button confirms one step: Start, Done, Continue. Do not paste a link or ask \"ready?\" when a single button does the job.",
+    "Do not send buttons when the answer is open-ended, when your options are not the full set of likely answers, or when you are not asking anything and there is nothing to do. One question or one action per message; never a menu of things you can do, and never as decoration.",
+    "If you would otherwise write \"reply 1, 2 or 3\", list choices for the person to type, or paste a link for them to open, send buttons instead. If the person asks for buttons, send them.",
+    "A tap comes back to you as an ordinary message whose text is the label. Labels are at most 80 characters.",
+])
+
+# How the model puts buttons under its answer (the SDK's BUTTONS_BLOCK_INSTRUCTION).
+BUTTONS_BLOCK_INSTRUCTION = (
+    "To put buttons under your answer, end it with a fenced code block tagged `"
+    + BUTTONS_FENCE
+    + "` holding a JSON array of 1 to 5 items, each {\"label\": \"...\"} or "
+    "{\"label\": \"...\", \"url\": \"https://...\"}. "
+    "The block is removed from the text and drawn as buttons."
+)
+
+_BUTTONS_FENCE_RE = re.compile(
+    r"(^|\n)[ \t]*```[ \t]*" + BUTTONS_FENCE + r"[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\n|$)"
+)
+
+
+def _button_item(value: Any, index: int) -> Union[Dict[str, Any], str]:
+    if not isinstance(value, dict):
+        return f"item {index + 1} is not an object"
+    unknown = [key for key in value if key not in ("label", "url")]
+    if unknown:
+        return f"item {index + 1} has unknown field {unknown[0]}"
+    label = value.get("label")
+    if not isinstance(label, str) or not label:
+        return f"item {index + 1} needs a label"
+    if utf16_len(label) > BUTTON_LABEL_MAX_LENGTH:
+        return f"item {index + 1} label is over {BUTTON_LABEL_MAX_LENGTH} characters"
+    if "url" not in value:
+        return {"label": label}
+    url = value.get("url")
+    if not isinstance(url, str) or len(url) > BUTTON_URL_MAX_LENGTH:
+        return f"item {index + 1} url is not a string of at most {BUTTON_URL_MAX_LENGTH} characters"
+    if not re.match(r"^https?://[^\s]+$", url):
+        return f"item {index + 1} url is not an http(s) URL"
+    return {"url": url, "label": label}
+
+
+def buttons_part(parsed: Any) -> Union[Dict[str, Any], str]:
+    """A ``buttons`` part from a decoded items array or whole part, or why not."""
+    if isinstance(parsed, list):
+        items = parsed
+    elif isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+        items = parsed["items"]
+    else:
+        return "the buttons block must be a JSON array of items"
+    if not items:
+        return "the buttons block has no items"
+    if len(items) > BUTTONS_MAX_ITEMS:
+        return f"the buttons block has {len(items)} items; the most is {BUTTONS_MAX_ITEMS}"
+    result: List[Dict[str, Any]] = []
+    for index, value in enumerate(items):
+        item = _button_item(value, index)
+        if isinstance(item, str):
+            return item
+        result.append(item)
+    return {"type": "buttons", "items": result}
+
+
+def split_buttons(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    """Lift the first buttons block out of an answer.
+
+    Returns ``(text, buttons_part, error)``. A block that cannot be read leaves
+    the answer untouched and names the reason, so the person still gets the
+    words and the operator sees why.
+    """
+    match = _BUTTONS_FENCE_RE.search(answer)
+    if match is None:
+        return answer.strip(), None, None
+    try:
+        parsed = json.loads(match.group(2))
+    except ValueError:
+        return answer.strip(), None, "the buttons block is not valid JSON"
+    part = buttons_part(parsed)
+    if isinstance(part, str):
+        return answer.strip(), None, part
+    start = match.start() + len(match.group(1))
+    text = re.sub(r"\n{3,}", "\n\n", answer[:start] + "\n" + answer[match.end():]).strip()
+    return text, part, None

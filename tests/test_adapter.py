@@ -1552,3 +1552,36 @@ def test_inbox_routes_non_message_events(plugin, tmp_path, kind):
     adapter._inbox.complete.assert_called_once_with(
         "event-id", **({"ignored": True} if kind == "message.failed" else {}))
     assert adapter._reaction_handler.await_count == (1 if kind == "reaction.added" else 0)
+
+
+def test_platform_hint_carries_the_buttons_rules(plugin):
+    from relay_hermes.relay_api import BUTTONS_BLOCK_INSTRUCTION
+    hint = plugin.PLATFORM_HINT
+    assert BUTTONS_BLOCK_INSTRUCTION in hint
+    assert "If the person asks for buttons, send them." in hint
+
+
+def test_send_lifts_a_buttons_block_under_the_last_bubble(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-buttons")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        answer = (
+            "Which time works?\n\n"
+            "```buttons\n[{\"label\": \"9am\"}, {\"label\": \"Open calendar\", \"url\": \"https://cal.example/x\"}]\n```"
+        )
+        result = await adapter.send(event.source.chat_id, answer)
+        assert result.success
+        bad = await adapter.send(event.source.chat_id, "Pick\n\n```buttons\n[]\n```")
+        assert bad.success
+
+    asyncio.run(run())
+    assert client.calls[0]["parts"] == [
+        {"type": "text", "value": "Which time works?"},
+        {"type": "buttons", "items": [{"label": "9am"}, {"url": "https://cal.example/x", "label": "Open calendar"}]},
+    ]
+    assert client.calls[1]["parts"][0]["type"] == "text"
+    assert "```buttons" in client.calls[1]["parts"][0]["value"]

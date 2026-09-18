@@ -82,6 +82,9 @@ from .relay_api import (
     normalize_base_url,
     parse_inbound,
     render_text,
+    split_buttons,
+    BUTTONS_BLOCK_INSTRUCTION,
+    BUTTONS_GUIDANCE,
     reply_idempotency_key,
     run_websocket_loop,
     split_paragraphs,
@@ -1160,6 +1163,11 @@ class RelayAdapter(BasePlatformAdapter):
         if not chat_id:
             return SendResult(success=False, error="no Chat id")
 
+        # Buttons ride in the model's words as a fenced block; lift them out
+        # before markdown formatting can touch the JSON.
+        content, buttons, buttons_error = split_buttons(content)
+        if buttons_error:
+            logger.warning("[%s] buttons block left as text: %s", self.name, buttons_error)
         content = self.format_message(content)
 
         # Model-chosen silence. People do not answer every "ok cool", and an
@@ -1174,6 +1182,9 @@ class RelayAdapter(BasePlatformAdapter):
             content = "OK"
 
         parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(content)]
+        if buttons is not None:
+            # Under the last bubble; a buttons-only message is one the server takes.
+            parts.append(buttons)
         if not parts:
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
@@ -1593,7 +1604,10 @@ async def _standalone_send(
             "error": "relay standalone send: no Chat id (set RELAY_HOME_CHAT)"
         }
 
+    message, buttons, _buttons_error = split_buttons(message)
     parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)]
+    if buttons is not None:
+        parts.append(buttons)
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
@@ -1639,7 +1653,8 @@ PLATFORM_HINT = (
     "\"thanks\", or someone signing off, reply with exactly "
     f"{SILENCE_SENTINEL} and nothing else, and Relay will stay quiet instead "
     "of sending filler. Answer normally whenever there is a question, a "
-    "request, or anything genuinely worth saying."
+    "request, or anything genuinely worth saying. "
+    f"{BUTTONS_BLOCK_INSTRUCTION} {BUTTONS_GUIDANCE}"
 )
 
 
