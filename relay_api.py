@@ -1237,4 +1237,9 @@ def render_text(message: Dict[str, Any]) -> str:
             continue
         if part.get("type") in ("text", "link") and isinstance(part.get("value"), str):
             values.append(part["value"])
+        # A button tap reads as the label the person chose, the same text the
+        # server derives for a button_reply. The agent's own buttons part reads
+        # as nothing, as on the server; its question is the text beside it.
+        elif part.get("type") == "button_reply" and isinstance(part.get("label"), str):
+            values.append(part["label"])
     return "\n".join(values).strip()

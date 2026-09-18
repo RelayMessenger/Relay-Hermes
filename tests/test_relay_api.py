@@ -165,6 +165,17 @@ def test_render_text_uses_value_and_link_parts():
     assert render_text(message) == "one\nhttps://example.com"
 
 
+def test_render_text_reads_a_button_tap_as_its_label():
+    message = event()["data"]
+    message["parts"] = [{"type": "button_reply", "id": "yes", "label": "Yes, 7pm works"}]
+    assert render_text(message) == "Yes, 7pm works"
+    message["parts"] = [
+        {"type": "text", "value": "Dinner tonight?"},
+        {"type": "buttons", "items": [{"id": "yes", "label": "Yes"}]},
+    ]
+    assert render_text(message) == "Dinner tonight?"
+
+
 def test_send_message_uses_chat_route_and_current_body():
     transport = FakeTransport([
         RelayResponse(202, {"chat_id": CHAT_ID, "message": {"id": MESSAGE_ID}})
