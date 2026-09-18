@@ -1174,11 +1174,11 @@ class RelayAdapter(BasePlatformAdapter):
         # agent forced to emit something emits filler. Silence stays DM-only:
         # a group turn only reaches here because the agent was named, and being
         # named and then saying nothing reads as broken rather than tactful.
-        if self._is_silence(content) and chat_id not in self._group_chats:
+        if buttons is None and self._is_silence(content) and chat_id not in self._group_chats:
             logger.info("[%s] model chose not to reply in %s", self.name, chat_id)
             await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=None)
-        if self._is_silence(content):
+        if buttons is None and self._is_silence(content):
             content = "OK"
 
         parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(content)]
@@ -1604,7 +1604,9 @@ async def _standalone_send(
             "error": "relay standalone send: no Chat id (set RELAY_HOME_CHAT)"
         }
 
-    message, buttons, _buttons_error = split_buttons(message)
+    message, buttons, buttons_error = split_buttons(message)
+    if buttons_error:
+        logger.warning("relay standalone send: buttons block left as text: %s", buttons_error)
     parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)]
     if buttons is not None:
         parts.append(buttons)

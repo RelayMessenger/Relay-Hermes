@@ -1585,3 +1585,18 @@ def test_send_lifts_a_buttons_block_under_the_last_bubble(plugin, tmp_path):
     ]
     assert client.calls[1]["parts"][0]["type"] == "text"
     assert "```buttons" in client.calls[1]["parts"][0]["value"]
+
+
+def test_send_keeps_a_buttons_only_answer_instead_of_reading_it_as_silence(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-buttons-only")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        result = await adapter.send(event.source.chat_id, "```buttons\n[{\"label\": \"Start\"}]\n```")
+        assert result.success and result.message_id is not None
+
+    asyncio.run(run())
+    assert client.calls[-1]["parts"] == [{"type": "buttons", "items": [{"label": "Start"}]}]

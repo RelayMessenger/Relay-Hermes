@@ -1276,7 +1276,7 @@ BUTTONS_BLOCK_INSTRUCTION = (
 )
 
 _BUTTONS_FENCE_RE = re.compile(
-    r"(^|\n)[ \t]*```[ \t]*" + BUTTONS_FENCE + r"[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\n|$)"
+    r"(^|\n)[ \t]*```[ \t]*" + BUTTONS_FENCE + r"[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
 )
 
 
@@ -1338,14 +1338,16 @@ def split_buttons(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[
     """
     match = _BUTTONS_FENCE_RE.search(answer)
     if match is None:
-        return answer.strip(), None, None
+        return answer, None, None
     try:
         parsed = json.loads(match.group(2))
     except ValueError:
-        return answer.strip(), None, "the buttons block is not valid JSON"
+        return answer, None, "the buttons block is not valid JSON"
     part = buttons_part(parsed)
     if isinstance(part, str):
-        return answer.strip(), None, part
+        return answer, None, part
     start = match.start() + len(match.group(1))
-    text = re.sub(r"\n{3,}", "\n\n", answer[:start] + "\n" + answer[match.end():]).strip()
+    before = answer[:start].rstrip()
+    after = answer[match.end():].lstrip()
+    text = f"{before}\n\n{after}" if before and after else (before or after)
     return text, part, None
