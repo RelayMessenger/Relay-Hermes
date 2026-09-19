@@ -1262,7 +1262,7 @@ BUTTONS_GUIDANCE = " ".join([
     "Do not send buttons when the answer is open-ended, when your options are not the full set of likely answers, or when you are not asking anything and there is nothing to do. One question or one action per message; never a menu of things you can do, and never as decoration.",
     "If you would otherwise write \"reply 1, 2 or 3\" or list choices for the person to type, send buttons instead. If the person asks for buttons, send them.",
     "A tap comes back to you as an ordinary message whose text is the label. Labels are at most 80 characters.",
-    "Buttons disappear once tapped. Set one_time to false only for controls the person is meant to tap again and again, such as Next, Another one, or Refresh.",
+    "Buttons disappear once tapped.",
 ])
 
 # How the model puts buttons under its answer (the SDK's BUTTONS_BLOCK_INSTRUCTION).
@@ -1271,9 +1271,7 @@ BUTTONS_BLOCK_INSTRUCTION = (
     + BUTTONS_FENCE
     + "` holding a JSON array of 1 to 5 items, each {\"label\": \"...\"} or "
     "{\"label\": \"...\", \"url\": \"https://...\"}. "
-    "The block is removed from the text and drawn as buttons. "
-    "To keep the buttons on screen after a tap, write the block as "
-    "{\"one_time\": false, \"items\": [...]} instead of a bare array."
+    "The block is removed from the text and drawn as buttons."
 )
 
 # How the model sends a link (the SDK's LINK_LINE_INSTRUCTION): the URL alone
@@ -1341,14 +1339,10 @@ def _button_item(value: Any, index: int) -> Union[Dict[str, Any], str]:
 
 def buttons_part(parsed: Any) -> Union[Dict[str, Any], str]:
     """A ``buttons`` part from a decoded items array or whole part, or why not."""
-    one_time = None
     if isinstance(parsed, list):
         items = parsed
     elif isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
         items = parsed["items"]
-        one_time = parsed.get("one_time")
-        if one_time is not None and not isinstance(one_time, bool):
-            return "one_time must be true or false"
     else:
         return "the buttons block must be a JSON array of items"
     if not items:
@@ -1361,10 +1355,7 @@ def buttons_part(parsed: Any) -> Union[Dict[str, Any], str]:
         if isinstance(item, str):
             return item
         result.append(item)
-    part: Dict[str, Any] = {"type": "buttons", "items": result}
-    if one_time is not None:
-        part["one_time"] = one_time
-    return part
+    return {"type": "buttons", "items": result}
 
 
 def split_buttons(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:

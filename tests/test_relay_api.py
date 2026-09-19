@@ -189,9 +189,8 @@ def test_split_buttons_lifts_the_block_and_keeps_the_words():
     assert split_buttons(crlf) == ("Pick\n\nThanks", {"type": "buttons", "items": [{"label": "Yes"}]}, None)
     only = "```buttons\n[{\"label\": \"Continue\"}]\n```"
     assert split_buttons(only) == ("", {"type": "buttons", "items": [{"label": "Continue"}]}, None)
-    sticky = "```buttons\n{\"one_time\": false, \"items\": [{\"label\": \"Next\"}]}\n```"
-    assert split_buttons(sticky) == ("", {"type": "buttons", "items": [{"label": "Next"}], "one_time": False}, None)
-    assert split_buttons("```buttons\n{\"one_time\": \"no\", \"items\": [{\"label\": \"Next\"}]}\n```")[2] == "one_time must be true or false"
+    wrapped = "```buttons\n{\"one_time\": false, \"items\": [{\"label\": \"Next\"}]}\n```"
+    assert split_buttons(wrapped) == ("", {"type": "buttons", "items": [{"label": "Next"}]}, None)
 
 
 def test_split_buttons_leaves_a_bad_block_in_the_words_and_says_why():

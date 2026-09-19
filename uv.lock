@@ -962,7 +962,7 @@ wheels = [
 
 [[package]]
 name = "relay-hermes"
-version = "1.0.0rc6.dev2"
+version = "1.0.0rc6.dev3"
 source = { editable = "." }
 dependencies = [
     { name = "hermes-agent" },
