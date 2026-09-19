@@ -1600,3 +1600,38 @@ def test_send_keeps_a_buttons_only_answer_instead_of_reading_it_as_silence(plugi
 
     asyncio.run(run())
     assert client.calls[-1]["parts"] == [{"type": "buttons", "items": [{"label": "Start"}]}]
+
+
+def test_platform_hint_carries_the_link_rules(plugin):
+    from relay_hermes.relay_api import LINK_LINE_INSTRUCTION
+    hint = plugin.PLATFORM_HINT
+    assert LINK_LINE_INSTRUCTION in hint
+    assert "when the page is the thing you are showing them, send a link" in hint
+    assert "Do not paste a link" not in hint
+
+
+def test_send_puts_a_url_bubble_out_as_its_own_link_message(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-link")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        answer = (
+            "Found this one:\n\nhttps://example.com/listing/42\n\nBook it?\n\n"
+            "```buttons\n[{\"label\": \"Yes\"}, {\"label\": \"No\"}]\n```"
+        )
+        result = await adapter.send(event.source.chat_id, answer)
+        assert result.success
+
+    asyncio.run(run())
+    assert [call["parts"] for call in client.calls] == [
+        [{"type": "text", "value": "Found this one:"}],
+        [{"type": "link", "value": "https://example.com/listing/42"}],
+        [
+            {"type": "text", "value": "Book it?"},
+            {"type": "buttons", "items": [{"label": "Yes"}, {"label": "No"}]},
+        ],
+    ]
+    assert len({call["idempotency_key"] for call in client.calls}) == 3

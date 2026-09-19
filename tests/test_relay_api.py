@@ -1107,3 +1107,23 @@ def test_websocket_accepts_message_failed():
         asyncio.run(consume_websocket(socket, inbox=inbox))
     assert inbox.events == [payload]
     assert order == ["commit:41", "ack:41"]
+
+
+def test_standalone_link_reads_only_a_line_that_is_one_url():
+    from relay_hermes.relay_api import bubble_part, standalone_link
+
+    assert standalone_link("https://example.com/story") == "https://example.com/story"
+    assert standalone_link("  http://example.com  ") == "http://example.com"
+    for line in [
+        "See https://example.com",
+        "https://example.com and more",
+        "example.com",
+        "mailto:a@example.com",
+        "- https://example.com",
+        "https://",
+        "",
+        "https://example.com/" + "a" * 2_048,
+    ]:
+        assert standalone_link(line) is None, line
+    assert bubble_part("https://example.com") == {"type": "link", "value": "https://example.com"}
+    assert bubble_part("words") == {"type": "text", "value": "words"}

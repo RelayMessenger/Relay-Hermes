@@ -1257,9 +1257,10 @@ BUTTON_URL_MAX_LENGTH = 2_048
 # The same words every Relay runtime carries (the SDK's BUTTONS_GUIDANCE).
 BUTTONS_GUIDANCE = " ".join([
     "Send buttons when your message ends with a question the person can answer by picking one of 2 to 5 short options you already know: yes or no, choosing between things you named, picking a next step, or a multiple-choice question in a quiz. Each label is a complete answer, so a tap replaces typing. Put the question in text beside the buttons.",
-    "Send one button when there is one thing to do next. A url button opens it inside the app: connect an account, sign in, open the page, pay. A plain button confirms one step: Start, Done, Continue. Do not paste a link or ask \"ready?\" when a single button does the job.",
+    "Send one button when there is one thing to do next. A url button is for a task the person completes on a web page: pay, sign in, connect an account, open their booking or order, track a package. Its label names the action, not the site. A plain button confirms one step: Start, Done, Continue. Do not ask \"ready?\" when a single button does the job.",
+    "A link is for something the person will look at or read: an article, a listing, a video, a place, a product page, a support article. Send it as a link on its own, so it draws as a card with the page's title and image; never paste a bare URL into your words, and send one link per message. When the page is where the person does something, send a url button; when the page is the thing you are showing them, send a link.",
     "Do not send buttons when the answer is open-ended, when your options are not the full set of likely answers, or when you are not asking anything and there is nothing to do. One question or one action per message; never a menu of things you can do, and never as decoration.",
-    "If you would otherwise write \"reply 1, 2 or 3\", list choices for the person to type, or paste a link for them to open, send buttons instead. If the person asks for buttons, send them.",
+    "If you would otherwise write \"reply 1, 2 or 3\" or list choices for the person to type, send buttons instead. If the person asks for buttons, send them.",
     "A tap comes back to you as an ordinary message whose text is the label. Labels are at most 80 characters.",
     "Buttons disappear once tapped. Set one_time to false only for controls the person is meant to tap again and again, such as Next, Another one, or Refresh.",
 ])
@@ -1274,6 +1275,43 @@ BUTTONS_BLOCK_INSTRUCTION = (
     "To keep the buttons on screen after a tap, write the block as "
     "{\"one_time\": false, \"items\": [...]} instead of a bare array."
 )
+
+# How the model sends a link (the SDK's LINK_LINE_INSTRUCTION): the URL alone
+# on its own line, the way a person pastes one into Messages. The line leaves
+# the words and goes out as a ``link`` part in its own Message, which the
+# server requires and the app draws as a card.
+LINK_LINE_INSTRUCTION = (
+    "To send a link, put its URL alone on its own line. That line leaves your "
+    "text and is sent as its own Message, in order with your words, and drawn "
+    "as a card with the page's title and image."
+)
+
+LINK_URL_MAX_LENGTH = 2_048
+
+_STANDALONE_LINK_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+
+def standalone_link(line: str) -> Optional[str]:
+    """The URL a line carries when it is nothing but one absolute HTTP(S) URL.
+
+    A URL inside a sentence stays words, as does one past the server's limit
+    or one without a host.
+    """
+    value = line.strip()
+    if not _STANDALONE_LINK_RE.match(value) or len(value) > LINK_URL_MAX_LENGTH:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        return None
+    return value
+
+
+def bubble_part(chunk: str) -> Dict[str, Any]:
+    """One bubble as a part: a link when the bubble is only a URL, else text."""
+    link = standalone_link(chunk)
+    if link is not None:
+        return {"type": "link", "value": link}
+    return {"type": "text", "value": chunk}
 
 _BUTTONS_FENCE_RE = re.compile(
     r"(^|\n)[ \t]*```[ \t]*" + BUTTONS_FENCE + r"[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"

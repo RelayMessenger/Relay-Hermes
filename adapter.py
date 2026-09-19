@@ -83,8 +83,10 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
+    bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
+    LINK_LINE_INSTRUCTION,
     reply_idempotency_key,
     run_websocket_loop,
     split_paragraphs,
@@ -281,6 +283,14 @@ def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return folded
 
 
+def _buttons_slot(parts: List[Dict[str, Any]]) -> int:
+    """Where the buttons part goes: right after the last text part, or at the end."""
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].get("type") == "text":
+            return index + 1
+    return len(parts)
+
+
 def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Fold paragraphs and partition in order within MessageContent limits."""
     batches: List[List[Dict[str, Any]]] = []
@@ -292,6 +302,8 @@ def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
             len(batch) == MAX_PARTS_PER_POST
             or (is_url_media and url_media_count == 40)
             or batch[-1].get("type") == part.get("type") == "text"
+            # A link must be the only part in its Message.
+            or "link" in (batch[-1].get("type"), part.get("type"))
         ):
             batches.append(batch)
             batch = []
@@ -1181,10 +1193,13 @@ class RelayAdapter(BasePlatformAdapter):
         if buttons is None and self._is_silence(content):
             content = "OK"
 
-        parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(content)]
+        # A bubble that is only a URL goes out as a link part in its own
+        # Message, drawn as a card; the rest are text.
+        parts = [bubble_part(chunk) for chunk in _bubble_chunks(content)]
         if buttons is not None:
-            # Under the last bubble; a buttons-only message is one the server takes.
-            parts.append(buttons)
+            # Under the last bubble of words; a buttons-only message is one
+            # the server takes, and a link must travel alone.
+            parts.insert(_buttons_slot(parts), buttons)
         if not parts:
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
@@ -1607,9 +1622,9 @@ async def _standalone_send(
     message, buttons, buttons_error = split_buttons(message)
     if buttons_error:
         logger.warning("relay standalone send: buttons block left as text: %s", buttons_error)
-    parts = [{"type": "text", "value": chunk} for chunk in _bubble_chunks(message)]
+    parts = [bubble_part(chunk) for chunk in _bubble_chunks(message)]
     if buttons is not None:
-        parts.append(buttons)
+        parts.insert(_buttons_slot(parts), buttons)
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
@@ -1656,7 +1671,7 @@ PLATFORM_HINT = (
     f"{SILENCE_SENTINEL} and nothing else, and Relay will stay quiet instead "
     "of sending filler. Answer normally whenever there is a question, a "
     "request, or anything genuinely worth saying. "
-    f"{BUTTONS_BLOCK_INSTRUCTION} {BUTTONS_GUIDANCE}"
+    f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE}"
 )
 
 
