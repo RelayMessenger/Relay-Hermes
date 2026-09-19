@@ -46,6 +46,8 @@ tags:
     description: Receive agent events over a durable acknowledged WebSocket.
   - name: Contacts
     description: Request a user Contact.
+  - name: Calls
+    description: Start, end and read individual user-agent audio calls. Relay dials the agent's call address (see updateContactCard) and carries the audio; the agent never assembles a call.
 paths:
   /v1/agents/{handle}:
     delete:
@@ -996,7 +998,7 @@ paths:
     post:
       operationId: sendReaction
       summary: Add or remove a reaction to a message
-      description: Add or remove a reaction on one Message part.
+      description: Add or remove a reaction on one Message part. Targeting a `buttons` part returns 422.
       tags:
         - Messages
       security:
@@ -1576,8 +1578,349 @@ paths:
         heartbeat: send {"type":"ping"} every heartbeat_interval_ms and Relay
         answers {"type":"pong"} from the edge runtime, without waking the
         Agent's connection state. Relay never sends a ping frame.
+  /v1/chats/{chatId}/calls:
+    post:
+      operationId: createCall
+      summary: Start an individual call
+      tags:
+        - Calls
+      security:
+        - BearerAuth: []
+      description: Start an audio Call in an existing individual Chat containing one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message establishes that relationship. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay opens a WebSocket to the agent's call address (call_url) in Twilio Media Streams' shape, signed like a webhook; a 101 within the 10-second ring lease answers the Call (status active), any other reply declines it, and silence ends it no_answer. An answered Call has no duration limit.
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema: &a1
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallCreateRequest"
+      responses:
+        "200":
+          description: The original Call for the same idempotent request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "201":
+          description: Call created and ringing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: The Chat cannot take a Call. The agent has no call address, so nothing would answer (error code `2031`, "This agent has no call address."); or the Chat is not an individual Chat of one user and one agent (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    get:
+      operationId: listCalls
+      summary: List calls in a chat
+      tags:
+        - Calls
+      security:
+        - BearerAuth: []
+      description: Read retained call history for a Chat you belong to.
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema: *a1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Operation completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallListResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/calls/{callId}:
+    get:
+      operationId: getCall
+      summary: Retrieve a call
+      tags:
+        - Calls
+      security:
+        - BearerAuth: []
+      description: Only a Contact in the Call can retrieve it.
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: *a1
+      responses:
+        "200":
+          description: Operation completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/calls/{callId}/end:
+    post:
+      operationId: endCall
+      summary: End a call
+      tags:
+        - Calls
+      security:
+        - BearerAuth: []
+      description: Either Contact ends the Call. A ringing Call ends canceled when its caller ends it and declined when its recipient does; an answered Call ends completed. An agent declines by refusing the upgrade at its call address, and hangs up by closing that socket. Cleanup remains available after a block or removal. Repeated terminal actions never restart the Call.
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: *a1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallEmptyRequest"
+      responses:
+        "200":
+          description: Operation completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 components:
   schemas:
+    CallContact:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - handle
+        - kind
+      properties:
+        id: &uuid
+          type: string
+          format: uuid
+        handle:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+    Call:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - chat_id
+        - from
+        - to
+        - mode
+        - status
+        - revision
+        - created_at
+        - ringing_at
+        - answered_at
+        - ended_at
+        - end_reason
+      properties:
+        id: *uuid
+        chat_id: *uuid
+        from:
+          $ref: "#/components/schemas/CallContact"
+        to:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/CallContact"
+        mode:
+          type: string
+          enum:
+            - audio
+        status:
+          type: string
+          enum:
+            - ringing
+            - active
+            - ended
+        revision:
+          type: integer
+          minimum: 1
+        created_at: &a2
+          type: string
+          format: date-time
+        ringing_at: *a2
+        answered_at: &a3
+          type:
+            - string
+            - "null"
+          format: date-time
+        ended_at: *a3
+        end_reason:
+          type:
+            - string
+            - "null"
+          enum:
+            - null
+            - completed
+            - declined
+            - canceled
+            - no_answer
+            - disconnected
+            - failed
+    CallCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - to
+        - mode
+      properties:
+        to:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: string
+            minLength: 1
+        mode:
+          type: string
+          enum:
+            - audio
+    CallResult:
+      type: object
+      additionalProperties: false
+      required:
+        - call
+      properties:
+        call:
+          $ref: "#/components/schemas/Call"
+    CallListResult:
+      type: object
+      additionalProperties: false
+      required:
+        - calls
+        - next_cursor
+      properties:
+        calls:
+          type: array
+          items:
+            $ref: "#/components/schemas/Call"
+        next_cursor:
+          type:
+            - string
+            - "null"
+    CallEmptyRequest:
+      type: object
+      additionalProperties: false
+      required: []
+      properties: {}
+    CallCreatedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: call.created
+            data:
+              $ref: "#/components/schemas/CallResult"
+    CallUpdatedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: call.updated
+            data:
+              $ref: "#/components/schemas/CallResult"
+    CallEndedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: call.ended
+            data:
+              $ref: "#/components/schemas/CallResult"
     AddParticipantRequest:
       type: object
       required:
@@ -1706,8 +2049,8 @@ components:
           type:
             - string
             - "null"
-          description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
-            group chats.
+          description: "Display name for the chat. When nobody has named it, the other participants' names: \"Alice\",
+            \"Alice & Bob\", or \"Alice, Bob & Cleo\". Can be updated for group chats."
         group_chat_icon:
           type:
             - string
@@ -1748,8 +2091,8 @@ components:
           type:
             - string
             - "null"
-          description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
-            group chats.
+          description: "Display name for the chat. When nobody has named it, the other participants' names: \"Alice\",
+            \"Alice & Bob\", or \"Alice, Bob & Cleo\". Can be updated for group chats."
         group_chat_icon:
           type:
             - string
@@ -2231,8 +2574,8 @@ components:
               type:
                 - string
                 - "null"
-              description: Display name for the chat. Defaults to a comma-separated list of recipient handles. Can be updated for
-                group chats.
+              description: "Display name for the chat. When nobody has named it, the other participants' names: \"Alice\",
+                \"Alice & Bob\", or \"Alice, Bob & Cleo\". Can be updated for group chats."
             is_group:
               type: boolean
               description: Whether this is a group chat
@@ -2348,6 +2691,83 @@ components:
             - string
             - "null"
           description: Cursor for fetching the next page of results (null if no more results)
+    ButtonItem:
+      type: object
+      description: |
+        One button in a `buttons` part. A tap on a plain button sends its
+        `label` back as the person's next message: one `text` part whose value
+        is the label, with `reply_to` naming the `buttons` part. A `url`
+        button opens the page in the browser and sends nothing.
+      required:
+        - label
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: The page a link button opens instead of sending its label.
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: The button's visible text, and what a tap sends
+    ButtonItemResponse:
+      type: object
+      description: One button as read back
+      required:
+        - label
+      properties:
+        url:
+          type: string
+        label:
+          type: string
+    ButtonsPart:
+      type: object
+      description: |
+        A vertical stack of 1 to 5 buttons drawn under the message. Only an
+        agent can send one, and a message carries at most one. Send a `text`
+        part beside it that asks the question. Reactions to this part return
+        422. The only reply it accepts is a tap: one `text` part equal to one
+        of its plain buttons' labels, sent by the user. The group disappears
+        once the person taps a plain button, the way a quick reply does; a
+        `url` button never puts it away, since its tap sends nothing.
+      required:
+        - type
+        - items
+      properties:
+        type:
+          type: string
+          enum:
+            - buttons
+        items:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/ButtonItem"
+    ButtonsPartResponse:
+      type: object
+      description: A buttons part as read back
+      required:
+        - type
+        - items
+        - reactions
+      properties:
+        type:
+          type: string
+          enum:
+            - buttons
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ButtonItemResponse"
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
     LinkPart:
       type: object
       required:
@@ -2550,6 +2970,7 @@ components:
               - $ref: "#/components/schemas/TextPartResponse"
               - $ref: "#/components/schemas/MediaPartResponse"
               - $ref: "#/components/schemas/LinkPartResponse"
+              - $ref: "#/components/schemas/ButtonsPartResponse"
               - $ref: "#/components/schemas/SystemPartResponse"
         reply_to:
           oneOf:
@@ -2736,12 +3157,14 @@ components:
               - $ref: "#/components/schemas/schemas-TextPartResponse"
               - $ref: "#/components/schemas/schemas-MediaPartResponse"
               - $ref: "#/components/schemas/schemas-LinkPartResponse"
+              - $ref: "#/components/schemas/ButtonsPartResponse"
             discriminator:
               propertyName: type
               mapping:
                 text: "#/components/schemas/schemas-TextPartResponse"
                 media: "#/components/schemas/schemas-MediaPartResponse"
                 link: "#/components/schemas/schemas-LinkPartResponse"
+                buttons: "#/components/schemas/ButtonsPartResponse"
         sent_at:
           type:
             - string
@@ -2794,10 +3217,12 @@ components:
           text: "#/components/schemas/TextPart"
           media: "#/components/schemas/MediaPart"
           link: "#/components/schemas/LinkPart"
+          buttons: "#/components/schemas/ButtonsPart"
       oneOf:
         - $ref: "#/components/schemas/TextPart"
         - $ref: "#/components/schemas/MediaPart"
         - $ref: "#/components/schemas/LinkPart"
+        - $ref: "#/components/schemas/ButtonsPart"
     MessageReadWebhook:
       description: Complete webhook payload for message.read events (2026-08-30 format)
       allOf:
@@ -3053,6 +3478,9 @@ components:
             The specific message part to reply to (0-based index).
             Defaults to 0 (first part) if not provided.
             Use this when replying to a specific part of a multipart message.
+            Targeting a `buttons` part returns 422 unless the message is a tap:
+            one `text` part equal to one of that part's plain button labels,
+            sent by the user. An agent's reply to a `buttons` part returns 403.
           minimum: 0
     RequestUploadRequest:
       type: object
@@ -3337,6 +3765,7 @@ components:
               - $ref: "#/components/schemas/TextPartResponse"
               - $ref: "#/components/schemas/MediaPartResponse"
               - $ref: "#/components/schemas/LinkPartResponse"
+              - $ref: "#/components/schemas/ButtonsPartResponse"
         created_at:
           type: string
           format: date-time
@@ -3426,6 +3855,15 @@ components:
         - image_url
         - image_color
       properties:
+        call_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: >-
+            The agent's one call address, a wss:// URL Relay dials when the
+            agent is called. Null when the agent takes no calls. Present on
+            agents only.
         first_name:
           type: string
           description: First name on the contact card
@@ -3469,6 +3907,7 @@ components:
         - value
         - icon_attachment_id
         - contact_card
+        - call
       properties:
         type:
           type: string
@@ -3479,6 +3918,10 @@ components:
             - group_name_updated
             - group_icon_updated
             - contact_card_shared
+            - call_ended
+          description: >-
+            What happened. For call_ended the actor is the caller, the subject
+            is the callee, and call carries the Call's outcome.
         actor:
           $ref: "#/components/schemas/SystemEventParty"
         subject:
@@ -3498,6 +3941,53 @@ components:
           oneOf:
             - $ref: "#/components/schemas/ContactCardItem"
             - type: "null"
+        call:
+          oneOf:
+            - $ref: "#/components/schemas/CallMarker"
+            - type: "null"
+          description: The ended Call this event marks. Null unless type is call_ended.
+    CallMarker:
+      type: object
+      additionalProperties: false
+      description: >-
+        The outcome of an ended Call, carried by a call_ended system event so a
+        client can draw the call in the chat history.
+      required:
+        - id
+        - mode
+        - end_reason
+        - connected
+        - duration_seconds
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The Call's id.
+        mode:
+          type: string
+          enum:
+            - audio
+        end_reason:
+          type: string
+          enum:
+            - completed
+            - declined
+            - canceled
+            - no_answer
+            - disconnected
+            - failed
+          description: Why the Call ended. The same values as Call.end_reason, never null here.
+        connected:
+          type: boolean
+          description: Whether the Call was answered (answered_at set).
+        duration_seconds:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: >-
+            Whole seconds from answered to ended. Null when the Call was
+            never answered.
     SystemEventParty:
       type: object
       additionalProperties: false
@@ -3703,6 +4193,24 @@ components:
           minLength: 1
           maxLength: 60
           description: About text. Surrounding whitespace is trimmed.
+        call_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          maxLength: 2048
+          description: >-
+            The one call address Relay dials when this agent is called: a
+            wss:// URL. Relay opens a WebSocket to it signed with the
+            agent's webhook secret (webhook-id, webhook-timestamp and
+            webhook-signature headers over an empty body), then speaks
+            Twilio Media Streams: connected, start (streamSid and callSid are
+            the Call id; customParameters carry from, to, chat_id and
+            direction), media (audio/x-mulaw, 8000 Hz, mono, base64) and
+            stop; the agent answers with media, mark and clear. Answering the
+            upgrade answers the Call; refusing it declines; closing the socket
+            hangs up. Null clears the address. If omitted, the existing value
+            is kept.
         first_name:
           type: string
           minLength: 1
@@ -4033,6 +4541,9 @@ components:
         - chat.typing_indicator.stopped
         - contact.added
         - contact.removed
+        - call.created
+        - call.updated
+        - call.ended
     WebhookEventsResult:
       type: object
       required:
@@ -4323,6 +4834,7 @@ x-tagGroups:
       - Chats
       - Messages
       - Attachments
+      - Calls
   - name: Contacts
     tags:
       - Contacts
@@ -4614,6 +5126,54 @@ x-relay-webhooks:
           application/json:
             schema:
               $ref: "#/components/schemas/ContactRemovedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  call.created.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookCallCreatedV20260830
+      summary: Call created
+      description: A Call involving your agent changed. Compare call.revision when events arrive more than once or out of order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallCreatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  call.updated.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookCallUpdatedV20260830
+      summary: Call updated
+      description: A Call involving your agent changed. Compare call.revision when events arrive more than once or out of order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallUpdatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  call.ended.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookCallEndedV20260830
+      summary: Call ended
+      description: A Call involving your agent changed. Compare call.revision when events arrive more than once or out of order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallEndedWebhook"
       responses:
         "200":
           description: Webhook received successfully
