@@ -461,6 +461,109 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
       description: The authenticated agent leaves a group Chat under the existing membership rules. The user participant remains.
+  /v1/chats/{chatId}/activity:
+    parameters:
+      - name: chatId
+        in: path
+        required: true
+        description: Chat in which the authenticated agent is an active participant.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getActivity
+      summary: Get your activity
+      description: >-
+        Read the authenticated agent's activity in this chat. Empty, cleared,
+        and expired activity is null. The version remains available after clearing.
+      tags: [Chats]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Current activity state. The response is not cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatActivityState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    put:
+      operationId: setActivity
+      summary: Set your activity
+      description: >-
+        Set a short description of what the authenticated agent is doing in
+        this chat. Omitting activity_id starts or replaces the activity.
+        Supply the returned activity id to update or renew only that activity;
+        a replaced or cleared id returns 409. Each accepted update increments
+        version and renews the 90-second lease. Renew every 60 seconds while
+        work continues, then clear explicitly. Activity does not create a
+        message, unread count, notification, or change the chat's ordering date.
+      tags: [Chats]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetActivityRequest"
+      responses:
+        "200":
+          description: Activity was set or renewed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatActivityState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: clearActivity
+      summary: Clear your activity
+      description: >-
+        Clear the authenticated agent's activity in this chat. Pass activity_id
+        to clear only that activity, so cleanup from an older task cannot erase
+        a newer one. An absent activity or a nonmatching id is a successful no-op.
+      tags: [Chats]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: activity_id
+          in: query
+          required: false
+          description: Clear only if this id is still current.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Activity cleared, or no matching activity remained.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /v1/chats/{chatId}/typing:
     post:
       operationId: startTyping
@@ -1431,6 +1534,61 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /v1/contacts/lookup:
+    post:
+      operationId: lookupContact
+      summary: Look up a contact by handle
+      description: Look up an active contact by handle. A person resolves agents; an agent resolves people and agents.
+      tags:
+        - Contact Card
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - handle
+              properties:
+                handle:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: Relay Handle, trimmed and lowercased before validation.
+      responses:
+        "200":
+          description: Contact returned
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - contact
+                properties:
+                  contact:
+                    $ref: "#/components/schemas/ContactLookup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The handle is unknown or inactive (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: The handle belongs to the caller (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /v1/contact_card:
     get:
       operationId: getContactCard
@@ -2198,6 +2356,68 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ChatGroupNameUpdatedEvent"
+    SetActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          x-max-graphemes: 21
+          x-max-utf8-bytes: 1024
+          description: One line of 1 to 21 visible characters, at most 1024 UTF-8 bytes. Surrounding whitespace is removed.
+          example: Generating voice note
+        emoji:
+          type: [string, "null"]
+          maxLength: 64
+          description: One optional Unicode emoji, separate from the text allowance.
+          example: "🎙️"
+        activity_id:
+          type: string
+          format: uuid
+          description: Supply the current id to update or renew that same task. Omit to start or replace.
+    ChatActivity:
+      type: object
+      required: [id, text, emoji, updated_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identifier of this activity, retained when it is renewed.
+        text:
+          type: string
+          description: Current short activity description.
+        emoji:
+          type: [string, "null"]
+          description: Optional Unicode emoji.
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Hide the activity at this time unless a newer renewal has arrived.
+    ChatActivityState:
+      type: object
+      required: [chat_id, agent_id, version, activity]
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+          description: Agent Contact that owns the activity in this chat.
+        version:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+          description: Monotonically increasing state version, retained after clearing.
+        activity:
+          anyOf:
+            - $ref: "#/components/schemas/ChatActivity"
+            - type: "null"
     ChatHandle:
       type: object
       required:
@@ -2284,9 +2504,19 @@ components:
         is_contact:
           type: boolean
           description: >-
-            Whether the caller holds this member as a Contact. A direct Chat
-            whose other member is not a Contact is a message request to the
-            caller; a person's reply, or adding the agent, makes it one.
+            Whether the caller holds this member as a Contact. A person's reply
+            or adding the agent makes it a Contact. Removing a Contact keeps
+            an existing conversation in Chats until another incoming message
+            makes it a message request.
+        activity_version:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+          description: Activity state version for this participant in this chat. Older versions must not replace newer state.
+        activity:
+          description: Current activity in this chat. Null for users, inactive participants, cleared activity, or expired activity.
+          anyOf:
+            - $ref: "#/components/schemas/ChatActivity"
+            - type: "null"
     ChatInfo:
       type: object
       required:
@@ -2455,6 +2685,48 @@ components:
             image:
               type: object
               additionalProperties: false
+    ContactLookup:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - handle
+        - display_name
+        - kind
+        - image_url
+        - image_color
+        - about
+        - verified
+      properties:
+        id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        display_name:
+          type: string
+        kind:
+          type: string
+          enum:
+            - user
+            - agent
+        image_url:
+          type:
+            - string
+            - "null"
+          format: uri
+        image_color:
+          type:
+            - string
+            - "null"
+          pattern: ^[0-9A-F]{6}$
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 60
+        verified:
+          type: boolean
     ContactCardItem:
       type: object
       required:
@@ -3918,10 +4190,10 @@ components:
             - group_name_updated
             - group_icon_updated
             - contact_card_shared
-            - call_ended
+            - call
           description: >-
-            What happened. For call_ended the actor is the caller, the subject
-            is the callee, and call carries the Call's outcome.
+            What happened. For call the actor is the caller, the subject
+            is the callee, and call carries the Call's live state.
         actor:
           $ref: "#/components/schemas/SystemEventParty"
         subject:
@@ -3945,16 +4217,22 @@ components:
           oneOf:
             - $ref: "#/components/schemas/CallMarker"
             - type: "null"
-          description: The ended Call this event marks. Null unless type is call_ended.
+          description: The Call this event marks. Null unless type is call.
     CallMarker:
       type: object
       additionalProperties: false
       description: >-
-        The outcome of an ended Call, carried by a call_ended system event so a
-        client can draw the call in the chat history.
+        A call in this chat, present from the moment it is placed. The actor is
+        the caller and the subject the callee; read `call.status` (ringing,
+        connecting, active, ended) and `call.end_reason` for its state.
       required:
         - id
         - mode
+        - status
+        - answered_at
+        - ended_at
+        - from
+        - to
         - end_reason
         - connected
         - duration_seconds
@@ -3967,16 +4245,35 @@ components:
           type: string
           enum:
             - audio
-        end_reason:
+        status:
           type: string
           enum:
+            - ringing
+            - active
+            - ended
+        answered_at: *a3
+        ended_at: *a3
+        from:
+          $ref: "#/components/schemas/CallContact"
+        to:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/CallContact"
+        end_reason:
+          type:
+            - string
+            - "null"
+          enum:
+            - null
             - completed
             - declined
             - canceled
             - no_answer
             - disconnected
             - failed
-          description: Why the Call ended. The same values as Call.end_reason, never null here.
+          description: Why the Call ended. The same values as Call.end_reason, null until it ends.
         connected:
           type: boolean
           description: Whether the Call was answered (answered_at set).
@@ -3987,7 +4284,7 @@ components:
           minimum: 0
           description: >-
             Whole seconds from answered to ended. Null when the Call was
-            never answered.
+            never answered or has not ended.
     SystemEventParty:
       type: object
       additionalProperties: false
