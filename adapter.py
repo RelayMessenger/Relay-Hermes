@@ -83,10 +83,15 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
+    split_selection,
+    selection_reply,
+    selection_reply_context,
     bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
     LINK_LINE_INSTRUCTION,
+    SELECTION_BLOCK_INSTRUCTION,
+    SELECTION_GUIDANCE,
     reply_idempotency_key,
     run_websocket_loop,
     split_paragraphs,
@@ -284,11 +289,41 @@ def _fold_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _buttons_slot(parts: List[Dict[str, Any]]) -> int:
-    """Where the buttons part goes: right after the last text part, or at the end."""
+    """Where a buttons or selection part goes: after the last text part, or last."""
     for index in range(len(parts) - 1, -1, -1):
         if parts[index].get("type") == "text":
             return index + 1
     return len(parts)
+
+
+def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    """The words and the one component block under them.
+
+    The SDK's ``answerMessages`` reads an answer this way (Relay-SDK
+    packages/sdk/src/links.ts): a selection is lifted first and rules out
+    buttons, so a selection block leaves the words even when a buttons block
+    follows it. A block that cannot be used stays in the words with a reason.
+    """
+    text, selection, error = split_selection(answer)
+    if selection is not None or error is not None:
+        return text, selection, error
+    return split_buttons(answer)
+
+
+def _needs_words(
+    component: Optional[Dict[str, Any]], parts: List[Dict[str, Any]]
+) -> bool:
+    """Whether a lifted selection has no text part left to ride under.
+
+    The server takes a selection only beside nonblank text, and a link part
+    must travel alone, so an answer whose only remaining words are a URL keeps
+    the whole block as text instead of sending half a component.
+    """
+    return (
+        component is not None
+        and component.get("type") == "selection"
+        and not any(part.get("type") == "text" for part in parts)
+    )
 
 
 def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -820,12 +855,23 @@ class RelayAdapter(BasePlatformAdapter):
             return False
 
         text = render_text(inbound.message)
+        # A submitted selection is readable as its bullet lines, but the values
+        # the person chose live in a component part. The turn gets them as data
+        # beside the words, never as more words and never as instructions, the
+        # way every Relay runtime does (the SDK's selectionReplyContext).
+        parts = inbound.message.get("parts") or []
+        target = inbound.message.get("reply_to")
+        context = selection_reply_context(
+            selection_reply(parts, target), {"parts": parts, "reply_to": target},
+        )
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
-        if not text and not media_paths:
+        if not text and not context and not media_paths:
             logger.debug("[%s] message %s carries no readable content", self.name, inbound.message_id)
             return False
+        if context:
+            text = "\n\n".join(filter(None, [text, context]))
 
         source = self.build_source(
             chat_id=chat_id,
@@ -1175,31 +1221,38 @@ class RelayAdapter(BasePlatformAdapter):
         if not chat_id:
             return SendResult(success=False, error="no Chat id")
 
-        # Buttons ride in the model's words as a fenced block; lift them out
-        # before markdown formatting can touch the JSON.
-        content, buttons, buttons_error = split_buttons(content)
-        if buttons_error:
-            logger.warning("[%s] buttons block left as text: %s", self.name, buttons_error)
+        # A selection or buttons rides in the model's words as a fenced block;
+        # lift it out before markdown formatting can touch the JSON.
+        answer = content
+        content, component, component_error = _lift_component(content)
         content = self.format_message(content)
 
         # Model-chosen silence. People do not answer every "ok cool", and an
         # agent forced to emit something emits filler. Silence stays DM-only:
         # a group turn only reaches here because the agent was named, and being
         # named and then saying nothing reads as broken rather than tactful.
-        if buttons is None and self._is_silence(content) and chat_id not in self._group_chats:
+        if component is None and self._is_silence(content) and chat_id not in self._group_chats:
             logger.info("[%s] model chose not to reply in %s", self.name, chat_id)
             await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=None)
-        if buttons is None and self._is_silence(content):
+        if component is None and self._is_silence(content):
             content = "OK"
 
         # A bubble that is only a URL goes out as a link part in its own
         # Message, drawn as a card; the rest are text.
         parts = [bubble_part(chunk) for chunk in _bubble_chunks(content)]
-        if buttons is not None:
+        if _needs_words(component, parts):
+            component, component_error = None, "selection needs a nonblank text prompt"
+            content = self.format_message(answer)
+            parts = [bubble_part(chunk) for chunk in _bubble_chunks(content)]
+        if component_error:
+            logger.warning(
+                "[%s] component block left as text: %s", self.name, component_error
+            )
+        if component is not None:
             # Under the last bubble of words; a buttons-only message is one
             # the server takes, and a link must travel alone.
-            parts.insert(_buttons_slot(parts), buttons)
+            parts.insert(_buttons_slot(parts), component)
         if not parts:
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
@@ -1619,12 +1672,18 @@ async def _standalone_send(
             "error": "relay standalone send: no Chat id (set RELAY_HOME_CHAT)"
         }
 
-    message, buttons, buttons_error = split_buttons(message)
-    if buttons_error:
-        logger.warning("relay standalone send: buttons block left as text: %s", buttons_error)
+    answer = message
+    message, component, component_error = _lift_component(message)
     parts = [bubble_part(chunk) for chunk in _bubble_chunks(message)]
-    if buttons is not None:
-        parts.insert(_buttons_slot(parts), buttons)
+    if _needs_words(component, parts):
+        component, component_error = None, "selection needs a nonblank text prompt"
+        parts = [bubble_part(chunk) for chunk in _bubble_chunks(answer)]
+    if component_error:
+        logger.warning(
+            "relay standalone send: component block left as text: %s", component_error
+        )
+    if component is not None:
+        parts.insert(_buttons_slot(parts), component)
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
@@ -1671,7 +1730,8 @@ PLATFORM_HINT = (
     f"{SILENCE_SENTINEL} and nothing else, and Relay will stay quiet instead "
     "of sending filler. Answer normally whenever there is a question, a "
     "request, or anything genuinely worth saying. "
-    f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE}"
+    f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
+    f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE}"
 )
 
 
