@@ -1744,7 +1744,7 @@ paths:
         - Calls
       security:
         - BearerAuth: []
-      description: Start an audio Call in an existing individual Chat containing one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message establishes that relationship. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay opens a WebSocket to the agent's call address (call_url) in Twilio Media Streams' shape, signed like a webhook; a 101 within the 10-second ring lease answers the Call (status active), any other reply declines it, and silence ends it no_answer. An answered Call has no duration limit.
+      description: Start an audio Call in an existing individual Chat containing one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message establishes that relationship. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay opens a WebSocket to the agent's call address (call_url) in Twilio Media Streams' shape, signed like a webhook; a 101 within the 10-second ring lease answers the Call (status in-progress), any other reply ends it no-answer, and so does silence. A Call to a person who is already ringing or in-progress on another Call is created and finished at once with status busy; an agent is never busy. An answered Call has no duration limit.
       parameters:
         - name: chatId
           in: path
@@ -1880,7 +1880,7 @@ paths:
         - Calls
       security:
         - BearerAuth: []
-      description: Either Contact ends the Call. A ringing Call ends canceled when its caller ends it and declined when its recipient does; an answered Call ends completed. An agent declines by refusing the upgrade at its call address, and hangs up by closing that socket. Cleanup remains available after a block or removal. Repeated terminal actions never restart the Call.
+      description: Either Contact ends the Call. A ringing Call ends canceled when its caller ends it and no-answer when its recipient does; an answered Call ends completed. An agent declines by refusing the upgrade at its call address, and hangs up by closing that socket. Cleanup remains available after a block or removal. Repeated terminal actions never restart the Call.
       parameters:
         - name: callId
           in: path
@@ -1947,7 +1947,6 @@ components:
         - ringing_at
         - answered_at
         - ended_at
-        - end_reason
       properties:
         id: *uuid
         chat_id: *uuid
@@ -1965,10 +1964,19 @@ components:
             - audio
         status:
           type: string
+          description: >-
+            Twilio's Call status words. `ringing` and `in-progress` are live;
+            `completed`, `no-answer`, `canceled`, `busy` and `failed` are
+            terminal and set `ended_at`. Relay dials at creation, so `queued`
+            is never sent.
           enum:
             - ringing
-            - active
-            - ended
+            - in-progress
+            - completed
+            - no-answer
+            - canceled
+            - busy
+            - failed
         revision:
           type: integer
           minimum: 1
@@ -1982,18 +1990,6 @@ components:
             - "null"
           format: date-time
         ended_at: *a3
-        end_reason:
-          type:
-            - string
-            - "null"
-          enum:
-            - null
-            - completed
-            - declined
-            - canceled
-            - no_answer
-            - disconnected
-            - failed
     CallCreateRequest:
       type: object
       additionalProperties: false
@@ -4223,8 +4219,8 @@ components:
       additionalProperties: false
       description: >-
         A call in this chat, present from the moment it is placed. The actor is
-        the caller and the subject the callee; read `call.status` (ringing,
-        connecting, active, ended) and `call.end_reason` for its state.
+        the caller and the subject the callee; `call.status` carries its whole
+        state, in Twilio's words.
       required:
         - id
         - mode
@@ -4233,8 +4229,6 @@ components:
         - ended_at
         - from
         - to
-        - end_reason
-        - connected
         - duration_seconds
       properties:
         id:
@@ -4247,10 +4241,15 @@ components:
             - audio
         status:
           type: string
+          description: The same values as Call.status.
           enum:
             - ringing
-            - active
-            - ended
+            - in-progress
+            - completed
+            - no-answer
+            - canceled
+            - busy
+            - failed
         answered_at: *a3
         ended_at: *a3
         from:
@@ -4261,22 +4260,6 @@ components:
           maxItems: 1
           items:
             $ref: "#/components/schemas/CallContact"
-        end_reason:
-          type:
-            - string
-            - "null"
-          enum:
-            - null
-            - completed
-            - declined
-            - canceled
-            - no_answer
-            - disconnected
-            - failed
-          description: Why the Call ended. The same values as Call.end_reason, null until it ends.
-        connected:
-          type: boolean
-          description: Whether the Call was answered (answered_at set).
         duration_seconds:
           type:
             - integer
