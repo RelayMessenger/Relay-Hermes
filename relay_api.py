@@ -644,6 +644,10 @@ class RelayClient:
     async def stop_typing(self, chat_id: str) -> None:
         await self._request("DELETE", f"/v1/chats/{quote(chat_id, safe='')}/typing")
 
+    async def get_message(self, message_id: str) -> Dict[str, Any]:
+        response = await self._request("GET", f"/v1/messages/{quote(message_id, safe='')}")
+        return response.body if isinstance(response.body, dict) else {}
+
     async def send_reaction(self, message_id: str, emoji: str, *, operation: str) -> None:
         await self._request(
             "POST", f"/v1/messages/{quote(message_id, safe='')}/reactions",
@@ -1397,7 +1401,6 @@ SELECTION_VALUE_MAX_LENGTH = 100
 
 # The same words every Relay runtime carries (the SDK's SELECTION_GUIDANCE).
 SELECTION_GUIDANCE = " ".join([
-    "Selection is coming soon; this guidance describes the local candidate.",
     "Use selection when the person can choose several known options, then Send once.",
     "If the person asks for selections or multiple choices to submit together, send a selection, not buttons.",
     "Include a nonblank text question and 1 to 25 options with explicit stable value and readable label.",

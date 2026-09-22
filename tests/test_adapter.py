@@ -734,6 +734,87 @@ def test_unmentioned_group_event_is_not_dispatched(plugin, tmp_path):
     assert client.reads == []
 
 
+def _group_answer(payload, target_id):
+    payload["data"]["chat"] = {
+        "id": payload["data"]["chat"]["id"],
+        "is_group": True,
+        "owner_handle": {
+            "id": "01993d50-ef7b-7b37-886b-23fd80c7ec13",
+            "handle": "helper",
+            "joined_at": "2026-08-29T00:00:00Z",
+            "kind": "agent",
+            "is_me": True,
+        },
+    }
+    payload["data"]["parts"] = [
+        {"type": "text", "value": "\N{BULLET} Research"},
+        {"type": "selection_response", "selected_values": ["research"]},
+    ]
+    payload["data"]["reply_to"] = {"message_id": target_id, "part_index": 1}
+    return payload
+
+
+class ReplyTargetClient(FakeClient):
+    def __init__(self, messages):
+        super().__init__()
+        self.messages = messages
+        self.lookups: List[str] = []
+
+    async def get_message(self, message_id):
+        self.lookups.append(message_id)
+        if message_id not in self.messages:
+            api = importlib.import_module("relay_hermes.relay_api")
+            raise api.RelayApiError("not found", kind="terminal", status=404)
+        return self.messages[message_id]
+
+
+def test_group_answer_to_own_question_is_dispatched_without_a_mention(plugin, tmp_path):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    prompt_id = "01993d50-ef7b-7b37-886b-23fd80c7ec21"
+    chat_id = relay_event()["data"]["chat"]["id"]
+    client = ReplyTargetClient({prompt_id: {
+        "id": prompt_id, "chat_id": chat_id, "is_from_me": True, "is_system_message": False,
+    }})
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    inbound = api.parse_inbound(_group_answer(relay_event("group-answer"), prompt_id))
+    assert inbound is not None
+    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    assert client.lookups == [prompt_id]
+    assert len(dispatched) == 1
+    assert '"selected_values":["research"]' in dispatched[0].text
+
+
+def test_group_reply_to_someone_else_stays_out(plugin, tmp_path):
+    api = importlib.import_module("relay_hermes.relay_api")
+    chat_id = relay_event()["data"]["chat"]["id"]
+    other_agent = "01993d50-ef7b-7b37-886b-23fd80c7ec22"
+    other_chat = "01993d50-ef7b-7b37-886b-23fd80c7ec23"
+    missing = "01993d50-ef7b-7b37-886b-23fd80c7ec24"
+    for target, messages in [
+        (other_agent, {other_agent: {"id": other_agent, "chat_id": chat_id, "is_from_me": False}}),
+        (other_chat, {other_chat: {"id": other_chat, "chat_id": "elsewhere", "is_from_me": True}}),
+        (missing, {}),
+    ]:
+        adapter = make_adapter(plugin, tmp_path / target)
+        adapter._client = ReplyTargetClient(messages)
+        dispatched = []
+
+        async def capture_dispatch(event):
+            dispatched.append(event)
+
+        adapter._dispatch_turn = capture_dispatch
+        inbound = api.parse_inbound(_group_answer(relay_event("group-" + target), target))
+        assert asyncio.run(adapter._on_inbound(inbound)) is False
+        assert dispatched == []
+
+
 def test_register_loads_as_a_hermes_platform_plugin(plugin):
     calls = []
 

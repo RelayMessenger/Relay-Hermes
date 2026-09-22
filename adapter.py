@@ -837,6 +837,33 @@ class RelayAdapter(BasePlatformAdapter):
             handle=inbound.agent_handle,
         )
 
+    async def _replies_to_me(self, inbound: InboundRelayMessage) -> bool:
+        """A reply to one of this agent's own messages addresses it.
+
+        A selection answer and a button tap are replies without a mention (the
+        server refuses a mention on a selection answer), so the mention rule
+        alone dropped the answer to this agent's own question in every group.
+        Hermes keeps no record of the ids it sent, so ask the server whose the
+        target is, the way the SDK's channel bridge does
+        (``#replyTargetsAgent``). An unreadable target is not a reply to us.
+        """
+        target = inbound.message.get("reply_to")
+        message_id = target.get("message_id") if isinstance(target, dict) else None
+        if not isinstance(message_id, str) or not message_id or self._client is None:
+            return False
+        try:
+            source = await self._client.get_message(message_id)
+        except RelayApiError as error:
+            if error.retryable:
+                raise
+            return False
+        return (
+            source.get("id") == message_id
+            and source.get("chat_id") == inbound.chat_id
+            and source.get("is_from_me") is True
+            and not source.get("is_system_message")
+        )
+
     async def _on_inbound(self, inbound: InboundRelayMessage) -> bool:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
         chat_id = inbound.chat_id
@@ -847,7 +874,7 @@ class RelayAdapter(BasePlatformAdapter):
         cache.add(chat_id)
         chat_type = "group" if is_group else "dm"
 
-        if is_group and not self._addressed_in_group(inbound):
+        if is_group and not self._addressed_in_group(inbound) and not await self._replies_to_me(inbound):
             logger.debug(
                 "[%s] not mentioned in group %s, staying out of %s",
                 self.name, chat_id, inbound.message_id,
