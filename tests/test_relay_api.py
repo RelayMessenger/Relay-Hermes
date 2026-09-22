@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import runpy
 from pathlib import Path
 from typing import Any, Dict, List
@@ -141,9 +143,9 @@ def test_current_event_parsing_and_mentions():
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
-    assert RELAY_OPENAPI_COMMIT == "a25111520f7fc92c25ecd945d1dfc9afa9f60a1f"
+    assert RELAY_OPENAPI_COMMIT == "fe3ec1e91608e923ec5ee0e37896eb8bf24d863a"
     assert RELAY_OPENAPI_SHA256 == (
-        "9f3e662a13cd0e6b16a52fba4b53c75fe5817d134dcf152e00b054699c37839c"
+        "262e832ad356375b1a912faa6f9a8ea9c008effa6c24e2618b000ad6b69d858f"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
@@ -442,6 +444,62 @@ def test_selection_reply_context_truncates_a_component_dump_at_the_cap():
     assert len(rich) < SELECTION_CONTEXT_MAX_LENGTH + 120
 
 
+# The SDK is the source of this file's SELECTION_GUIDANCE, and the string has to
+# stay byte-identical across runtimes, so the parity check below reads the
+# TypeScript declaration itself rather than a hand-copied duplicate. Located the
+# way tests/test_adapter.py locates the pinned Hermes source: an explicit
+# environment variable, else the sibling checkout. A developer without the SDK
+# checked out skips; a developer with it gets the diff.
+RELAY_SDK_SOURCE = Path(
+    os.environ.get("RELAY_SDK_SRC", "").strip()
+    or Path(__file__).resolve().parents[2] / "Relay-SDK"
+)
+SDK_SELECTION_TS = RELAY_SDK_SOURCE / "packages" / "sdk" / "src" / "selection.ts"
+
+# Only the escapes this declaration can carry. \\ is the one that matters: the
+# TypeScript literal writes '\\n' for the two characters a bullet reply joins on.
+_TS_ESCAPES = {
+    "\\": "\\", '"': '"', "'": "'", "`": "`", "/": "/",
+    "n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "0": "\0",
+}
+
+
+def _typescript_string_constant(source: str, name: str) -> str:
+    """Concatenate one ``export const NAME = "a" + "b";`` declaration's value."""
+    declaration = re.search(
+        rf"^export const {re.escape(name)}\s*=", source, re.MULTILINE
+    )
+    assert declaration, f"{name} is no longer declared in the SDK source"
+    index = declaration.end()
+    pieces: List[str] = []
+    while index < len(source):
+        char = source[index]
+        if char == ";":
+            return "".join(pieces)
+        if char in "\"'":
+            quote, index, piece = char, index + 1, []
+            while source[index] != quote:
+                if source[index] == "\\":
+                    escape = source[index + 1]
+                    if escape == "u":
+                        piece.append(chr(int(source[index + 2:index + 6], 16)))
+                        index += 6
+                        continue
+                    piece.append(_TS_ESCAPES[escape])
+                    index += 2
+                    continue
+                piece.append(source[index])
+                index += 1
+            pieces.append("".join(piece))
+            index += 1
+            continue
+        # Only concatenation and whitespace separate the pieces; anything else
+        # means the declaration grew a shape this reader does not understand.
+        assert char in "+ \t\r\n", f"unexpected {char!r} in {name}"
+        index += 1
+    raise AssertionError(f"{name} declaration is unterminated")
+
+
 def test_selection_guidance_carries_the_shared_runtime_words():
     assert "at most one human user" in SELECTION_GUIDANCE
     assert (
@@ -450,8 +508,21 @@ def test_selection_guidance_carries_the_shared_runtime_words():
     )
     assert "across that user's devices and idempotency keys" in SELECTION_GUIDANCE
     assert "literal '\N{BULLET} ' + label joined with '\\n'" in SELECTION_GUIDANCE
-    assert "Tapping a selected option deselects it" in SELECTION_GUIDANCE
-    assert "centered compact light-blue Send button" in SELECTION_GUIDANCE
+    assert (
+        "checks any number of options and submits them once; checking sends "
+        "nothing and only the submit does"
+        in SELECTION_GUIDANCE
+    )
+    assert (
+        "reopening it afterwards shows what they chose without letting them "
+        "change it"
+        in SELECTION_GUIDANCE
+    )
+    assert (
+        "iOS may draw a checkmark in place of each bullet, and repeat the "
+        "prompt's title above the lines, as presentation only"
+        in SELECTION_GUIDANCE
+    )
     assert (
         "exact legacy comma-joined source labels only for compatibility"
         in SELECTION_GUIDANCE
@@ -460,6 +531,20 @@ def test_selection_guidance_carries_the_shared_runtime_words():
     assert "Clear" not in SELECTION_GUIDANCE
     assert "`selection`" in SELECTION_BLOCK_INSTRUCTION
     assert '[{"value":"stable_token","label":"Readable label"}]' in SELECTION_BLOCK_INSTRUCTION
+
+
+@pytest.mark.skipif(
+    not SDK_SELECTION_TS.is_file(),
+    reason="Relay-SDK checkout is required to diff SELECTION_GUIDANCE",
+)
+def test_selection_guidance_is_byte_identical_to_the_sdk():
+    source = SDK_SELECTION_TS.read_text(encoding="utf-8")
+    assert SELECTION_GUIDANCE == _typescript_string_constant(
+        source, "SELECTION_GUIDANCE"
+    )
+    assert SELECTION_BLOCK_INSTRUCTION == _typescript_string_constant(
+        source, "SELECTION_BLOCK_INSTRUCTION"
+    )
 
 
 def test_send_message_uses_chat_route_and_current_body():

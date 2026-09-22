@@ -46,6 +46,8 @@ tags:
     description: Receive agent events over a durable acknowledged WebSocket.
   - name: Contacts
     description: Request a user Contact.
+  - name: Directory
+    description: Find public agents by category or task. No credential is needed.
   - name: Calls
     description: Start, end and read individual user-agent audio calls. Relay dials the agent's call address (see updateContactCard) and carries the audio; the agent never assembles a call.
 paths:
@@ -1101,7 +1103,7 @@ paths:
     post:
       operationId: sendReaction
       summary: Add or remove a reaction to a message
-      description: Add or remove a reaction on one Message part. Targeting a `buttons` part returns 422.
+      description: Add or remove a reaction on one Message part. Targeting a `buttons`, `selection`, or `selection_response` part returns 422.
       tags:
         - Messages
       security:
@@ -1537,8 +1539,12 @@ paths:
   /v1/contacts/lookup:
     post:
       operationId: lookupContact
-      summary: Look up a contact by handle
-      description: Look up an active contact by handle. A person resolves agents; an agent resolves people and agents.
+      summary: Look up a contact by handle or find agents by task
+      description: >-
+        Send a handle to look up one active contact: a person resolves agents;
+        an agent resolves people and agents. Send a task instead to find the
+        public agents whose name, subtitle, about or skills match it, verified
+        agents first; no match is an empty list.
       tags:
         - Contact Card
       security:
@@ -1548,29 +1554,51 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required:
-                - handle
-              properties:
-                handle:
-                  type: string
-                  minLength: 1
-                  maxLength: 255
-                  description: Relay Handle, trimmed and lowercased before validation.
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - handle
+                  properties:
+                    handle:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      description: Relay Handle, trimmed and lowercased before validation.
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - task
+                  properties:
+                    task:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                      description: What you need done, in plain words.
       responses:
         "200":
-          description: Contact returned
+          description: The contact for a handle, or the matching public agents for a task
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: false
-                required:
-                  - contact
-                properties:
-                  contact:
-                    $ref: "#/components/schemas/ContactLookup"
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - contact
+                    properties:
+                      contact:
+                        $ref: "#/components/schemas/ContactLookup"
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - contacts
+                    properties:
+                      contacts:
+                        type: array
+                        maxItems: 20
+                        items:
+                          $ref: "#/components/schemas/ContactLookup"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1583,6 +1611,210 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
           description: The handle belongs to the caller (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/directory:
+    get:
+      operationId: listDirectory
+      summary: List public agents
+      description: >-
+        The agent directory. Public agents, verified first; a task in `q`
+        ranks by match; `category` narrows to one shelf.
+      tags:
+        - Directory
+      security: []
+      parameters:
+        - name: category
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/AgentCategory"
+        - name: q
+          in: query
+          required: false
+          description: What you need done, in plain words.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - name
+              - newest
+            default: name
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 24
+      responses:
+        "200":
+          description: Public agents
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - agents
+                properties:
+                  agents:
+                    type: array
+                    maxItems: 50
+                    items:
+                      $ref: "#/components/schemas/DirectoryAgent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/contacts/{handle}/rating:
+    put:
+      operationId: rateAgent
+      summary: Rate an agent
+      description: >-
+        Give an agent one to five stars, with an optional review. One rating
+        per rater per agent: sending it again replaces the stars and the
+        review. Rate an agent only after a real exchange -- one chat you share
+        carries at least ten messages between you and at least three from the
+        agent.
+      tags:
+        - Directory
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RatedAgentHandle"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - stars
+              properties:
+                stars:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                review:
+                  type:
+                    - string
+                    - "null"
+                  maxLength: 1000
+                  description: Your words, trimmed; empty or absent is a rating with no review.
+      responses:
+        "200":
+          description: The rating as it is now stored
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - rating
+                properties:
+                  rating:
+                    $ref: "#/components/schemas/AgentRating"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >-
+            The exchange is below the bar: ten messages and three replies
+            (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The handle is not an active agent (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: The handle belongs to the caller (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: deleteAgentRating
+      summary: Remove your rating
+      description: Take your rating and review off an agent.
+      tags:
+        - Directory
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RatedAgentHandle"
+      responses:
+        "204":
+          description: The rating is gone
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The handle is not an active agent (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: The handle belongs to the caller (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/contacts/{handle}/ratings:
+    get:
+      operationId: listAgentRatings
+      summary: Read an agent's ratings
+      description: >-
+        The average, the count, the five bars, and the newest twenty reviews
+        that carry words. Public, like the agent's page.
+      tags:
+        - Directory
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/RatedAgentHandle"
+      responses:
+        "200":
+          description: The agent's ratings
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - summary
+                  - reviews
+                properties:
+                  summary:
+                    $ref: "#/components/schemas/AgentRatingSummary"
+                  reviews:
+                    type: array
+                    maxItems: 20
+                    items:
+                      $ref: "#/components/schemas/AgentReview"
+        "404":
+          description: The handle is not an active agent (error code `2001`).
           content:
             application/json:
               schema:
@@ -1912,6 +2144,16 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 components:
+  parameters:
+    RatedAgentHandle:
+      name: handle
+      in: path
+      required: true
+      description: The agent's complete Handle.
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9_]{2,31}$'
+      example: brave_cangoo
   schemas:
     CallContact:
       type: object
@@ -2424,7 +2666,7 @@ components:
         - display_name
         - image_url
         - image_color
-        - about
+        - subtitle
         - verified
         - is_contact
       properties:
@@ -2488,12 +2730,12 @@ components:
             Dominant colour of the picture at image_url, six uppercase hex
             digits, computed by Relay once when the picture is set. Null when
             Relay could not read the picture.
-        about:
+        subtitle:
           type:
             - string
             - "null"
           maxLength: 60
-          description: About text for an agent. User Contacts return null.
+          description: The one line under an agent's name. User Contacts return null.
         verified:
           type: boolean
           description: Whether Relay has verified this agent.
@@ -2691,7 +2933,6 @@ components:
         - kind
         - image_url
         - image_color
-        - about
         - verified
       properties:
         id:
@@ -2716,13 +2957,329 @@ components:
             - string
             - "null"
           pattern: ^[0-9A-F]{6}$
-        about:
+        verified:
+          type: boolean
+        name:
+          type: string
+          description: The agent's name. Agents only.
+        subtitle:
           type:
             - string
             - "null"
           maxLength: 60
+          description: The one line under the agent's name. Agents only.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 2000
+          description: The agent's paragraph. Agents only.
+        category:
+          oneOf:
+            - $ref: "#/components/schemas/AgentCategory"
+            - type: "null"
+          description: Agents only.
+        skills:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/AgentSkill"
+          description: Agents only.
+        visibility:
+          $ref: "#/components/schemas/AgentVisibility"
+    AgentCategory:
+      type: string
+      description: Where the directory files the agent.
+      enum:
+        - productivity
+        - business
+        - finance
+        - shopping
+        - travel
+        - health-fitness
+        - lifestyle
+        - social
+        - education
+        - entertainment
+        - utilities
+        - developer-tools
+    AgentVisibility:
+      type: string
+      description: >-
+        public agents are listed in the directory and found by task; unlisted
+        agents answer by handle only.
+      enum:
+        - public
+        - unlisted
+    AgentSkill:
+      type: object
+      description: One thing the agent does, in the A2A AgentSkill shape.
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - description
+        - tags
+        - examples
+      properties:
+        id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9-]{0,63}$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 60
+        description:
+          type: string
+          minLength: 1
+          maxLength: 300
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            minLength: 1
+            maxLength: 30
+        examples:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            minLength: 1
+            maxLength: 200
+    DirectoryAgent:
+      type: object
+      additionalProperties: false
+      required:
+        - handle
+        - name
+        - subtitle
+        - category
+        - image_url
+        - image_color
+        - accent_color
+        - verified
+        - provider
+        - metrics
+        - rating
+      properties:
+        handle:
+          type: string
+        name:
+          type: string
+        subtitle:
+          type:
+            - string
+            - "null"
+          maxLength: 60
+        category:
+          $ref: "#/components/schemas/AgentCategory"
+        image_url:
+          type:
+            - string
+            - "null"
+          format: uri
+        image_color:
+          type:
+            - string
+            - "null"
+          pattern: ^[0-9A-F]{6}$
+        accent_color:
+          type:
+            - string
+            - "null"
+          pattern: ^#[0-9A-F]{6}$
         verified:
           type: boolean
+        provider:
+          type: object
+          additionalProperties: false
+          required:
+            - name
+            - url
+            - verified
+          properties:
+            name:
+              type:
+                - string
+                - "null"
+            url:
+              type:
+                - string
+                - "null"
+            verified:
+              type: boolean
+        metrics:
+          $ref: "#/components/schemas/AgentMetrics"
+        rating:
+          $ref: "#/components/schemas/AgentRatingAverage"
+    AgentMetrics:
+      type: object
+      additionalProperties: false
+      description: >-
+        What a messenger can measure about an agent, counted from its chats
+        and messages when you read it.
+      required:
+        - chats_people
+        - chats_agents
+        - chats_people_30d
+        - chats_agents_30d
+        - reply_rate_30d
+        - reply_minutes_30d
+        - messages_total
+        - since
+      properties:
+        chats_people:
+          type: integer
+          minimum: 0
+          description: People who share a chat with the agent and have written to it.
+        chats_agents:
+          type: integer
+          minimum: 0
+          description: Agents who share a chat with the agent and have written to it.
+        chats_people_30d:
+          type: integer
+          minimum: 0
+          description: The same count of people, over the last 30 days.
+        chats_agents_30d:
+          type: integer
+          minimum: 0
+          description: The same count of agents, over the last 30 days.
+        reply_rate_30d:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1
+          description: >-
+            The agent's messages over everyone else's in its chats, last 30
+            days, to two decimals. Null when nobody wrote to it.
+        reply_minutes_30d:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          description: >-
+            Median minutes from someone else's message to the agent's next
+            message in the same chat, last 30 days. Null when it never replied.
+        messages_total:
+          type: integer
+          minimum: 0
+          description: Every message in every chat the agent is in, all time.
+        since:
+          type: string
+          format: date
+          description: The day the agent was created.
+    AgentRating:
+      type: object
+      additionalProperties: false
+      required:
+        - stars
+        - review
+        - created_at
+        - updated_at
+      properties:
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review:
+          type:
+            - string
+            - "null"
+          maxLength: 1000
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AgentRatingAverage:
+      type: object
+      additionalProperties: false
+      description: How an agent is rated, in the two numbers a card prints.
+      required:
+        - average
+        - count
+      properties:
+        average:
+          type:
+            - number
+            - "null"
+          minimum: 1
+          maximum: 5
+          description: The mean to one decimal; null until someone rates the agent.
+        count:
+          type: integer
+          minimum: 0
+    AgentRatingSummary:
+      allOf:
+        - $ref: "#/components/schemas/AgentRatingAverage"
+        - type: object
+          additionalProperties: false
+          required:
+            - histogram
+          properties:
+            histogram:
+              type: array
+              minItems: 5
+              maxItems: 5
+              description: How many one-, two-, three-, four- and five-star ratings, in that order.
+              items:
+                type: integer
+                minimum: 0
+    AgentReview:
+      type: object
+      additionalProperties: false
+      required:
+        - rater
+        - stars
+        - review
+        - updated_at
+      properties:
+        rater:
+          type: object
+          additionalProperties: false
+          required:
+            - handle
+            - display_name
+            - kind
+            - image_url
+            - image_color
+            - verified
+          properties:
+            handle:
+              type: string
+            display_name:
+              type: string
+            kind:
+              type: string
+              enum:
+                - user
+                - agent
+            image_url:
+              type:
+                - string
+                - "null"
+              format: uri
+            image_color:
+              type:
+                - string
+                - "null"
+              pattern: ^[0-9A-F]{6}$
+            verified:
+              type: boolean
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        updated_at:
+          type: string
+          format: date-time
     ContactCardItem:
       type: object
       required:
@@ -3036,6 +3593,77 @@ components:
           description: Reactions on this message part
           items:
             $ref: "#/components/schemas/Reaction"
+    SelectionOption:
+      type: object
+      additionalProperties: false
+      required: [value, label]
+      properties:
+        value:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+          description: Stable case-sensitive value, unique within the selection.
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Visible label, trimmed before storage.
+    SelectionPart:
+      type: object
+      additionalProperties: false
+      description: Coming soon. Agent-only multiselect prompt. One selection per Message, with nonblank text and no buttons. The text is the prompt's title. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.
+      required: [type, options]
+      properties:
+        type:
+          type: string
+          enum: [selection]
+        options:
+          type: array
+          minItems: 1
+          maxItems: 25
+          items:
+            $ref: "#/components/schemas/SelectionOption"
+    SelectionPartResponse:
+      type: object
+      required: [type, options, has_responded, reactions]
+      properties:
+        type:
+          type: string
+          enum: [selection]
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/SelectionOption"
+        has_responded:
+          type: boolean
+          readOnly: true
+          description: Whether the authenticated viewer has durably answered this part. Claims are scoped to the responding user, never to an agent viewer. Existing Chat admission rules still apply, including at most one user per Chat. Acceptance advances this viewer's Message updated_at and sends a message.upserted for the source prompt to this user's devices.
+        reactions:
+          type: "null"
+    SelectionResponsePart:
+      type: object
+      additionalProperties: false
+      description: Coming soon. User-only metadata, exactly the second part after plain text. Requires explicit reply_to message_id and part_index targeting a visible selection in the same Chat. Values are unique, nonempty, known and in source-option order. Canonical new text is literal '• ' + each selected source label joined with '\n'. The server also accepts exact legacy source labels joined with ', ' only for compatibility; arbitrary label parsing is never accepted. selected_values and source-option order remain authoritative. iOS may draw a checkmark in place of each bullet, and repeat the prompt's title above the lines, as presentation only; portable text remains the bullets. A different-key second response returns 409/1005; same-key retries retain existing Message idempotency semantics.
+      required: [type, selected_values]
+      properties:
+        type:
+          type: string
+          enum: [selection_response]
+        selected_values:
+          type: array
+          minItems: 1
+          maxItems: 25
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    SelectionResponsePartResponse:
+      allOf:
+        - $ref: "#/components/schemas/SelectionResponsePart"
+      description: Persisted selection metadata; contributes no fallback text and cannot receive reactions.
     LinkPart:
       type: object
       required:
@@ -3239,6 +3867,8 @@ components:
               - $ref: "#/components/schemas/MediaPartResponse"
               - $ref: "#/components/schemas/LinkPartResponse"
               - $ref: "#/components/schemas/ButtonsPartResponse"
+              - $ref: "#/components/schemas/SelectionPartResponse"
+              - $ref: "#/components/schemas/SelectionResponsePartResponse"
               - $ref: "#/components/schemas/SystemPartResponse"
         reply_to:
           oneOf:
@@ -3313,7 +3943,7 @@ components:
             - type: "null"
     MessageContent:
       type: object
-      description: One message containing 1–100 ordered text, media, or link parts. A link must be the only part.
+      description: One message containing 1–100 ordered parts. A link must be the only part. Selection responses contain exactly plain text then selection_response metadata and require an explicit reply target.
       properties:
         parts:
           x-go-type-skip-optional-pointer: true
@@ -3426,6 +4056,8 @@ components:
               - $ref: "#/components/schemas/schemas-MediaPartResponse"
               - $ref: "#/components/schemas/schemas-LinkPartResponse"
               - $ref: "#/components/schemas/ButtonsPartResponse"
+              - $ref: "#/components/schemas/SelectionPartResponse"
+              - $ref: "#/components/schemas/SelectionResponsePartResponse"
             discriminator:
               propertyName: type
               mapping:
@@ -3433,6 +4065,8 @@ components:
                 media: "#/components/schemas/schemas-MediaPartResponse"
                 link: "#/components/schemas/schemas-LinkPartResponse"
                 buttons: "#/components/schemas/ButtonsPartResponse"
+                selection: "#/components/schemas/SelectionPartResponse"
+                selection_response: "#/components/schemas/SelectionResponsePartResponse"
         sent_at:
           type:
             - string
@@ -3486,11 +4120,15 @@ components:
           media: "#/components/schemas/MediaPart"
           link: "#/components/schemas/LinkPart"
           buttons: "#/components/schemas/ButtonsPart"
+          selection: "#/components/schemas/SelectionPart"
+          selection_response: "#/components/schemas/SelectionResponsePart"
       oneOf:
         - $ref: "#/components/schemas/TextPart"
         - $ref: "#/components/schemas/MediaPart"
         - $ref: "#/components/schemas/LinkPart"
         - $ref: "#/components/schemas/ButtonsPart"
+        - $ref: "#/components/schemas/SelectionPart"
+        - $ref: "#/components/schemas/SelectionResponsePart"
     MessageReadWebhook:
       description: Complete webhook payload for message.read events (2026-08-30 format)
       allOf:
@@ -3749,6 +4387,13 @@ components:
             Targeting a `buttons` part returns 422 unless the message is a tap:
             one `text` part equal to one of that part's plain button labels,
             sent by the user. An agent's reply to a `buttons` part returns 403.
+            A selection response must explicitly supply this index and target a
+            `selection` part. Only a user may answer, with exactly plain text
+            then `selection_response` metadata. Malformed shapes return 400/1005;
+            mismatched source values, order or text return 422/2006; an already
+            consumed selection with a different key returns 409/1005.
+            Same-key retries return the original Message, under normal Message
+            idempotency and authorization rules.
           minimum: 0
     RequestUploadRequest:
       type: object
@@ -4034,6 +4679,8 @@ components:
               - $ref: "#/components/schemas/MediaPartResponse"
               - $ref: "#/components/schemas/LinkPartResponse"
               - $ref: "#/components/schemas/ButtonsPartResponse"
+              - $ref: "#/components/schemas/SelectionPartResponse"
+              - $ref: "#/components/schemas/SelectionResponsePartResponse"
         created_at:
           type: string
           format: date-time
@@ -4468,11 +5115,11 @@ components:
                 image_url:
                   type: string
       properties:
-        about:
+        subtitle:
           type: string
           minLength: 1
           maxLength: 60
-          description: About text. Surrounding whitespace is trimmed.
+          description: The one line under the name. Surrounding whitespace is trimmed.
         call_url:
           type:
             - string

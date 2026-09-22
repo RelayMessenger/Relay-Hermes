@@ -26,7 +26,7 @@ env:
   # The newest hermes-agent wheel on PyPI (2026-09-09) and the oldest Hermes
   # relay_hermes.check_hermes() accepts. The git pin above is the newest.
   HERMES_PUBLISHED_VERSION: 0.19.0
-  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/a25111520f7fc92c25ecd945d1dfc9afa9f60a1f/openapi.yaml
+  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/fe3ec1e91608e923ec5ee0e37896eb8bf24d863a/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
 jobs:

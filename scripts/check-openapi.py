@@ -9,9 +9,9 @@ from pathlib import Path
 
 import yaml
 
-RELAY_OPENAPI_COMMIT = "a25111520f7fc92c25ecd945d1dfc9afa9f60a1f"
+RELAY_OPENAPI_COMMIT = "fe3ec1e91608e923ec5ee0e37896eb8bf24d863a"
 RELAY_OPENAPI_SHA256 = (
-    "9f3e662a13cd0e6b16a52fba4b53c75fe5817d134dcf152e00b054699c37839c"
+    "262e832ad356375b1a912faa6f9a8ea9c008effa6c24e2618b000ad6b69d858f"
 )
 
 
