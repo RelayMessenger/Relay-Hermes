@@ -49,7 +49,7 @@ tags:
   - name: Directory
     description: Find public agents by category or task. No credential is needed.
   - name: Calls
-    description: Start, end and read individual user-agent audio calls. Relay dials the agent's call address (see updateContactCard) and carries the audio; the agent never assembles a call.
+    description: Start, answer, end and read individual user-agent audio calls. Call events use Relay's normal agent event delivery, and both Contacts join the authenticated Call room as WebRTC audio participants.
 paths:
   /v1/agents/{handle}:
     delete:
@@ -1976,7 +1976,7 @@ paths:
         - Calls
       security:
         - BearerAuth: []
-      description: Start an audio Call in an existing individual Chat containing one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message establishes that relationship. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay opens a WebSocket to the agent's call address (call_url) in Twilio Media Streams' shape, signed like a webhook; a 101 within the 10-second ring lease answers the Call (status in-progress), any other reply ends it no-answer, and so does silence. A Call to a person who is already ringing or in-progress on another Call is created and finished at once with status busy; an agent is never busy. An answered Call has no duration limit.
+      description: Start an audio Call in an existing individual Chat containing exactly one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message establishes that relationship. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay emits `call.created` through the agent's configured event transport. Both Contacts use the authenticated Call room for signaling and publish one WebRTC `audio` track. The callee answers by sending `join` within the 10-second ring lease; silence ends `no-answer`. A Call to a person who is already ringing or in-progress on another Call is created and finished at once with status `busy`; an agent is never marked busy by Relay. An answered Call has no duration limit.
       parameters:
         - name: chatId
           in: path
@@ -2021,7 +2021,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "422":
-          description: The Chat cannot take a Call. The agent has no call address, so nothing would answer (error code `2031`, "This agent has no call address."); or the Chat is not an individual Chat of one user and one agent (error code `1005`).
+          description: The Chat cannot take a Call because it is not an individual Chat containing exactly one user and one agent (error code `1005`).
           content:
             application/json:
               schema:
@@ -2104,6 +2104,54 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /v1/calls/{callId}/room:
+    get:
+      operationId: connectCallRoom
+      summary: Join a call room
+      tags:
+        - Calls
+      security:
+        - BearerAuth: []
+      description: >-
+        Upgrade to a WebSocket as either Contact in a live Call. This socket is
+        signaling only: every frame is JSON text and audio never passes through
+        it. The callee answers a ringing Call by sending `join`. Each participant
+        then sends one `offer` publishing a WebRTC track named `audio`; Relay
+        returns `answer`. After applying that answer, send `connected` only when
+        the RTCPeerConnection connectionState is `connected`. Once both
+        participants have published and reported connected, Relay pulls each
+        participant's `audio` track into the other Cloudflare SFU Session and
+        sends each participant an `offer`; answer that offer with `answer` to
+        complete renegotiation. The room is scoped to the Call and accepts only
+        its authenticated user or agent Contact.
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: *a1
+        - name: Upgrade
+          in: header
+          required: true
+          schema:
+            type: string
+            const: websocket
+      responses:
+        "101":
+          description: WebSocket upgrade accepted. See `x-relay-call-room-frames` for frame schemas.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: The Call has ended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/calls/{callId}/end:
     post:
       operationId: endCall
@@ -2112,7 +2160,7 @@ paths:
         - Calls
       security:
         - BearerAuth: []
-      description: Either Contact ends the Call. A ringing Call ends canceled when its caller ends it and no-answer when its recipient does; an answered Call ends completed. An agent declines by refusing the upgrade at its call address, and hangs up by closing that socket. Cleanup remains available after a block or removal. Repeated terminal actions never restart the Call.
+      description: Either Contact ends the Call. A ringing Call ends canceled when its caller ends it and no-answer when its recipient does; an answered Call ends completed. A participant may also send `end` over its authenticated Call room. Cleanup remains available after a block or removal. Repeated terminal actions never restart the Call.
       parameters:
         - name: callId
           in: path
@@ -2207,10 +2255,8 @@ components:
         status:
           type: string
           description: >-
-            Twilio's Call status words. `ringing` and `in-progress` are live;
-            `completed`, `no-answer`, `canceled`, `busy` and `failed` are
-            terminal and set `ended_at`. Relay dials at creation, so `queued`
-            is never sent.
+            `ringing` and `in-progress` are live. `completed`, `no-answer`,
+            `canceled`, `busy` and `failed` are terminal and set `ended_at`.
           enum:
             - ringing
             - in-progress
@@ -2278,6 +2324,199 @@ components:
       additionalProperties: false
       required: []
       properties: {}
+    CallRoomParticipant:
+      type: object
+      additionalProperties: false
+      required:
+        - contact_id
+        - kind
+        - attached
+        - track
+        - muted
+        - connected
+      properties:
+        contact_id: *uuid
+        kind:
+          type: string
+          enum: [user, agent]
+        attached:
+          type: boolean
+          description: Whether this Contact currently has an authenticated Call room socket attached.
+        track:
+          type:
+            - string
+            - "null"
+          enum: [audio, null]
+          description: "`audio` after this participant has published its one local WebRTC audio track."
+        muted:
+          type: boolean
+        connected:
+          type: boolean
+          description: True after this participant reported RTCPeerConnection connectionState `connected` for its initial publication.
+    CallRoomJoinFrame:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: join
+    CallRoomPublishOfferFrame:
+      type: object
+      additionalProperties: false
+      required: [type, session_description, tracks]
+      properties:
+        type:
+          type: string
+          const: offer
+        session_description:
+          type: object
+          additionalProperties: false
+          required: [type, sdp]
+          properties:
+            type:
+              type: string
+              const: offer
+            sdp:
+              type: string
+              minLength: 1
+              maxLength: 65536
+        tracks:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [mid, name]
+            properties:
+              mid:
+                type: string
+                minLength: 1
+                maxLength: 64
+              name:
+                type: string
+                const: audio
+    CallRoomAnswerFrame:
+      type: object
+      additionalProperties: false
+      required: [type, session_description]
+      properties:
+        type:
+          type: string
+          const: answer
+        session_description:
+          type: object
+          additionalProperties: false
+          required: [type, sdp]
+          properties:
+            type:
+              type: string
+              const: answer
+            sdp:
+              type: string
+              minLength: 1
+              maxLength: 65536
+    CallRoomConnectedFrame:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: connected
+    CallRoomUserUpdateFrame:
+      type: object
+      additionalProperties: false
+      required: [type, muted]
+      properties:
+        type:
+          type: string
+          const: userUpdate
+        muted:
+          type: boolean
+    CallRoomEndFrame:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: end
+    CallRoomHeartbeatFrame:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: heartbeat
+    CallRoomStateFrame:
+      type: object
+      additionalProperties: false
+      required: [type, call, participants]
+      properties:
+        type:
+          type: string
+          const: roomState
+        call:
+          $ref: "#/components/schemas/Call"
+        participants:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/CallRoomParticipant"
+    CallRoomServerAnswerFrame:
+      allOf:
+        - $ref: "#/components/schemas/CallRoomAnswerFrame"
+    CallRoomSubscriptionOfferFrame:
+      type: object
+      additionalProperties: false
+      required: [type, session_description, track]
+      properties:
+        type:
+          type: string
+          const: offer
+        session_description:
+          type: object
+          additionalProperties: false
+          required: [type, sdp]
+          properties:
+            type:
+              type: string
+              const: offer
+            sdp:
+              type: string
+              minLength: 1
+              maxLength: 65536
+        track:
+          type: string
+          const: audio
+    CallRoomEndedFrame:
+      type: object
+      additionalProperties: false
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          const: ended
+        reason:
+          type: string
+          enum: [completed, no-answer, canceled, busy, failed]
+    CallRoomErrorFrame:
+      type: object
+      additionalProperties: false
+      required: [type, code, message]
+      properties:
+        type:
+          type: string
+          const: error
+        code:
+          type: string
+          enum: [invalid_frame, not_allowed, media_unavailable]
+        message:
+          type: string
     CallCreatedWebhook:
       allOf:
         - $ref: "#/components/schemas/WebhookEnvelopeBase"
@@ -4770,15 +5009,6 @@ components:
         - image_url
         - image_color
       properties:
-        call_url:
-          type:
-            - string
-            - "null"
-          format: uri
-          description: >-
-            The agent's one call address, a wss:// URL Relay dials when the
-            agent is called. Null when the agent takes no calls. Present on
-            agents only.
         first_name:
           type: string
           description: First name on the contact card
@@ -5120,24 +5350,6 @@ components:
           minLength: 1
           maxLength: 60
           description: The one line under the name. Surrounding whitespace is trimmed.
-        call_url:
-          type:
-            - string
-            - "null"
-          format: uri
-          maxLength: 2048
-          description: >-
-            The one call address Relay dials when this agent is called: a
-            wss:// URL. Relay opens a WebSocket to it signed with the
-            agent's webhook secret (webhook-id, webhook-timestamp and
-            webhook-signature headers over an empty body), then speaks
-            Twilio Media Streams: connected, start (streamSid and callSid are
-            the Call id; customParameters carry from, to, chat_id and
-            direction), media (audio/x-mulaw, 8000 Hz, mono, base64) and
-            stop; the agent answers with media, mark and clear. Answering the
-            upgrade answers the Call; refusing it declines; closing the socket
-            hangs up. Null clears the address. If omitted, the existing value
-            is kept.
         first_name:
           type: string
           minLength: 1
@@ -5796,6 +6008,33 @@ x-relay-websocket-close-codes:
   "4401": The Agent Token is invalid or revoked.
   "4408": The heartbeat timed out.
   "4410": Webhook delivery is now configured for this Agent.
+x-relay-call-room-frames:
+  client:
+    join:
+      $ref: "#/components/schemas/CallRoomJoinFrame"
+    publish_offer:
+      $ref: "#/components/schemas/CallRoomPublishOfferFrame"
+    renegotiation_answer:
+      $ref: "#/components/schemas/CallRoomAnswerFrame"
+    connected:
+      $ref: "#/components/schemas/CallRoomConnectedFrame"
+    user_update:
+      $ref: "#/components/schemas/CallRoomUserUpdateFrame"
+    end:
+      $ref: "#/components/schemas/CallRoomEndFrame"
+    heartbeat:
+      $ref: "#/components/schemas/CallRoomHeartbeatFrame"
+  server:
+    room_state:
+      $ref: "#/components/schemas/CallRoomStateFrame"
+    publish_answer:
+      $ref: "#/components/schemas/CallRoomServerAnswerFrame"
+    subscription_offer:
+      $ref: "#/components/schemas/CallRoomSubscriptionOfferFrame"
+    ended:
+      $ref: "#/components/schemas/CallRoomEndedFrame"
+    error:
+      $ref: "#/components/schemas/CallRoomErrorFrame"
 x-relay-webhooks:
   message.sent.v2026-08-30:
     post:
