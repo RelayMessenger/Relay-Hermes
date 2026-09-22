@@ -2,7 +2,7 @@ manifest_version: 1
 name: relay-hermes
 label: Relay
 kind: platform
-version: 1.0.0-rc.6.dev.8
+version: 1.0.0-rc.6.dev.9
 description: >
   Connect Hermes Agent to Relay as an always-on agent. Relay messages arrive
   on a live connection, are saved before they are answered, are never answered
