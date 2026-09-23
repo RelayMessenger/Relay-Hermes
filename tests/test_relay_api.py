@@ -1074,6 +1074,29 @@ def test_websocket_accepts_current_contact_events(event_type):
     assert order == ["commit:1", "ack:1"]
 
 
+@pytest.mark.parametrize("event_type", ["call.created", "call.updated", "call.ended"])
+def test_websocket_accepts_call_events(event_type):
+    current = event()
+    current["event_type"] = event_type
+    # CallResult: the Call under ``call`` (fields trimmed; the envelope check
+    # reads only that data is an object).
+    current["data"] = {"call": {
+        "id": "01993d50-ef7b-7b37-886b-23fd80c7ec40",
+        "chat_id": CHAT_ID,
+        "status": "ringing",
+    }}
+    order: List[str] = []
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": current},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == ["commit:1", "ack:1"]
+    # Not a message: nothing reaches a Hermes turn.
+    assert parse_inbound(current) is None
+
+
 def test_websocket_refuses_to_ack_over_a_sequence_gap():
     order: List[str] = []
     socket = FakeSocket([

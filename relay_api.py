@@ -75,6 +75,9 @@ _WEBHOOK_EVENT_TYPES = {
     "chat.typing_indicator.stopped",
     "contact.added",
     "contact.removed",
+    "call.created",
+    "call.updated",
+    "call.ended",
 }
 _DISCONNECT_REASONS = {
     "revoked",
