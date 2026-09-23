@@ -2155,9 +2155,37 @@ def test_a_refused_invoice_after_its_words_is_not_resent_as_plain_text(
     ]
     assert client.refused == [[INVOICE_PART]]
     assert "Response formatting failed" not in caplog.text
-    assert "invoice refused after its words were delivered" in caplog.text
+    assert "invoice refused; not resending as plain text" in caplog.text
     assert f"HTTP {status}" in caplog.text
     assert "Only a verified agent can send an invoice." in caplog.text
+
+
+@pytest.mark.parametrize("status", [403, 422, 400])
+def test_a_refused_invoice_only_answer_is_not_resent_as_plain_text(
+    plugin, tmp_path, caplog, status
+):
+    adapter = make_adapter(plugin, tmp_path)
+    client = RefusingClient(_is_invoice, status)
+    adapter._client = client
+    event = message_event(plugin, adapter, f"event-invoice-alone-refused-{status}")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter._send_with_retry(
+            event.source.chat_id, invoice_fence(INVOICE_PART)
+        )
+
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(run())
+    # No lone "(Response formatting failed, plain text:)" bubble: nothing is
+    # delivered, the invoice is asked for once, and the reason is logged.
+    assert result.success
+    assert client.calls == []
+    assert client.refused == [[INVOICE_PART]]
+    assert "Response formatting failed" not in caplog.text
+    assert "trying plain-text fallback" not in caplog.text
+    assert "invoice refused; not resending as plain text" in caplog.text
+    assert f"HTTP {status}" in caplog.text
 
 
 def test_other_refusals_keep_the_plain_text_fallback(plugin, tmp_path, caplog):
@@ -2176,30 +2204,22 @@ def test_other_refusals_keep_the_plain_text_fallback(plugin, tmp_path, caplog):
         asyncio.run(deliver(words_refused, answer))
     assert words_refused.refused[0] == [{"type": "text", "value": "Here is the bag."}]
     assert "Response formatting failed" in words_refused.refused[1][0]["value"]
-    assert "invoice refused after its words" not in caplog.text
+    assert "invoice refused" not in caplog.text
 
-    # An invoice-only answer has no delivered words to stand on, so Hermes
-    # still takes its fallback. The fallback's text carries the block again:
-    # its prefix is delivered as words and only then is the invoice dropped.
-    caplog.clear()
-    alone = RefusingClient(_is_invoice, 403)
-    with caplog.at_level("WARNING"):
-        asyncio.run(deliver(alone, invoice_fence(INVOICE_PART)))
-    assert "trying plain-text fallback" in caplog.text
-    assert alone.refused == [[INVOICE_PART], [INVOICE_PART]]
-    assert [call["parts"] for call in alone.calls] == [
-        [{"type": "text", "value": "(Response formatting failed, plain text:)"}],
-    ]
-
-    # A rate limit is transient, not a refusal: the send still fails.
-    limited = RefusingClient(_is_invoice, 429)
-    adapter._client = limited
-
-    async def send_once():
+    # A rate limit or a timeout is transient, not a refusal: the send still
+    # fails, with or without words before the invoice, and Hermes retries it.
+    async def send_once(content):
         await adapter.on_processing_start(event)
-        return await adapter.send(event.source.chat_id, answer)
+        return await adapter.send(event.source.chat_id, content)
 
-    assert not asyncio.run(send_once()).success
+    caplog.clear()
+    for status in (429, 408):
+        for content in (answer, invoice_fence(INVOICE_PART)):
+            adapter._client = RefusingClient(_is_invoice, status)
+            with caplog.at_level("WARNING"):
+                result = asyncio.run(send_once(content))
+            assert not result.success and result.retryable, (status, content)
+    assert "invoice refused" not in caplog.text
 
 
 def test_standalone_send_puts_the_invoice_after_the_words(plugin, monkeypatch):
