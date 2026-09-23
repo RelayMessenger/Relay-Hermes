@@ -83,12 +83,15 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
+    split_invoice,
     split_selection,
     selection_reply,
     selection_reply_context,
     bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
+    INVOICE_BLOCK_INSTRUCTION,
+    INVOICE_GUIDANCE,
     LINK_LINE_INSTRUCTION,
     SELECTION_BLOCK_INSTRUCTION,
     SELECTION_GUIDANCE,
@@ -300,10 +303,14 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     """The words and the one component block under them.
 
     The SDK's ``answerMessages`` reads an answer this way (Relay-SDK
-    packages/sdk/src/links.ts): a selection is lifted first and rules out
-    buttons, so a selection block leaves the words even when a buttons block
-    follows it. A block that cannot be used stays in the words with a reason.
+    packages/sdk/src/links.ts): an invoice is lifted first and rules out
+    buttons and selection; then a selection, which rules out buttons, so a
+    selection block leaves the words even when a buttons block follows it. A
+    block that cannot be used stays in the words with a reason.
     """
+    text, invoice, error = split_invoice(answer)
+    if invoice is not None or error is not None:
+        return text, invoice, error
     text, selection, error = split_selection(answer)
     if selection is not None or error is not None:
         return text, selection, error
@@ -326,6 +333,21 @@ def _needs_words(
     )
 
 
+def _place_component(
+    parts: List[Dict[str, Any]], component: Dict[str, Any]
+) -> None:
+    """Put a lifted component where the SDK's ``answerMessages`` puts it.
+
+    Buttons and a selection ride under the last bubble of words. An invoice
+    must be the only part of its Message, so it goes last, after every bubble,
+    and ``_message_batches`` sends it alone.
+    """
+    if component.get("type") == "invoice":
+        parts.append(component)
+    else:
+        parts.insert(_buttons_slot(parts), component)
+
+
 def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Fold paragraphs and partition in order within MessageContent limits."""
     batches: List[List[Dict[str, Any]]] = []
@@ -337,8 +359,9 @@ def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
             len(batch) == MAX_PARTS_PER_POST
             or (is_url_media and url_media_count == 40)
             or batch[-1].get("type") == part.get("type") == "text"
-            # A link must be the only part in its Message.
+            # A link or an invoice must be the only part in its Message.
             or "link" in (batch[-1].get("type"), part.get("type"))
+            or "invoice" in (batch[-1].get("type"), part.get("type"))
         ):
             batches.append(batch)
             batch = []
@@ -1248,8 +1271,8 @@ class RelayAdapter(BasePlatformAdapter):
         if not chat_id:
             return SendResult(success=False, error="no Chat id")
 
-        # A selection or buttons rides in the model's words as a fenced block;
-        # lift it out before markdown formatting can touch the JSON.
+        # An invoice, a selection or buttons rides in the model's words as a
+        # fenced block; lift it out before markdown formatting can touch the JSON.
         answer = content
         content, component, component_error = _lift_component(content)
         content = self.format_message(content)
@@ -1278,8 +1301,9 @@ class RelayAdapter(BasePlatformAdapter):
             )
         if component is not None:
             # Under the last bubble of words; a buttons-only message is one
-            # the server takes, and a link must travel alone.
-            parts.insert(_buttons_slot(parts), component)
+            # the server takes, and a link must travel alone. An invoice goes
+            # after the words as its own, final Message.
+            _place_component(parts, component)
         if not parts:
             return SendResult(success=False, error="nothing to send")
         return await self._commit(chat_id, parts, reply_to)
@@ -1710,7 +1734,7 @@ async def _standalone_send(
             "relay standalone send: component block left as text: %s", component_error
         )
     if component is not None:
-        parts.insert(_buttons_slot(parts), component)
+        _place_component(parts, component)
     if not parts:
         return {"error": "relay standalone send: nothing to send"}
     try:
@@ -1758,7 +1782,8 @@ PLATFORM_HINT = (
     "of sending filler. Answer normally whenever there is a question, a "
     "request, or anything genuinely worth saying. "
     f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
-    f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE}"
+    f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
+    f"{INVOICE_BLOCK_INSTRUCTION} {INVOICE_GUIDANCE}"
 )
 
 

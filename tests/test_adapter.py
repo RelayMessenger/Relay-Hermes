@@ -1708,10 +1708,10 @@ def test_platform_hint_carries_the_selection_rules(plugin):
 
     hint = plugin.PLATFORM_HINT
     # The order every Relay runtime uses (Relay-SDK packages/pi/src/index.ts).
-    assert hint.endswith(
+    assert (
         f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
         f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE}"
-    )
+    ) in hint
     assert "send a selection, not buttons" in hint
 
 
@@ -1927,6 +1927,212 @@ def test_standalone_send_lifts_a_selection_block(plugin, monkeypatch):
         {"type": "text", "value": "Which topics?"},
         SELECTION_PART,
     ]
+
+
+INVOICE_PART = {
+    "type": "invoice",
+    "title": "House blend, 250 g",
+    "amount": 2400,
+    "currency": "usd",
+    "goods": "physical",
+    "url": "https://buy.stripe.com/test_123",
+}
+
+
+def invoice_fence(value: Any) -> str:
+    import json
+
+    return "```invoice\n" + json.dumps(value) + "\n```"
+
+
+def test_platform_hint_carries_the_invoice_rules(plugin):
+    from relay_hermes.relay_api import (
+        BUTTONS_BLOCK_INSTRUCTION,
+        BUTTONS_GUIDANCE,
+        INVOICE_BLOCK_INSTRUCTION,
+        INVOICE_GUIDANCE,
+        LINK_LINE_INSTRUCTION,
+        SELECTION_BLOCK_INSTRUCTION,
+        SELECTION_GUIDANCE,
+    )
+
+    hint = plugin.PLATFORM_HINT
+    # The order every Relay runtime uses (Relay-SDK packages/pi/src/index.ts).
+    assert hint.endswith(
+        f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
+        f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
+        f"{INVOICE_BLOCK_INSTRUCTION} {INVOICE_GUIDANCE}"
+    )
+    assert "Only a verified agent can send an invoice" in hint
+
+
+def test_send_puts_the_words_first_and_the_invoice_alone_after_them(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-invoice")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        answer = (
+            "Here is the bag you picked.\n\n"
+            + invoice_fence({**INVOICE_PART, "currency": "USD"})
+            + "\n\nThanks for the order!"
+        )
+        result = await adapter.send(event.source.chat_id, answer, reply_to="source-message")
+        assert result.success
+
+    asyncio.run(run())
+    assert [call["parts"] for call in client.calls] == [
+        [{"type": "text", "value": "Here is the bag you picked.\n\nThanks for the order!"}],
+        [INVOICE_PART],
+    ]
+    # Two Messages, two keys; only the first carries the reply anchor.
+    assert len({call["idempotency_key"] for call in client.calls}) == 2
+    assert client.calls[1]["reply_to"] is None
+
+
+def test_send_keeps_an_invoice_only_answer_instead_of_reading_it_as_silence(
+    plugin, tmp_path
+):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-invoice-only")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        result = await adapter.send(event.source.chat_id, invoice_fence(INVOICE_PART))
+        assert result.success and result.message_id is not None
+
+    asyncio.run(run())
+    assert [call["parts"] for call in client.calls] == [[INVOICE_PART]]
+
+
+def test_send_splits_links_ahead_of_the_invoice(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-invoice-link")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        answer = (
+            "Here's the order:\n\nhttps://example.com/cart\n\n"
+            + invoice_fence(INVOICE_PART)
+        )
+        assert (await adapter.send(event.source.chat_id, answer)).success
+
+    asyncio.run(run())
+    assert [call["parts"] for call in client.calls] == [
+        [{"type": "text", "value": "Here's the order:"}],
+        [{"type": "link", "value": "https://example.com/cart"}],
+        [INVOICE_PART],
+    ]
+
+
+def test_message_batches_never_put_an_invoice_beside_another_part(plugin):
+    text = {"type": "text", "value": "Pay here"}
+    media = {"type": "media", "url": "https://files.example/bag.png"}
+    assert plugin._message_batches([text, media, INVOICE_PART, text]) == [
+        [text, media],
+        [INVOICE_PART],
+        [text],
+    ]
+    assert plugin._message_batches([INVOICE_PART, INVOICE_PART]) == [
+        [INVOICE_PART],
+        [INVOICE_PART],
+    ]
+
+
+def test_send_keeps_a_conflicting_or_unusable_invoice_block_as_text(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-invoice-bad")
+    answers = [
+        # An invoice cannot accompany buttons or a selection, in either order.
+        "Pay\n" + invoice_fence(INVOICE_PART) + '\n```buttons\n[{"label": "Yes"}]\n```',
+        'Pay\n```buttons\n[{"label": "Yes"}]\n```\n' + invoice_fence(INVOICE_PART),
+        "Pay\n" + invoice_fence(INVOICE_PART) + "\n" + selection_fence(SELECTION_OPTIONS),
+        # Two invoices in one answer.
+        "Pay\n" + invoice_fence(INVOICE_PART) + "\n" + invoice_fence(INVOICE_PART),
+        # Invalid JSON and values the server would refuse.
+        "Pay\n```invoice\n{title: bag}\n```",
+        "Pay\n" + invoice_fence({**INVOICE_PART, "url": "https://example.com/pay"}),
+        "Pay\n" + invoice_fence({**INVOICE_PART, "amount": 0}),
+        "Pay\n" + invoice_fence({**INVOICE_PART, "status": "succeeded"}),
+    ]
+
+    async def run():
+        await adapter.on_processing_start(event)
+        for answer in answers:
+            assert (await adapter.send(event.source.chat_id, answer)).success
+
+    asyncio.run(run())
+    assert len(client.calls) == len(answers)
+    for answer, call in zip(answers, client.calls):
+        parts = call["parts"]
+        assert all(
+            part["type"] not in ("invoice", "buttons", "selection") for part in parts
+        ), answer
+        assert "```invoice" in "\n".join(part.get("value", "") for part in parts), answer
+
+
+def test_send_keeps_the_link_card_when_an_invoice_block_is_refused(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-invoice-bad-link")
+    answer = (
+        "https://example.com/x\n\n"
+        + invoice_fence(INVOICE_PART)
+        + '\n```buttons\n[{"label": "Yes"}]\n```'
+    )
+
+    async def run():
+        await adapter.on_processing_start(event)
+        assert (await adapter.send(event.source.chat_id, answer)).success
+
+    asyncio.run(run())
+    assert [[part["type"] for part in call["parts"]] for call in client.calls] == [
+        ["link"],
+        ["text"],
+    ]
+    assert client.calls[0]["parts"] == [{"type": "link", "value": "https://example.com/x"}]
+
+
+def test_standalone_send_puts_the_invoice_after_the_words(plugin, monkeypatch):
+    from gateway.config import PlatformConfig
+
+    client = FakeClient()
+
+    class Session:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(plugin, "RelayClient", lambda *args, **kwargs: Session())
+    config = PlatformConfig(extra={
+        "token": "relay-test-token",
+        "base_url": "https://api.relayapp.im",
+    })
+    chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+    result = asyncio.run(plugin._standalone_send(
+        config, chat_id, "Your plan renews today.\n\n" + invoice_fence(INVOICE_PART),
+    ))
+    assert result["success"] is True
+    assert [call["parts"] for call in client.calls] == [
+        [{"type": "text", "value": "Your plan renews today."}],
+        [INVOICE_PART],
+    ]
+    assert len({call["idempotency_key"] for call in client.calls}) == 2
+    refused = "Your plan renews today.\n\n" + invoice_fence({**INVOICE_PART, "amount": 0})
+    assert asyncio.run(plugin._standalone_send(config, chat_id, refused))["success"] is True
+    assert client.calls[-1]["parts"][0]["type"] == "text"
+    assert "```invoice" in client.calls[-1]["parts"][0]["value"]
 
 
 def test_platform_hint_carries_the_link_rules(plugin):
