@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.relayapp.im"
 RELAY_API_VERSION = "v1"
 RELAY_WEBHOOK_VERSION = "2026-08-30"
-RELAY_OPENAPI_COMMIT = "b334eba06ce194cee4ee1b6d308145789d90a6fd"
+RELAY_OPENAPI_COMMIT = "51bc3ecd9b203a3fc75fe0ab7a105b6751080678"
 RELAY_OPENAPI_SHA256 = (
-    "a64a98ca91ad7298b5e2584032453034bbeba925a5fe20f7808944e62404a9cf"
+    "7b41c21bebd99d28d103da1c3fe380642542e5b6243bb4319e501d7609d8ab0f"
 )
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
@@ -78,6 +78,9 @@ _WEBHOOK_EVENT_TYPES = {
     "call.created",
     "call.updated",
     "call.ended",
+    "payment.succeeded",
+    "payment.canceled",
+    "payment.expired",
 }
 _DISCONNECT_REASONS = {
     "revoked",
@@ -657,12 +660,45 @@ class RelayClient:
             body={"operation": operation, "type": "custom", "custom_emoji": emoji},
         )
 
-    async def update_invoice_status(self, message_id: str, status: str) -> Dict[str, Any]:
-        # Only the agent that sent the invoice may move it; ``status`` is one of
-        # requested, succeeded, canceled, expired or refunded.
+    async def create_payment_request(
+        self,
+        request: Dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        # ``request`` is the API's CreatePaymentRequestRequest as-is. Send the
+        # returned ``checkout_url`` to a person in a ``payment`` part.
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         response = await self._request(
-            "PUT", f"/v1/messages/{quote(message_id, safe='')}/invoice",
-            body={"status": status},
+            "POST", "/v1/payment_requests", body=request, headers=headers,
+        )
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def list_payment_requests(
+        self,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        query = {
+            key: value
+            for key, value in (("limit", limit), ("cursor", cursor), ("status", status))
+            if value is not None
+        }
+        response = await self._request("GET", "/v1/payment_requests", query=query)
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def get_payment_request(self, payment_request_id: str) -> Dict[str, Any]:
+        response = await self._request(
+            "GET", f"/v1/payment_requests/{quote(payment_request_id, safe='')}",
+        )
+        return response.body if isinstance(response.body, dict) else {}
+
+    async def cancel_payment_request(self, payment_request_id: str) -> Dict[str, Any]:
+        response = await self._request(
+            "POST",
+            f"/v1/payment_requests/{quote(payment_request_id, safe='')}/cancel",
         )
         return response.body if isinstance(response.body, dict) else {}
 
@@ -1656,121 +1692,54 @@ def selection_reply_context(
     return "\n".join(lines)
 
 
-# An invoice, the way the Relay SDK's ``splitInvoice`` lifts it out of an
-# agent's words (Relay-SDK packages/sdk/src/invoice.ts, ported here like the
-# rest of this file). The model ends its answer with a fenced block tagged
-# ``invoice`` holding one JSON object, the part exactly as the API takes it.
-# Unlike buttons and selection, an invoice must be the only part of its
-# Message, so the words around the block go out first and the invoice follows
-# as its own, final Message. Limits are the server's (Relay-Server
-# server/src/invoice.ts): Telegram's 32-character title, Stripe's amount cap,
-# the buttons url cap, and a recurring span of at most 3 years.
-INVOICE_FENCE = "invoice"
-INVOICE_TITLE_MAX_LENGTH = 32
-INVOICE_MAX_AMOUNT = 99_999_999
-INVOICE_URL_MAX_LENGTH = 2_048
-# 1095 days / 156 weeks / 36 months / 3 years.
-INVOICE_RECURRING_MAX_COUNT = {"day": 1_095, "week": 156, "month": 36, "year": 3}
-
-# The Stripe-hosted pages where a person pays, and the only hosts an invoice
-# url may use (the server's own list): a Checkout Session, a Payment Link
-# (pay/subscribe, book, donate), or a hosted invoice. Test-mode links share
-# these hosts.
-INVOICE_CHECKOUT_HOSTS = (
-    "checkout.stripe.com",
-    "buy.stripe.com",
-    "book.stripe.com",
-    "donate.stripe.com",
-    "invoice.stripe.com",
+# A payment, lifted out of an agent's words the way buttons and selection are:
+# the model ends its answer with a fenced block tagged ``payment`` holding the
+# payment request's own fields, the CreatePaymentRequestRequest names
+# unchanged. The model holds no Relay token, so the adapter creates the request
+# (``POST /v1/payment_requests``) and sends the ``checkout_url`` it returns as
+# the ``payment`` part. A payment must be the only part of its Message, so the
+# words around the block go out first and the payment follows as its own,
+# final Message. The checks are the server's own (Relay-Server
+# server/src/payments.ts createPaymentRequestSchema at 51bc3ecd).
+PAYMENT_FENCE = "payment"
+PAYMENT_DESCRIPTION_MAX_LENGTH = 32
+PAYMENT_IMAGE_URL_MAX_LENGTH = 2_048
+PAYMENT_CATEGORIES = ("physical_goods", "digital_goods", "donation")
+PAYMENT_MODES = ("payment", "subscription")
+# The create fields the block may carry. metadata, customer_id and discount are
+# the developer's own records and Stripe ids, never the model's to write.
+PAYMENT_BLOCK_FIELDS = (
+    "description", "amount", "currency", "category",
+    "mode", "price_id", "quantity", "image_url",
 )
 
-# The same words every Relay runtime carries (the SDK's INVOICE_GUIDANCE).
-INVOICE_GUIDANCE = " ".join([
-    "Send an invoice only when the person asked to buy something or has already agreed to a price; never invoice out of the blue.",
-    "url must be a real Stripe checkout link you were given \N{EM DASH} a Stripe Payment Link (buy.stripe.com), a Stripe Checkout Session (checkout.stripe.com) or a Stripe hosted invoice (invoice.stripe.com). Never invent one, and never paste a checkout link in text or a button; send an invoice instead.",
-    "Only a verified agent can send an invoice; if yours is refused as unverified, say so in words instead.",
-    "Set goods honestly: physical for goods or services used outside the app, digital for anything delivered in chat or used inside an app.",
-    "The invoice card is a message of its own: no buttons or selection beside it, and any words you write arrive in a message before it.",
-    "Use recurring for a subscription: interval day, week, month or year, for up to 3 years total.",
-    "When your own system learns the payment went through, for example your Stripe webhook, mark it with the status route so the card updates for the person.",
+# What the model cannot know about a payment: the fields and the categories.
+PAYMENT_GUIDANCE = " ".join([
+    "description is the card's title, 1 to 32 characters; amount is in the currency's minor units (2400 is 24.00).",
+    "For a subscription, send \"mode\": \"subscription\" and a \"price_id\", with an optional \"quantity\", instead of amount and currency. An optional \"image_url\" is the product picture.",
+    "category: physical_goods for physical things and real-world services; digital_goods for digital content and tips; donation for a charity or fundraiser.",
+    "The payment card is a message of its own, sent after your words, with no buttons or selection in the same answer.",
 ])
 
-# How the model asks someone to pay (the SDK's INVOICE_BLOCK_INSTRUCTION).
-INVOICE_BLOCK_INSTRUCTION = (
+# How the model asks someone to pay.
+PAYMENT_BLOCK_INSTRUCTION = (
     "To ask the person to pay, end your answer with a fenced code block tagged `"
-    + INVOICE_FENCE
-    + "` holding one JSON object: {\"title\": \"...\", \"amount\": 2400, \"currency\": \"usd\", "
-    "\"goods\": \"physical\" or \"digital\", \"url\": \"https://buy.stripe.com/...\"}, with an optional "
-    "\"recurring\": {\"interval\": \"month\", \"interval_count\": 1} for a subscription. "
-    "The block is removed from your words and drawn as its own invoice card, sent after them."
+    + PAYMENT_FENCE
+    + "` holding one JSON object: {\"description\": \"...\", \"amount\": 2400, "
+    "\"currency\": \"usd\", \"category\": \"physical_goods\"}. "
+    "The block is removed from your words and drawn as its own payment card, sent after them."
 )
 
-# The SDK's fence, byte for byte: the tag, then an optional info string after
-# a space or tab (```invoice json).
-_INVOICE_FENCE_RE = re.compile(
-    r"(^|\n)[ \t]*```[ \t]*" + INVOICE_FENCE
+# The tag, then an optional info string after a space or tab (```payment json).
+_PAYMENT_FENCE_RE = re.compile(
+    r"(^|\n)[ \t]*```[ \t]*" + PAYMENT_FENCE
     + r"(?:[ \t][^\r\n]*)?\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
 )
-# A buttons or selection block cannot share an answer with an invoice.
+# A buttons or selection block cannot share an answer with a payment.
 _BUTTONS_OR_SELECTION_FENCE_RE = re.compile(
     r"(^|\n)[ \t]*```[ \t]*(?:" + BUTTONS_FENCE + "|" + SELECTION_FENCE
     + r")(?:[ \t][^\r\n]*)?\r?\n"
 )
-
-# What ``new URL`` strips before parsing: C0 controls and spaces at the edges,
-# and every tab and newline anywhere.
-_URL_EDGE_CHARACTERS = "".join(chr(code) for code in range(0x21))
-_URL_TAB_OR_NEWLINE_RE = re.compile(r"[\t\n\r]")
-_URL_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
-# The characters an https path, query and fragment keep exactly as written
-# under the WHATWG URL parser. Anything else would be percent-encoded or
-# rewritten by ``new URL``, and is refused here rather than guessed at.
-_CHECKOUT_URL_TAIL_RE = re.compile(r"[A-Za-z0-9\-._~!$&()*+,;=:@/%?#]*")
-# Path segments the WHATWG parser resolves away (``.``, ``..`` and their
-# percent-encoded spellings).
-_DOT_SEGMENTS = frozenset({".", "..", "%2e", ".%2e", "%2e.", "%2e%2e"})
-
-
-def _checkout_url(value: str) -> Optional[str]:
-    """A checkout link the card may open, normalized like ``new URL(value).href``.
-
-    https on a Stripe checkout host, with no username, password or port
-    (``https://buy.stripe.com@evil.com`` is evil.com), matching the server's
-    own check. The scheme and host are lowercased, the slashes after
-    ``https:`` restored, the default port dropped and an empty path read as
-    ``/``, so a link accepted here reads back from the API the same way. A
-    link the WHATWG parser would rewrite in any other way (credentials,
-    percent-encoding, dot segments, non-ASCII) is refused rather than
-    normalized by a guess.
-    """
-    raw = _URL_TAB_OR_NEWLINE_RE.sub("", value.strip(_URL_EDGE_CHARACTERS))
-    scheme = _URL_SCHEME_RE.match(raw)
-    if scheme is None or scheme.group(1).lower() != "https":
-        return None
-    # A special scheme ignores any run of slashes or backslashes before the
-    # host, so ``https:buy.stripe.com/x`` is ``https://buy.stripe.com/x``.
-    rest = raw[scheme.end():].lstrip("/\\")
-    end = next(
-        (index for index, char in enumerate(rest) if char in "/\\?#"), len(rest)
-    )
-    authority, tail = rest[:end], rest[end:]
-    if "@" in authority or not authority.isascii():
-        return None
-    host, _, port = authority.partition(":")
-    if port and (not port.isdigit() or int(port) != 443):
-        return None
-    host = host.lower()
-    if host not in INVOICE_CHECKOUT_HOSTS:
-        return None
-    if not _CHECKOUT_URL_TAIL_RE.fullmatch(tail):
-        return None
-    path_end = next(
-        (index for index, char in enumerate(tail) if char in "?#"), len(tail)
-    )
-    path, after = tail[:path_end] or "/", tail[path_end:]
-    if any(segment.lower() in _DOT_SEGMENTS for segment in path.split("/")):
-        return None
-    return f"https://{host}{path}{after}"
 
 
 def _json_integer(value: Any) -> Optional[int]:
@@ -1792,113 +1761,112 @@ def _reject_json_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON")
 
 
-def invoice_part(parsed: Any) -> Union[Dict[str, Any], str]:
-    """An ``invoice`` part from a decoded fields object or whole part, or why not.
+def payment_request_fields(parsed: Any) -> Union[Dict[str, Any], str]:
+    """The ``POST /v1/payment_requests`` body a block holds, or why not.
 
-    The checks are the server's own, in the SDK's order, so a bad value fails
-    here with a readable reason instead of a 400 from the API. ``title`` is
-    trimmed, ``currency`` lowercased, ``url`` normalized and a ``recurring``
-    ``interval_count`` filled in, the way the server stores them.
+    The checks are the server's own, so a bad value fails here with a
+    readable reason instead of a 400 from the API. Values go out as written;
+    the server trims ``description`` and lowercases ``currency`` itself.
     """
     if not isinstance(parsed, dict):
-        return "the invoice block must be a JSON object"
-    allowed = ("type", "title", "amount", "currency", "goods", "url", "recurring")
-    unknown = [key for key in parsed if key not in allowed]
+        return "the payment block must be a JSON object"
+    unknown = [key for key in parsed if key not in PAYMENT_BLOCK_FIELDS]
     if unknown:
-        return f"invoice has unknown field {unknown[0]}"
-    if "type" in parsed and parsed["type"] != "invoice":
-        return "invoice part needs type invoice"
-    title = parsed.get("title")
+        return f"payment has unknown field {unknown[0]}"
+    fields: Dict[str, Any] = {}
+    description = parsed.get("description")
+    # Code points, the server's count ([...value].length), after its trim.
     if (
-        not isinstance(title, str)
-        or not title.strip()
-        # Code points, the server's count, so a 17-32 character emoji title
-        # (surrogate pairs in UTF-16) is not rejected as too long.
-        or len(title.strip()) > INVOICE_TITLE_MAX_LENGTH
+        not isinstance(description, str)
+        or not 1 <= len(description.strip()) <= PAYMENT_DESCRIPTION_MAX_LENGTH
     ):
         return (
-            f"invoice needs a trimmed title of 1 to {INVOICE_TITLE_MAX_LENGTH} "
-            "characters"
+            "payment description must be 1 to "
+            f"{PAYMENT_DESCRIPTION_MAX_LENGTH} characters"
         )
-    amount = _json_integer(parsed.get("amount"))
-    if amount is None or amount < 1 or amount > INVOICE_MAX_AMOUNT:
-        return f"invoice amount must be an integer of 1 to {INVOICE_MAX_AMOUNT}"
-    currency = parsed.get("currency")
-    if not isinstance(currency, str) or not re.fullmatch(r"[A-Za-z]{3}", currency):
-        return "invoice currency must be a 3-letter code"
-    goods = parsed.get("goods")
-    if goods not in ("physical", "digital"):
-        return 'invoice goods must be "physical" or "digital"'
-    url = parsed.get("url")
-    if not isinstance(url, str) or utf16_len(url) > INVOICE_URL_MAX_LENGTH:
-        return (
-            f"invoice url is not a string of at most {INVOICE_URL_MAX_LENGTH} "
-            "characters"
-        )
-    normalized_url = _checkout_url(url)
-    if normalized_url is None:
-        return (
-            "invoice url must be an https Stripe checkout link on "
-            + ", ".join(INVOICE_CHECKOUT_HOSTS)
-        )
-    part: Dict[str, Any] = {
-        "type": "invoice",
-        "title": title.strip(),
-        "amount": amount,
-        "currency": currency.lower(),
-        "goods": goods,
-        "url": normalized_url,
-    }
-    if "recurring" in parsed:
-        recurring = parsed["recurring"]
-        if not isinstance(recurring, dict):
-            return "invoice recurring must be an object"
-        unknown = [
-            key for key in recurring if key not in ("interval", "interval_count")
-        ]
-        if unknown:
-            return f"invoice recurring has unknown field {unknown[0]}"
-        interval = recurring.get("interval")
-        if not isinstance(interval, str) or interval not in INVOICE_RECURRING_MAX_COUNT:
-            return "invoice recurring interval must be day, week, month or year"
-        most = INVOICE_RECURRING_MAX_COUNT[interval]
-        count = _json_integer(recurring.get("interval_count", 1))
-        if count is None or count < 1 or count > most:
+    fields["description"] = description
+    if parsed.get("category") not in PAYMENT_CATEGORIES:
+        return "payment category must be physical_goods, digital_goods or donation"
+    fields["category"] = parsed["category"]
+    mode = parsed.get("mode", "payment")
+    if mode not in PAYMENT_MODES:
+        return "payment mode must be payment or subscription"
+    if "mode" in parsed:
+        fields["mode"] = mode
+    if "amount" in parsed:
+        amount = _json_integer(parsed["amount"])
+        if amount is None:
+            return "payment amount must be an integer"
+        fields["amount"] = amount
+    if "currency" in parsed:
+        currency = parsed["currency"]
+        if not isinstance(currency, str) or not re.fullmatch(r"[A-Za-z]{3}", currency):
+            return "payment currency must be a 3-letter code"
+        fields["currency"] = currency
+    if "price_id" in parsed:
+        price_id = parsed["price_id"]
+        if not isinstance(price_id, str) or not price_id:
+            return "payment price_id must be a nonempty string"
+        fields["price_id"] = price_id
+    if "quantity" in parsed:
+        quantity = _json_integer(parsed["quantity"])
+        if quantity is None or quantity < 1:
+            return "payment quantity must be an integer of at least 1"
+        fields["quantity"] = quantity
+    if "image_url" in parsed:
+        image_url = parsed["image_url"]
+        if (
+            not isinstance(image_url, str)
+            or not 1 <= utf16_len(image_url) <= PAYMENT_IMAGE_URL_MAX_LENGTH
+        ):
             return (
-                f"invoice recurring interval_count for {interval} must be an "
-                f"integer of 1 to {most}"
+                "payment image_url is not a string of 1 to "
+                f"{PAYMENT_IMAGE_URL_MAX_LENGTH} characters"
             )
-        part["recurring"] = {"interval": interval, "interval_count": count}
-    return part
+        fields["image_url"] = image_url
+    if mode == "payment":
+        for name in ("amount", "currency"):
+            if name not in fields:
+                return f"payment {name} is required in payment mode"
+        for name in ("price_id", "quantity"):
+            if name in fields:
+                return f"payment {name} is for subscription mode only"
+    else:
+        if "price_id" not in fields:
+            return "payment price_id is required in subscription mode"
+        for name in ("amount", "currency"):
+            if name in fields:
+                return f"payment {name} must be omitted in subscription mode"
+    return fields
 
 
-def parse_invoice_block(body: str) -> Union[Dict[str, Any], str]:
-    """An ``invoice`` part from one block's body, or why it cannot be one."""
+def parse_payment_block(body: str) -> Union[Dict[str, Any], str]:
+    """The payment request fields in one block's body, or why they cannot be."""
     try:
         parsed = json.loads(body, parse_constant=_reject_json_constant)
     except ValueError:
-        return "the invoice block is not valid JSON"
-    return invoice_part(parsed)
+        return "the payment block is not valid JSON"
+    return payment_request_fields(parsed)
 
 
-def split_invoice(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
-    """Lift the one invoice block out of an answer.
+def split_payment(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    """Lift the one payment block out of an answer.
 
-    Returns ``(text, invoice_part, error)``. The invoice is never attached to
-    the words: ``text`` is what goes out first, as its own Message(s), and may
-    be empty. A block that cannot be read, a second one, or buttons or a
+    Returns ``(text, request_fields, error)``. The payment is never attached
+    to the words: ``text`` is what goes out first, as its own Message(s), and
+    may be empty. A block that cannot be read, a second one, or buttons or a
     selection in the same answer leave the answer untouched and name the
     reason, the handling selection uses for selection beside buttons.
     """
-    matches = list(_INVOICE_FENCE_RE.finditer(answer))
+    matches = list(_PAYMENT_FENCE_RE.finditer(answer))
     if not matches:
         return answer, None, None
     if len(matches) != 1 or _BUTTONS_OR_SELECTION_FENCE_RE.search(answer):
-        return answer, None, "send one invoice and nothing else in the same message"
+        return answer, None, "send one payment and nothing else in the same message"
     match = matches[0]
-    part = parse_invoice_block(match.group(2))
-    if isinstance(part, str):
-        return answer, None, part
+    fields = parse_payment_block(match.group(2))
+    if isinstance(fields, str):
+        return answer, None, fields
     before = answer[:match.start()].rstrip()
     after = answer[match.end():].lstrip()
-    return "\n\n".join(filter(None, [before, after])), part, None
+    return "\n\n".join(filter(None, [before, after])), fields, None

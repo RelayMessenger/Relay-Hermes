@@ -48,6 +48,9 @@ tags:
     description: Request a user Contact.
   - name: Directory
     description: Find public agents by category or task. No credential is needed.
+  - name: Payments
+    x-page-title: Payments
+    description: Ask a person to pay, on your organization's own connected Stripe account.
   - name: Calls
     description: Start, answer, end and read individual user-agent audio calls. Call events use Relay's normal agent event delivery, and both Contacts join the authenticated Call room as WebRTC audio participants.
 paths:
@@ -1103,7 +1106,7 @@ paths:
     post:
       operationId: sendReaction
       summary: Add or remove a reaction to a message
-      description: Add or remove a reaction on one Message part. Targeting a `buttons`, `selection`, or `selection_response` part returns 422.
+      description: Add or remove a reaction on one Message part. Targeting a `buttons`, `selection`, or `selection_response` part returns 422. Only a person can react to a `payment` part; an agent gets 403 (error code `2003`).
       tags:
         - Messages
       security:
@@ -1152,6 +1155,200 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /v1/payment_requests:
+    post:
+      operationId: createPaymentRequest
+      summary: Create a payment request
+      description: |
+        Create a payment request and get back the `checkout_url`, Relay's pay
+        page for it. Relay creates one Stripe PaymentIntent on your
+        organization's own connected Stripe account, as a direct charge (in
+        subscription mode, an incomplete Subscription whose first-period
+        PaymentIntent is that one object): the money settles to your Stripe
+        account, you are the merchant of record, and Relay takes no fee and
+        never holds the funds. The pay page and the Relay app's payment sheet
+        both pay that same PaymentIntent, so a person can never pay twice.
+        Refunds and disputes are handled in your own Stripe Dashboard.
+
+        A request is payable for 23 hours (`expires_at`); after that Relay
+        stops the payment and the request moves to `expired`.
+
+        Send the request to a person as a `payment` message part. Its status
+        moves only on Stripe's word: `payment.succeeded`, `payment.canceled`
+        and `payment.expired` tell your agent, and every card that carries
+        the request changes in place.
+
+        Returns 403 until your organization has connected Stripe in the Relay
+        Console and the account can accept charges. Stripe's own validation
+        (currency, minimum amount, an unknown price, customer or coupon) comes
+        back as 400 carrying Stripe's message. Returns 503 while payments are
+        not available on this server.
+      tags:
+        - Payments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Reusing a key with the same body returns the first request (200); with a different body, 409.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentRequestRequest"
+      responses:
+        "201":
+          description: Payment request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "200":
+          description: The same Idempotency-Key and body were used before; the first request is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller is not an agent, or its organization has not connected a Stripe account that can accept charges (error code `2003`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/PaymentsUnavailable"
+    get:
+      operationId: listPaymentRequests
+      summary: List payment requests
+      description: Your agent's payment requests, newest first.
+      tags:
+        - Payments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Pagination cursor from the previous response's `next_cursor` field.
+            Omit this parameter for the first page of results.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/PaymentStatus"
+      responses:
+        "200":
+          description: One page of payment requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequestList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/payment_requests/{paymentRequestId}:
+    get:
+      operationId: getPaymentRequest
+      summary: Retrieve a payment request
+      description: A payment request belongs to the agent that created it; any other caller gets 404.
+      tags:
+        - Payments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: paymentRequestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The payment request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/payment_requests/{paymentRequestId}/cancel:
+    post:
+      operationId: cancelPaymentRequest
+      summary: Cancel a payment request
+      description: |
+        Cancel a request that has not been paid: its PaymentIntent is
+        canceled (in subscription mode, the first-period invoice is voided and
+        the incomplete Subscription canceled), the request moves to
+        `canceled`, every card that carries it changes in place, and your
+        agent gets `payment.canceled`. A request that is already `succeeded`,
+        `canceled` or `expired`, or that was paid before the cancel reached
+        Stripe, returns 409.
+      tags:
+        - Payments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: paymentRequestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The canceled payment request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentOnly"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/PaymentsUnavailable"
   /v1/attachments:
     post:
       operationId: requestUpload
@@ -2114,16 +2311,23 @@ paths:
         - BearerAuth: []
       description: >-
         Upgrade to a WebSocket as either Contact in a live Call. This socket is
-        signaling only: every frame is JSON text and audio never passes through
-        it. The callee answers a ringing Call by sending `join`. Each participant
-        then sends one `offer` publishing a WebRTC track named `audio`; Relay
-        returns `answer`. After applying that answer, send `connected` only when
-        the RTCPeerConnection connectionState is `connected`. Once both
-        participants have published and reported connected, Relay pulls each
-        participant's `audio` track into the other Cloudflare SFU Session and
-        sends each participant an `offer`; answer that offer with `answer` to
-        complete renegotiation. The room is scoped to the Call and accepts only
-        its authenticated user or agent Contact.
+        signaling only: every frame is JSON text and media never passes through
+        it. Each participant sends `join` when the socket opens, and again after
+        any reconnect; the callee answers a ringing Call by sending `join`. Relay
+        answers every `join` with `iceServers`, the STUN and TURN servers for the
+        RTCPeerConnection, then `roomState`. Each participant then sends an `offer` publishing a WebRTC track named `audio`, and later
+        one adding a track named `video` the first time its camera turns on;
+        Relay returns `answer`. After applying that answer, send `connected`
+        only when the RTCPeerConnection connectionState is `connected`. Once both
+        participants have published and reported connected, Relay pulls every
+        track each participant has published into the other Cloudflare SFU
+        Session, one at a time, and sends that participant an `offer` naming the
+        track; answer it with `answer` to complete renegotiation. A participant
+        whose PeerConnection is dead sends `offer` with `restart: true` from a
+        new PeerConnection: Relay moves it onto a new SFU Session, the Call stays
+        in progress, and both directions are pulled again after it sends
+        `connected`. The room is scoped to the Call and accepts only its
+        authenticated user or agent Contact.
       parameters:
         - name: callId
           in: path
@@ -2230,7 +2434,6 @@ components:
         - chat_id
         - from
         - to
-        - mode
         - status
         - revision
         - created_at
@@ -2248,10 +2451,6 @@ components:
           maxItems: 1
           items:
             $ref: "#/components/schemas/CallContact"
-        mode:
-          type: string
-          enum:
-            - audio
         status:
           type: string
           description: >-
@@ -2283,7 +2482,6 @@ components:
       additionalProperties: false
       required:
         - to
-        - mode
       properties:
         to:
           type: array
@@ -2292,10 +2490,6 @@ components:
           items:
             type: string
             minLength: 1
-        mode:
-          type: string
-          enum:
-            - audio
     CallResult:
       type: object
       additionalProperties: false
@@ -2332,8 +2526,11 @@ components:
         - kind
         - attached
         - track
+        - tracks
         - muted
+        - video
         - connected
+        - receiving
       properties:
         contact_id: *uuid
         kind:
@@ -2347,12 +2544,38 @@ components:
             - string
             - "null"
           enum: [audio, null]
-          description: "`audio` after this participant has published its one local WebRTC audio track."
+          description: "`audio` after this participant has published its local WebRTC audio track."
+        tracks:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [audio, video]
+          description: The local tracks this participant has published, `audio` first.
         muted:
           type: boolean
+        video:
+          type: boolean
+          description: Whether this participant's camera is sending, from its last `userUpdate`.
         connected:
           type: boolean
           description: True after this participant reported RTCPeerConnection connectionState `connected` for its initial publication.
+        receiving:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [audio, video]
+          description: >-
+            The other participant's tracks this participant is receiving now:
+            Relay pulled the track into its Session, it answered that `offer`,
+            and it has reported `connected`. `[]` until then; emptied when either
+            participant restarts, and rebuilt as the tracks are pulled again.
+            Relay sends `roomState` each time it changes. Hold generated audio
+            until the other participant's `receiving` contains `audio`, then play
+            it from the start.
     CallRoomJoinFrame:
       type: object
       additionalProperties: false
@@ -2384,7 +2607,12 @@ components:
         tracks:
           type: array
           minItems: 1
-          maxItems: 1
+          maxItems: 2
+          description: >-
+            The tracks this offer publishes, with no repeated name or mid. The
+            first offer of a Session, and every restart, includes `audio`. An
+            offer without `restart` on an existing Session adds the listed
+            tracks it has not published yet.
           items:
             type: object
             additionalProperties: false
@@ -2396,7 +2624,14 @@ components:
                 maxLength: 64
               name:
                 type: string
-                const: audio
+                enum: [audio, video]
+        restart:
+          type: boolean
+          description: >-
+            True when this offer comes from a new PeerConnection because the
+            old one is dead. Relay creates a new SFU Session, closes the old
+            tracks, and pulls both directions again after `connected`. The Call
+            stays in progress.
     CallRoomAnswerFrame:
       type: object
       additionalProperties: false
@@ -2435,6 +2670,9 @@ components:
           const: userUpdate
         muted:
           type: boolean
+        video:
+          type: boolean
+          description: Whether this participant's camera is sending. Omitted keeps the last value.
     CallRoomEndFrame:
       type: object
       additionalProperties: false
@@ -2467,6 +2705,41 @@ components:
           maxItems: 2
           items:
             $ref: "#/components/schemas/CallRoomParticipant"
+    CallRoomIceServersFrame:
+      type: object
+      additionalProperties: false
+      required: [type, ice_servers]
+      description: >-
+        Sent right after Relay accepts each `join`, before that socket's first
+        `roomState`. Use these servers for the RTCPeerConnection. Relay mints
+        Cloudflare TURN credentials once per Call room and reuses them until an
+        hour before they expire; when it cannot mint, the list carries only
+        `stun:stun.cloudflare.com:3478`.
+      properties:
+        type:
+          type: string
+          const: iceServers
+        ice_servers:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            type: object
+            additionalProperties: false
+            required: [urls]
+            description: An RTCIceServer.
+            properties:
+              urls:
+                type: array
+                minItems: 1
+                maxItems: 16
+                items:
+                  type: string
+                  pattern: "^(stun|turns?):"
+              username:
+                type: string
+              credential:
+                type: string
     CallRoomServerAnswerFrame:
       allOf:
         - $ref: "#/components/schemas/CallRoomAnswerFrame"
@@ -2492,7 +2765,8 @@ components:
               maxLength: 65536
         track:
           type: string
-          const: audio
+          enum: [audio, video]
+          description: The other participant's track this offer pulls.
     CallRoomEndedFrame:
       type: object
       additionalProperties: false
@@ -3851,7 +4125,7 @@ components:
     SelectionPart:
       type: object
       additionalProperties: false
-      description: Coming soon. Agent-only multiselect prompt. One selection per Message, with nonblank text and no buttons. The text is the prompt's title. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.
+      description: Agent-only multiselect prompt. One selection per Message, with nonblank text and no buttons. The text is the prompt's title. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.
       required: [type, options]
       properties:
         type:
@@ -3865,7 +4139,7 @@ components:
             $ref: "#/components/schemas/SelectionOption"
     SelectionPartResponse:
       type: object
-      required: [type, options, has_responded, reactions]
+      required: [type, options, has_responded, selected_values, reactions]
       properties:
         type:
           type: string
@@ -3874,6 +4148,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SelectionOption"
+        selected_values:
+          type: [array, "null"]
+          readOnly: true
+          items:
+            type: string
+          description: The values the authenticated viewer chose, in source-option order, identical on every one of that user's devices; null until the viewer answers, when the answer Message no longer exists, and always for an agent viewer.
         has_responded:
           type: boolean
           readOnly: true
@@ -3883,7 +4163,7 @@ components:
     SelectionResponsePart:
       type: object
       additionalProperties: false
-      description: Coming soon. User-only metadata, exactly the second part after plain text. Requires explicit reply_to message_id and part_index targeting a visible selection in the same Chat. Values are unique, nonempty, known and in source-option order. Canonical new text is literal '• ' + each selected source label joined with '\n'. The server also accepts exact legacy source labels joined with ', ' only for compatibility; arbitrary label parsing is never accepted. selected_values and source-option order remain authoritative. iOS may draw a checkmark in place of each bullet, and repeat the prompt's title above the lines, as presentation only; portable text remains the bullets. A different-key second response returns 409/1005; same-key retries retain existing Message idempotency semantics.
+      description: User-only metadata, exactly the second part after plain text. Requires explicit reply_to message_id and part_index targeting a visible selection in the same Chat. Values are unique, nonempty, known and in source-option order. Canonical new text is literal '• ' + each selected source label joined with '\n'. The server also accepts exact legacy source labels joined with ', ' only for compatibility; arbitrary label parsing is never accepted. selected_values and source-option order remain authoritative. iOS may draw a checkmark in place of each bullet, and repeat the prompt's title above the lines, as presentation only; portable text remains the bullets. A different-key second response returns 409/1005; same-key retries retain existing Message idempotency semantics.
       required: [type, selected_values]
       properties:
         type:
@@ -3903,6 +4183,303 @@ components:
       allOf:
         - $ref: "#/components/schemas/SelectionResponsePart"
       description: Persisted selection metadata; contributes no fallback text and cannot receive reactions.
+    PaymentRecurring:
+      type: object
+      additionalProperties: false
+      description: A subscription's renewal cadence, read from its Stripe Price.
+      required: [interval, interval_count]
+      properties:
+        interval:
+          type: string
+          enum: [day, week, month, year]
+        interval_count:
+          type: integer
+          minimum: 1
+          description: Intervals per renewal (3 with `month` is quarterly).
+    PaymentStatus:
+      type: string
+      description: A payment request's lifecycle. It leaves `requested` exactly once, and only on Stripe's word or your cancel.
+      enum: [requested, succeeded, canceled, expired]
+    PaymentPart:
+      type: object
+      additionalProperties: false
+      description: "A request to pay, drawn as a card. `checkout_url` is the only field: pass back exactly what `POST /v1/payment_requests` returned. The card's amount and title are read from that request, never from the message, so a card cannot show a figure its checkout will not charge. Sent only by the agent that created the request, while it is `requested`; must be the only part of its message. Another sender gets 403 (error code `2003`); a checkout_url that is not one of your requests gets 404; a request that is no longer `requested` gets 409. A request with `category=digital_goods` sent to a person whose devices report only storefronts outside the United States returns 422 (error code `2006`)."
+      required: [type, checkout_url]
+      properties:
+        type:
+          type: string
+          enum: [payment]
+        checkout_url:
+          type: string
+          maxLength: 2048
+    PaymentPartResponse:
+      type: object
+      description: A payment card as every reader sees it, read from the payment request. `status` changes in place.
+      required: [type, payment_request_id, checkout_url, amount, currency, description, category, mode, status, reactions]
+      properties:
+        type:
+          type: string
+          enum: [payment]
+        payment_request_id:
+          type: string
+          format: uuid
+        checkout_url:
+          type: string
+        amount:
+          type: integer
+          description: In the currency's minor units. For a subscription, what the first period costs.
+        currency:
+          type: string
+        description:
+          type: string
+          description: The card's title line.
+        category:
+          $ref: "#/components/schemas/PaymentCategory"
+        mode:
+          type: string
+          enum: [payment, subscription]
+        recurring:
+          $ref: "#/components/schemas/PaymentRecurring"
+        image_url:
+          type: string
+          description: The request's product picture, when it has one; the card shows it.
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part. Only a person can react to a payment.
+          items:
+            $ref: "#/components/schemas/Reaction"
+    PaymentReceiptPartResponse:
+      type: object
+      description: "The payer's receipt. When a payment request succeeds, Relay adds one message from the person who paid at the bottom of the chat, a reply to the `payment` card, carrying this part; your agent receives it as `message.received` like any message. The payer is the person who opened the payment in the Relay app, or, when Relay does not know who paid, the one person in a chat that holds the card. A group chat with no known payer gets no receipt. Expired and canceled requests add no message. Only Relay writes this part; sending one returns 400."
+      required: [type, payment_request_id, description, amount, currency, mode, reactions]
+      properties:
+        type:
+          type: string
+          enum: [payment_receipt]
+        payment_request_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        amount:
+          type: integer
+          description: What was paid, in the currency's minor units. For a subscription, what the first period cost.
+        currency:
+          type: string
+        mode:
+          type: string
+          enum: [payment, subscription]
+        recurring:
+          $ref: "#/components/schemas/PaymentRecurring"
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+    PaymentCategory:
+      type: string
+      enum: [physical_goods, digital_goods, donation]
+      description: |-
+        What is being paid for, the same three values as PayPal Orders v2 `items[].category` (PHYSICAL_GOODS, DIGITAL_GOODS, DONATION; developer.paypal.com/docs/api/orders/v2/). The App Store Review Guidelines (developer.apple.com/app-store/review/guidelines/) decide where each can be paid:
+        - `physical_goods`: physical goods, and services used in the real world, such as a haircut or a ride (3.1.3(e)). Payable anywhere.
+        - `digital_goods`: anything used in an app or online. A person pays by opening the link in Safari, and only on the United States storefront (3.1.1(a)); sending one to a person whose devices report only other storefronts returns 422 (error code `2006`). A tip to an agent or a creator is `digital_goods` (3.1.1: tips to digital content providers use In-App Purchase).
+        - `donation`: money for a charity or a fundraiser. Collected outside the app, on any storefront (3.2.2(iv): such apps "may only collect funds outside of the app, such as via Safari…").
+    PaymentDiscount:
+      type: object
+      additionalProperties: false
+      description: Subscription mode only. One coupon or one promotion code from your connected Stripe account, never both.
+      properties:
+        coupon:
+          type: string
+          description: The id of a coupon on your connected Stripe account.
+        promotion_code:
+          type: string
+          description: The id of a promotion code (`promo_...`), not the code a customer types.
+        label:
+          type: string
+          description: Your own name for the discount, stored and returned with the request.
+    CreatePaymentRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [description, category]
+      properties:
+        amount:
+          type: integer
+          description: Payment mode (required there). What to charge, in the currency's minor units; Stripe's minimum and maximum apply. Omit in subscription mode.
+        currency:
+          type: string
+          pattern: '^[A-Za-z]{3}$'
+          description: Payment mode (required there). A 3-letter ISO 4217 code, returned lowercase. Omit in subscription mode; the price carries it.
+        description:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: The card's title line and the checkout's product name. Trimmed; 1 to 32 characters.
+        category:
+          $ref: "#/components/schemas/PaymentCategory"
+        metadata:
+          type: object
+          maxProperties: 49
+          additionalProperties:
+            type: string
+          description: Up to 49 keys of your own, returned on the request and on every `payment.*` event, and stamped on the Stripe objects created on your account. Keys starting with `relay_` are reserved; Relay adds `relay_payment_request_id`.
+        mode:
+          type: string
+          enum: [payment, subscription]
+          default: payment
+          description: "`payment` collects one charge of `amount` in `currency`. `subscription` starts an auto-renewing subscription from a recurring `price_id` on your connected Stripe account; the person pays the first period at checkout and Stripe renews it from then on."
+        price_id:
+          type: string
+          description: Subscription mode (required there). An active recurring Price on your connected Stripe account.
+        quantity:
+          type: integer
+          minimum: 1
+          description: Subscription mode only. Units of the price. Defaults to 1.
+        customer_id:
+          type: string
+          description: An existing Customer on your connected Stripe account (`cus_...`) to attach the request to.
+        discount:
+          $ref: "#/components/schemas/PaymentDiscount"
+        image_url:
+          type: string
+          maxLength: 2048
+          description: "Optional product picture, an HTTPS address, like Telegram sendInvoice `photo_url` (core.telegram.org/bots/api#sendinvoice). Relay copies it into its own image store, the way it stores agent pictures, and returns Relay's address. Shown on the card and on the pay page."
+    PaymentRequestStripe:
+      type: object
+      description: The ids of the Stripe objects on your connected account, your join keys into your own Stripe Dashboard, API and webhooks.
+      required: [payment_intent_id]
+      properties:
+        payment_intent_id:
+          type: string
+          description: The one PaymentIntent the person pays (`pi_...`).
+        customer_id:
+          type: string
+          description: The Customer the request is attached to. Always set in subscription mode; in payment mode only when you passed `customer_id`.
+        subscription_id:
+          type: string
+          description: Subscription mode (`sub_...`).
+    PaymentRequest:
+      type: object
+      required: [id, object, status, mode, amount, currency, description, category, checkout_url, expires_at, metadata, stripe, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        object:
+          type: string
+          enum: [payment_request]
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        mode:
+          type: string
+          enum: [payment, subscription]
+        amount:
+          type: integer
+          description: What the person is charged at checkout, in minor units. In subscription mode, what the first period costs after any discount.
+        currency:
+          type: string
+        description:
+          type: string
+        category:
+          $ref: "#/components/schemas/PaymentCategory"
+        checkout_url:
+          type: string
+          description: Relay's pay page for this request, `https://pay.relayapp.im/<token>`. Anyone holding it can pay the request. Send it back unchanged in a `payment` part.
+        expires_at:
+          type: string
+          format: date-time
+          description: When the request stops accepting payment and moves to `expired`, 23 hours after it was created.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        image_url:
+          type: string
+          description: The product picture, on Relay's image host. Absent without one.
+        price_id:
+          type: string
+          description: Subscription mode.
+        quantity:
+          type: integer
+          description: Subscription mode.
+        interval:
+          type: string
+          enum: [day, week, month, year]
+          description: Subscription mode.
+        interval_count:
+          type: integer
+          description: Subscription mode.
+        discount:
+          $ref: "#/components/schemas/PaymentDiscount"
+        stripe:
+          $ref: "#/components/schemas/PaymentRequestStripe"
+        paid_at:
+          type: string
+          format: date-time
+          description: Absent until the request succeeds.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PaymentRequestList:
+      type: object
+      required: [payment_requests, next_cursor]
+      properties:
+        payment_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/PaymentRequest"
+        next_cursor:
+          type:
+            - string
+            - "null"
+    PaymentSucceededWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: payment.succeeded
+            data:
+              $ref: "#/components/schemas/PaymentRequest"
+    PaymentCanceledWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: payment.canceled
+            data:
+              $ref: "#/components/schemas/PaymentRequest"
+    PaymentExpiredWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: payment.expired
+            data:
+              $ref: "#/components/schemas/PaymentRequest"
     LinkPart:
       type: object
       required:
@@ -4108,6 +4685,8 @@ components:
               - $ref: "#/components/schemas/ButtonsPartResponse"
               - $ref: "#/components/schemas/SelectionPartResponse"
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
+              - $ref: "#/components/schemas/PaymentPartResponse"
+              - $ref: "#/components/schemas/PaymentReceiptPartResponse"
               - $ref: "#/components/schemas/SystemPartResponse"
         reply_to:
           oneOf:
@@ -4297,6 +4876,8 @@ components:
               - $ref: "#/components/schemas/ButtonsPartResponse"
               - $ref: "#/components/schemas/SelectionPartResponse"
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
+              - $ref: "#/components/schemas/PaymentPartResponse"
+              - $ref: "#/components/schemas/PaymentReceiptPartResponse"
             discriminator:
               propertyName: type
               mapping:
@@ -4306,6 +4887,8 @@ components:
                 buttons: "#/components/schemas/ButtonsPartResponse"
                 selection: "#/components/schemas/SelectionPartResponse"
                 selection_response: "#/components/schemas/SelectionResponsePartResponse"
+                payment: "#/components/schemas/PaymentPartResponse"
+                payment_receipt: "#/components/schemas/PaymentReceiptPartResponse"
         sent_at:
           type:
             - string
@@ -4361,6 +4944,7 @@ components:
           buttons: "#/components/schemas/ButtonsPart"
           selection: "#/components/schemas/SelectionPart"
           selection_response: "#/components/schemas/SelectionResponsePart"
+          payment: "#/components/schemas/PaymentPart"
       oneOf:
         - $ref: "#/components/schemas/TextPart"
         - $ref: "#/components/schemas/MediaPart"
@@ -4368,6 +4952,7 @@ components:
         - $ref: "#/components/schemas/ButtonsPart"
         - $ref: "#/components/schemas/SelectionPart"
         - $ref: "#/components/schemas/SelectionResponsePart"
+        - $ref: "#/components/schemas/PaymentPart"
     MessageReadWebhook:
       description: Complete webhook payload for message.read events (2026-08-30 format)
       allOf:
@@ -4920,6 +5505,8 @@ components:
               - $ref: "#/components/schemas/ButtonsPartResponse"
               - $ref: "#/components/schemas/SelectionPartResponse"
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
+              - $ref: "#/components/schemas/PaymentPartResponse"
+              - $ref: "#/components/schemas/PaymentReceiptPartResponse"
         created_at:
           type: string
           format: date-time
@@ -5100,7 +5687,6 @@ components:
         state, in Twilio's words.
       required:
         - id
-        - mode
         - status
         - answered_at
         - ended_at
@@ -5112,10 +5698,6 @@ components:
           type: string
           format: uuid
           description: The Call's id.
-        mode:
-          type: string
-          enum:
-            - audio
         status:
           type: string
           description: The same values as Call.status.
@@ -5683,6 +6265,9 @@ components:
         - call.created
         - call.updated
         - call.ended
+        - payment.succeeded
+        - payment.canceled
+        - payment.expired
     WebhookEventsResult:
       type: object
       required:
@@ -5916,6 +6501,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    PaymentsUnavailable:
+      description: Payments are not available on this server right now, or Stripe could not be reached (error code `3006`). Nothing was created or changed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     PaymentRequired:
       description: The authenticated Agent is not entitled to this operation.
       content:
@@ -6025,6 +6616,8 @@ x-relay-call-room-frames:
     heartbeat:
       $ref: "#/components/schemas/CallRoomHeartbeatFrame"
   server:
+    ice_servers:
+      $ref: "#/components/schemas/CallRoomIceServersFrame"
     room_state:
       $ref: "#/components/schemas/CallRoomStateFrame"
     publish_answer:
@@ -6340,6 +6933,54 @@ x-relay-webhooks:
           application/json:
             schema:
               $ref: "#/components/schemas/CallEndedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  payment.succeeded.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookPaymentSucceededV20260830
+      summary: Payment succeeded
+      description: The person paid. For a subscription, the first period was paid and the subscription is active; renewals are events of your own Stripe account. Carries the full payment request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentSucceededWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  payment.canceled.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookPaymentCanceledV20260830
+      summary: Payment canceled
+      description: You canceled the payment request before it was paid. Carries the full payment request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentCanceledWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  payment.expired.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookPaymentExpiredV20260830
+      summary: Payment expired
+      description: The payment request reached its expires_at without being paid. Carries the full payment request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentExpiredWebhook"
       responses:
         "200":
           description: Webhook received successfully
