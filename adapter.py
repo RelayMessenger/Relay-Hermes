@@ -1412,6 +1412,9 @@ class RelayAdapter(BasePlatformAdapter):
                 batch,
                 reply_to=self._reply_anchor(chat_id, reply_to) if ordinal == 0 else None,
                 idempotency_ordinal=ordinal,
+                # Only once earlier Messages of words are delivered: an
+                # invoice-only answer keeps Hermes's usual failure handling.
+                invoice_after_words=first is not None,
             )
             if not result.success:
                 return result
@@ -1425,6 +1428,7 @@ class RelayAdapter(BasePlatformAdapter):
         parts: List[Dict[str, Any]],
         reply_to: Optional[Dict[str, Any]] = None,
         idempotency_ordinal: int = 0,
+        invoice_after_words: bool = False,
     ) -> SendResult:
         """POST one current SendMessageToChatRequest. Never raises."""
         assert self._client is not None
@@ -1455,6 +1459,26 @@ class RelayAdapter(BasePlatformAdapter):
                 logger.info(
                     "[%s] reply already committed under its idempotency key; "
                     "treating as delivered: %s", self.name, error,
+                )
+                return SendResult(success=True, message_id=None)
+            if (
+                invoice_after_words
+                and [part.get("type") for part in parts] == ["invoice"]
+                and error.status is not None
+                and 400 <= error.status < 500
+                and not error.retryable
+            ):
+                # The server refused the invoice itself (403 unverified agent,
+                # 422 storefront region, 400 validation) after the words
+                # before it were delivered. A failure here would make Hermes
+                # take its plain-text fallback (gateway/platforms/base.py
+                # _send_with_retry), which resends those words under
+                # "(Response formatting failed, plain text:)" and asks for the
+                # same refused invoice again. The words stand; the card is
+                # dropped and the reason logged.
+                logger.warning(
+                    "[%s] invoice refused after its words were delivered; not "
+                    "resending: HTTP %s: %s", self.name, error.status, error,
                 )
                 return SendResult(success=True, message_id=None)
             logger.warning("[%s] send failed: %s", self.name, error)
