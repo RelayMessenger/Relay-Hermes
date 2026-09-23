@@ -83,16 +83,16 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
-    split_invoice,
+    split_payment,
     split_selection,
     selection_reply,
     selection_reply_context,
     bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
-    INVOICE_BLOCK_INSTRUCTION,
-    INVOICE_GUIDANCE,
     LINK_LINE_INSTRUCTION,
+    PAYMENT_BLOCK_INSTRUCTION,
+    PAYMENT_GUIDANCE,
     SELECTION_BLOCK_INSTRUCTION,
     SELECTION_GUIDANCE,
     reply_idempotency_key,
@@ -162,7 +162,11 @@ WEBSOCKET_READY_TIMEOUT_SECONDS = 30.0
 @dataclasses.dataclass
 class _TurnEvent:
     event_id: str
+    # The inbound message the turn answers, and how many payment requests the
+    # turn has created: together the retry-stable payment Idempotency-Key.
+    message_id: str = ""
     next_ordinal: int = 0
+    next_payment: int = 0
 
 
 _TURN_EVENT: contextvars.ContextVar[Optional[_TurnEvent]] = (
@@ -303,14 +307,18 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     """The words and the one component block under them.
 
     The SDK's ``answerMessages`` reads an answer this way (Relay-SDK
-    packages/sdk/src/links.ts): an invoice is lifted first and rules out
+    packages/sdk/src/links.ts): a payment is lifted first and rules out
     buttons and selection; then a selection, which rules out buttons, so a
     selection block leaves the words even when a buttons block follows it. A
     block that cannot be used stays in the words with a reason.
     """
-    text, invoice, error = split_invoice(answer)
-    if invoice is not None or error is not None:
-        return text, invoice, error
+    text, request, error = split_payment(answer)
+    if request is not None:
+        # Held until send time: the checkout_url exists only once the adapter
+        # has created the payment request (_create_payment).
+        return text, {"type": "payment", "request": request}, None
+    if error is not None:
+        return text, None, error
     text, selection, error = split_selection(answer)
     if selection is not None or error is not None:
         return text, selection, error
@@ -338,14 +346,23 @@ def _place_component(
 ) -> None:
     """Put a lifted component where the SDK's ``answerMessages`` puts it.
 
-    Buttons and a selection ride under the last bubble of words. An invoice
+    Buttons and a selection ride under the last bubble of words. A payment
     must be the only part of its Message, so it goes last, after every bubble,
     and ``_message_batches`` sends it alone.
     """
-    if component.get("type") == "invoice":
+    if component.get("type") == "payment":
         parts.append(component)
     else:
         parts.insert(_buttons_slot(parts), component)
+
+
+def _held_payment(batch: List[Dict[str, Any]]) -> bool:
+    """Whether a batch is a payment whose request is not created yet."""
+    return (
+        len(batch) == 1
+        and batch[0].get("type") == "payment"
+        and isinstance(batch[0].get("request"), dict)
+    )
 
 
 def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -359,9 +376,9 @@ def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
             len(batch) == MAX_PARTS_PER_POST
             or (is_url_media and url_media_count == 40)
             or batch[-1].get("type") == part.get("type") == "text"
-            # A link or an invoice must be the only part in its Message.
+            # A link or a payment must be the only part in its Message.
             or "link" in (batch[-1].get("type"), part.get("type"))
-            or "invoice" in (batch[-1].get("type"), part.get("type"))
+            or "payment" in (batch[-1].get("type"), part.get("type"))
         ):
             batches.append(batch)
             batch = []
@@ -998,7 +1015,10 @@ class RelayAdapter(BasePlatformAdapter):
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        _TURN_EVENT.set(
+            _TurnEvent(event_id, str(event.message_id or event_id))
+            if event_id else None
+        )
         # This event owns a turn now: its own on_processing_complete settles
         # its row, so no other turn's completion may sweep it.
         event._relay_turn_started = True
@@ -1127,7 +1147,10 @@ class RelayAdapter(BasePlatformAdapter):
         """
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        token = _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        token = _TURN_EVENT.set(
+            _TurnEvent(event_id, str(event.message_id or event_id))
+            if event_id else None
+        )
         try:
             # handle_message creates the background turn task here. asyncio
             # copies this Context into that task, so overlapping Chats cannot
@@ -1271,7 +1294,7 @@ class RelayAdapter(BasePlatformAdapter):
         if not chat_id:
             return SendResult(success=False, error="no Chat id")
 
-        # An invoice, a selection or buttons rides in the model's words as a
+        # A payment, a selection or buttons rides in the model's words as a
         # fenced block; lift it out before markdown formatting can touch the JSON.
         answer = content
         content, component, component_error = _lift_component(content)
@@ -1301,7 +1324,7 @@ class RelayAdapter(BasePlatformAdapter):
             )
         if component is not None:
             # Under the last bubble of words; a buttons-only message is one
-            # the server takes, and a link must travel alone. An invoice goes
+            # the server takes, and a link must travel alone. A payment goes
             # after the words as its own, final Message.
             _place_component(parts, component)
         if not parts:
@@ -1407,6 +1430,11 @@ class RelayAdapter(BasePlatformAdapter):
         """Send ordered parts in current MessageContent batches."""
         first: Optional[SendResult] = None
         for ordinal, batch in enumerate(_message_batches(parts)):
+            if _held_payment(batch):
+                batch, refused = await self._create_payment(batch[0]["request"])
+                if refused is not None:
+                    # A refused request leaves the words already delivered.
+                    return first if refused.success and first else refused
             result = await self._post_message(
                 chat_id,
                 batch,
@@ -1418,6 +1446,56 @@ class RelayAdapter(BasePlatformAdapter):
             if first is None:
                 first = result
         return first or SendResult(success=False, error="nothing to send")
+
+    async def _create_payment(
+        self, request: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Optional[SendResult]]:
+        """Create the payment request a block asked for; its card, or why not.
+
+        The Idempotency-Key is the inbound message id and the turn's payment
+        count, so a Hermes retry of the same turn gets the first request back
+        (200) instead of creating a second one.
+        """
+        assert self._client is not None
+        entry = _TURN_EVENT.get()
+        key: Optional[str] = None
+        if entry is not None:
+            key = f"payment-request-{entry.message_id}-{entry.next_payment}"
+            entry.next_payment += 1
+        try:
+            created = await self._client.create_payment_request(
+                request, idempotency_key=key,
+            )
+        except RelayApiError as error:
+            if (
+                error.status is not None
+                and 400 <= error.status < 500
+                and not error.retryable
+            ):
+                # Refused (403 Stripe not connected, 400 Stripe's own message,
+                # 409 the key reused with another body). The same handling as
+                # a refused payment send below: the words stand, the card is
+                # dropped and the reason logged, never resent as plain text.
+                logger.warning(
+                    "[%s] payment request refused; not resending as plain "
+                    "text: HTTP %s: %s", self.name, error.status, error,
+                )
+                return [], SendResult(success=True, message_id=None)
+            logger.warning("[%s] payment request failed: %s", self.name, error)
+            return [], SendResult(
+                success=False,
+                error=f"HTTP {error.status}: {error}" if error.status else str(error),
+                retryable=error.retryable,
+            )
+        except Exception as exc:
+            logger.error("[%s] payment request error: %s", self.name, exc)
+            return [], SendResult(success=False, error=str(exc))
+        checkout_url = created.get("checkout_url")
+        if not isinstance(checkout_url, str) or not checkout_url:
+            return [], SendResult(
+                success=False, error="payment request returned no checkout_url",
+            )
+        return [{"type": "payment", "checkout_url": checkout_url}], None
 
     async def _post_message(
         self,
@@ -1458,23 +1536,24 @@ class RelayAdapter(BasePlatformAdapter):
                 )
                 return SendResult(success=True, message_id=None)
             if (
-                [part.get("type") for part in parts] == ["invoice"]
+                [part.get("type") for part in parts] == ["payment"]
                 and error.status is not None
                 and 400 <= error.status < 500
                 and not error.retryable
             ):
-                # The server refused the invoice itself (403 unverified agent,
-                # 422 storefront region, 400 validation). The invoice is the
-                # last Message of the answer, so any words before it are
-                # already delivered. A failure here would make Hermes take its
-                # plain-text fallback (gateway/platforms/base.py
+                # The server refused the payment itself (403 not the request's
+                # creator, 404 not one of this agent's requests, 409 no longer
+                # requested, 422 storefront region, 400 validation). The
+                # payment is the last Message of the answer, so any words
+                # before it are already delivered. A failure here would make
+                # Hermes take its plain-text fallback (gateway/platforms/base.py
                 # _send_with_retry), which resends those words under
                 # "(Response formatting failed, plain text:)", or sends that
-                # prefix alone for an invoice-only answer, and asks for the
-                # same refused invoice again. The words stand; the card is
+                # prefix alone for a payment-only answer, and asks for the
+                # same refused payment again. The words stand; the card is
                 # dropped and the reason logged.
                 logger.warning(
-                    "[%s] invoice refused; not resending as plain text: "
+                    "[%s] payment refused; not resending as plain text: "
                     "HTTP %s: %s", self.name, error.status, error,
                 )
                 return SendResult(success=True, message_id=None)
@@ -1769,6 +1848,15 @@ async def _standalone_send(
             # have the server dedupe the second away.
             stamp = time.time_ns()
             for index, batch in enumerate(_message_batches(parts)):
+                if _held_payment(batch):
+                    created = await client.create_payment_request(
+                        batch[0]["request"],
+                        idempotency_key=f"hermes-cron-{chat_id}-{stamp}-payment",
+                    )
+                    batch = [{
+                        "type": "payment",
+                        "checkout_url": created.get("checkout_url"),
+                    }]
                 body = await client.send_message(
                     chat_id,
                     batch,
@@ -1804,7 +1892,7 @@ PLATFORM_HINT = (
     "request, or anything genuinely worth saying. "
     f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
     f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
-    f"{INVOICE_BLOCK_INSTRUCTION} {INVOICE_GUIDANCE}"
+    f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE}"
 )
 
 

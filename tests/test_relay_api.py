@@ -38,12 +38,11 @@ from relay_hermes.relay_api import (
     render_text,
     reply_idempotency_key,
     split_buttons,
-    INVOICE_BLOCK_INSTRUCTION,
-    INVOICE_CHECKOUT_HOSTS,
-    INVOICE_GUIDANCE,
-    invoice_part,
-    parse_invoice_block,
-    split_invoice,
+    PAYMENT_BLOCK_INSTRUCTION,
+    PAYMENT_GUIDANCE,
+    payment_request_fields,
+    parse_payment_block,
+    split_payment,
     parse_selection_block,
     parts_with_selection,
     selection_part,
@@ -149,9 +148,9 @@ def test_current_event_parsing_and_mentions():
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
-    assert RELAY_OPENAPI_COMMIT == "b334eba06ce194cee4ee1b6d308145789d90a6fd"
+    assert RELAY_OPENAPI_COMMIT == "51bc3ecd9b203a3fc75fe0ab7a105b6751080678"
     assert RELAY_OPENAPI_SHA256 == (
-        "a64a98ca91ad7298b5e2584032453034bbeba925a5fe20f7808944e62404a9cf"
+        "7b41c21bebd99d28d103da1c3fe380642542e5b6243bb4319e501d7609d8ab0f"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
@@ -590,263 +589,258 @@ def test_selection_guidance_is_byte_identical_to_the_sdk():
     )
 
 
-INVOICE_PART = {
-    "type": "invoice",
-    "title": "House blend, 250 g",
+CHECKOUT_URL = "https://pay.relayapp.im/pr_test_123"
+PAYMENT_FIELDS = {
+    "description": "House blend, 250 g",
     "amount": 2_400,
     "currency": "usd",
-    "goods": "physical",
-    "url": "https://buy.stripe.com/test_123",
+    "category": "physical_goods",
 }
-INVOICE_URL_ERROR = (
-    "invoice url must be an https Stripe checkout link on checkout.stripe.com, "
-    "buy.stripe.com, book.stripe.com, donate.stripe.com, invoice.stripe.com"
-)
-SDK_INVOICE_TS = RELAY_SDK_SOURCE / "packages" / "sdk" / "src" / "invoice.ts"
+SUBSCRIPTION_FIELDS = {
+    "description": "Coffee club",
+    "category": "physical_goods",
+    "mode": "subscription",
+    "price_id": "price_test_123",
+}
+PAYMENT_REQUEST_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec30"
+PAYMENT_REQUEST = {
+    "id": PAYMENT_REQUEST_ID,
+    "object": "payment_request",
+    "status": "requested",
+    "mode": "payment",
+    "amount": 2_400,
+    "currency": "usd",
+    "description": "House blend, 250 g",
+    "category": "physical_goods",
+    "checkout_url": CHECKOUT_URL,
+    "expires_at": "2026-09-24T23:00:00Z",
+    "metadata": {},
+    "stripe": {"payment_intent_id": "pi_test_123"},
+    "created_at": "2026-09-24T00:00:00Z",
+    "updated_at": "2026-09-24T00:00:00Z",
+}
 
 
-def invoice_fence(value: Any, info: str = "") -> str:
-    tag = f"invoice {info}" if info else "invoice"
+def payment_fence(value: Any, info: str = "") -> str:
+    tag = f"payment {info}" if info else "payment"
     return f"```{tag}\n" + json.dumps(value) + "\n```"
 
 
-def test_invoice_part_accepts_the_whole_part_and_normalizes_it():
-    assert invoice_part({**INVOICE_PART, "currency": "USD"}) == INVOICE_PART
-    # The fields alone, without type, are the same part.
-    fields = {key: value for key, value in INVOICE_PART.items() if key != "type"}
-    assert invoice_part(fields) == INVOICE_PART
-    assert invoice_part({
-        **INVOICE_PART,
-        "title": "  House blend, 250 g  ",
-        "recurring": {"interval": "month"},
-    }) == {**INVOICE_PART, "recurring": {"interval": "month", "interval_count": 1}}
-    # JSON numbers JavaScript reads as integers are integers here too.
-    assert invoice_part({**INVOICE_PART, "amount": 2400.0})["amount"] == 2400
-    assert type(invoice_part({**INVOICE_PART, "amount": 2400.0})["amount"]) is int
+def test_payment_request_fields_take_the_create_fields_as_written():
+    assert payment_request_fields(PAYMENT_FIELDS) == PAYMENT_FIELDS
+    full = {
+        **PAYMENT_FIELDS,
+        "mode": "payment",
+        "currency": "USD",
+        "description": "  House blend  ",
+        "image_url": "https://files.example/bag.png",
+    }
+    # The server trims and lowercases; the body goes out as the model wrote it.
+    assert payment_request_fields(full) == full
+    assert payment_request_fields({**SUBSCRIPTION_FIELDS, "quantity": 2}) == {
+        **SUBSCRIPTION_FIELDS, "quantity": 2,
+    }
+    for category in ("physical_goods", "digital_goods", "donation"):
+        assert payment_request_fields({**PAYMENT_FIELDS, "category": category})[
+            "category"
+        ] == category
+    # JSON integers the way Number.isInteger reads them.
+    assert type(payment_request_fields({**PAYMENT_FIELDS, "amount": 2400.0})["amount"]) is int
+    # Code points, the server's count, after its trim.
+    assert payment_request_fields({**PAYMENT_FIELDS, "description": "x" * 32})
+    assert payment_request_fields({**PAYMENT_FIELDS, "description": "\U0001F600" * 32})
+    assert payment_request_fields({**PAYMENT_FIELDS, "image_url": "x" * 2_048})
 
 
-def test_invoice_part_leaves_a_bad_value_out_and_says_why():
-    for value, error in [
-        ({**INVOICE_PART, "id": "x"}, "invoice has unknown field id"),
-        ({**INVOICE_PART, "status": "requested"}, "invoice has unknown field status"),
-        ({**INVOICE_PART, "type": "buttons"}, "invoice part needs type invoice"),
-        ({**INVOICE_PART, "type": None}, "invoice part needs type invoice"),
-        ({**INVOICE_PART, "title": ""}, "invoice needs a trimmed title of 1 to 32 characters"),
-        ({**INVOICE_PART, "title": " "}, "invoice needs a trimmed title of 1 to 32 characters"),
-        ({**INVOICE_PART, "title": "x" * 33}, "invoice needs a trimmed title of 1 to 32 characters"),
-        ({**INVOICE_PART, "title": 7}, "invoice needs a trimmed title of 1 to 32 characters"),
-        ({**INVOICE_PART, "amount": 0}, "invoice amount must be an integer of 1 to 99999999"),
-        ({**INVOICE_PART, "amount": 1.5}, "invoice amount must be an integer of 1 to 99999999"),
-        ({**INVOICE_PART, "amount": 100_000_000}, "invoice amount must be an integer of 1 to 99999999"),
-        ({**INVOICE_PART, "amount": "2400"}, "invoice amount must be an integer of 1 to 99999999"),
-        ({**INVOICE_PART, "amount": True}, "invoice amount must be an integer of 1 to 99999999"),
-        ({**INVOICE_PART, "currency": "us"}, "invoice currency must be a 3-letter code"),
-        ({**INVOICE_PART, "currency": "usdd"}, "invoice currency must be a 3-letter code"),
-        ({**INVOICE_PART, "currency": "usd\n"}, "invoice currency must be a 3-letter code"),
-        ({**INVOICE_PART, "goods": "service"}, 'invoice goods must be "physical" or "digital"'),
-        ({**INVOICE_PART, "url": "x" * 2_049}, "invoice url is not a string of at most 2048 characters"),
-        ({**INVOICE_PART, "url": None}, "invoice url is not a string of at most 2048 characters"),
-        ({**INVOICE_PART, "url": "http://buy.stripe.com/test_123"}, INVOICE_URL_ERROR),
-        ({**INVOICE_PART, "url": "not a url"}, INVOICE_URL_ERROR),
-        ({**INVOICE_PART, "recurring": "month"}, "invoice recurring must be an object"),
-        ({**INVOICE_PART, "recurring": None}, "invoice recurring must be an object"),
+def test_payment_request_fields_leave_a_bad_value_out_and_say_why():
+    description_error = "payment description must be 1 to 32 characters"
+    cases = [
+        ({**PAYMENT_FIELDS, "checkout_url": CHECKOUT_URL}, "payment has unknown field checkout_url"),
+        ({**PAYMENT_FIELDS, "metadata": {}}, "payment has unknown field metadata"),
+        ({**PAYMENT_FIELDS, "type": "payment"}, "payment has unknown field type"),
+        ({**PAYMENT_FIELDS, "description": ""}, description_error),
+        ({**PAYMENT_FIELDS, "description": "   "}, description_error),
+        ({**PAYMENT_FIELDS, "description": "x" * 33}, description_error),
+        ({**PAYMENT_FIELDS, "description": 7}, description_error),
+        ({k: v for k, v in PAYMENT_FIELDS.items() if k != "description"}, description_error),
         (
-            {**INVOICE_PART, "recurring": {"interval": "month", "id": "x"}},
-            "invoice recurring has unknown field id",
+            {**PAYMENT_FIELDS, "category": "physical"},
+            "payment category must be physical_goods, digital_goods or donation",
         ),
         (
-            {**INVOICE_PART, "recurring": {"interval": "century"}},
-            "invoice recurring interval must be day, week, month or year",
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "category"},
+            "payment category must be physical_goods, digital_goods or donation",
+        ),
+        ({**PAYMENT_FIELDS, "mode": "setup"}, "payment mode must be payment or subscription"),
+        ({**PAYMENT_FIELDS, "amount": 1.5}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "amount": "2400"}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "amount": True}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "currency": "us"}, "payment currency must be a 3-letter code"),
+        ({**PAYMENT_FIELDS, "currency": "usd\n"}, "payment currency must be a 3-letter code"),
+        ({**SUBSCRIPTION_FIELDS, "price_id": ""}, "payment price_id must be a nonempty string"),
+        ({**SUBSCRIPTION_FIELDS, "quantity": 0}, "payment quantity must be an integer of at least 1"),
+        (
+            {**PAYMENT_FIELDS, "image_url": ""},
+            "payment image_url is not a string of 1 to 2048 characters",
         ),
         (
-            {**INVOICE_PART, "recurring": {"interval": "toString"}},
-            "invoice recurring interval must be day, week, month or year",
+            {**PAYMENT_FIELDS, "image_url": "x" * 2_049},
+            "payment image_url is not a string of 1 to 2048 characters",
         ),
         (
-            {**INVOICE_PART, "recurring": {"interval": "year", "interval_count": 4}},
-            "invoice recurring interval_count for year must be an integer of 1 to 3",
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "amount"},
+            "payment amount is required in payment mode",
         ),
         (
-            {**INVOICE_PART, "recurring": {"interval": "month", "interval_count": 0}},
-            "invoice recurring interval_count for month must be an integer of 1 to 36",
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "currency"},
+            "payment currency is required in payment mode",
         ),
         (
-            {**INVOICE_PART, "recurring": {"interval": "week", "interval_count": None}},
-            "invoice recurring interval_count for week must be an integer of 1 to 156",
+            {**PAYMENT_FIELDS, "price_id": "price_test_123"},
+            "payment price_id is for subscription mode only",
         ),
-        (None, "the invoice block must be a JSON object"),
-        ("invoice", "the invoice block must be a JSON object"),
-        ([], "the invoice block must be a JSON object"),
-    ]:
-        assert invoice_part(value) == error, value
+        ({**PAYMENT_FIELDS, "quantity": 1}, "payment quantity is for subscription mode only"),
+        (
+            {k: v for k, v in SUBSCRIPTION_FIELDS.items() if k != "price_id"},
+            "payment price_id is required in subscription mode",
+        ),
+        (
+            {**SUBSCRIPTION_FIELDS, "amount": 2_400},
+            "payment amount must be omitted in subscription mode",
+        ),
+        (
+            {**SUBSCRIPTION_FIELDS, "currency": "usd"},
+            "payment currency must be omitted in subscription mode",
+        ),
+        (None, "the payment block must be a JSON object"),
+        ("payment", "the payment block must be a JSON object"),
+        ([], "the payment block must be a JSON object"),
+    ]
+    for value, error in cases:
+        assert payment_request_fields(value) == error, value
 
 
-def test_invoice_part_accepts_the_exact_limits():
-    for interval, most in [("day", 1_095), ("week", 156), ("month", 36), ("year", 3)]:
-        part = invoice_part({
-            **INVOICE_PART,
-            "recurring": {"interval": interval, "interval_count": most},
-        })
-        assert part["recurring"] == {"interval": interval, "interval_count": most}
-    assert invoice_part({**INVOICE_PART, "amount": 1})["amount"] == 1
-    assert invoice_part({**INVOICE_PART, "amount": 99_999_999})["amount"] == 99_999_999
-    assert invoice_part({**INVOICE_PART, "title": "x" * 32})["title"] == "x" * 32
-    # Code points, the server's count: 17 emoji are 34 UTF-16 units.
-    assert invoice_part({**INVOICE_PART, "title": "\U0001F600" * 17})["title"] == "\U0001F600" * 17
-    assert invoice_part({**INVOICE_PART, "title": "\U0001F600" * 33}) == (
-        "invoice needs a trimmed title of 1 to 32 characters"
+def test_parse_payment_block_reads_json_the_way_json_parse_does():
+    assert parse_payment_block(json.dumps(PAYMENT_FIELDS)) == PAYMENT_FIELDS
+    assert parse_payment_block("{not json") == "the payment block is not valid JSON"
+    body = json.dumps(PAYMENT_FIELDS).replace("2400", "NaN")
+    assert parse_payment_block(body) == "the payment block is not valid JSON"
+
+
+def test_split_payment_lifts_the_block_and_keeps_the_words():
+    answer = "Ready to check out?\n\n" + payment_fence(PAYMENT_FIELDS)
+    assert split_payment(answer) == ("Ready to check out?", PAYMENT_FIELDS, None)
+    assert split_payment("Before\n" + payment_fence(PAYMENT_FIELDS) + "\nAfter") == (
+        "Before\n\nAfter", PAYMENT_FIELDS, None,
     )
-    url = "https://buy.stripe.com/" + "x" * (2_048 - len("https://buy.stripe.com/"))
-    assert invoice_part({**INVOICE_PART, "url": url})["url"] == url
-
-
-def test_invoice_part_takes_only_a_stripe_hosted_checkout_url():
-    for host in INVOICE_CHECKOUT_HOSTS:
-        url = f"https://{host}/test_123"
-        assert invoice_part({**INVOICE_PART, "url": url})["url"] == url
-    for url in [
-        "https://example.com/pay",
-        "https://stripe.com/checkout",
-        "https://pay.stripe.com/receipts/x",
-        "https://billing.stripe.com/p/session/x",
-        "https://buy.stripe.com.evil.com/x",
-        "https://buy.stripe.com./x",
-        "https://buy.stripe.com:8443/x",
-        "https://buy.stripe.com:x/x",
-        "https://buy.stripe.com@evil.com/x",
-        "https://user:pass@buy.stripe.com/x",
-        "https://evil.com\\@buy.stripe.com/x",
-        "ftp://buy.stripe.com/x",
-        "https://",
-        "buy.stripe.com/x",
-    ]:
-        assert invoice_part({**INVOICE_PART, "url": url}) == INVOICE_URL_ERROR, url
-
-
-def test_invoice_part_normalizes_the_url_the_way_the_server_stores_it():
-    # What ``new URL(url).href`` reads back for each spelling.
-    for url, href in [
-        ("HTTPS://Buy.Stripe.com/test_123", "https://buy.stripe.com/test_123"),
-        ("https:buy.stripe.com/x", "https://buy.stripe.com/x"),
-        ("https:///buy.stripe.com/x", "https://buy.stripe.com/x"),
-        ("https:\\\\buy.stripe.com/x", "https://buy.stripe.com/x"),
-        ("https://buy.stripe.com", "https://buy.stripe.com/"),
-        ("https://buy.stripe.com?prefilled_email=a%40b.test", "https://buy.stripe.com/?prefilled_email=a%40b.test"),
-        ("https://buy.stripe.com:443/x", "https://buy.stripe.com/x"),
-        ("https://buy.stripe.com:/x", "https://buy.stripe.com/x"),
-        ("  https://buy.stripe.com/x\n", "https://buy.stripe.com/x"),
-        (
-            "https://checkout.stripe.com/c/pay/cs_test_a1#fidkdWxOYHwnPyd1blpxYHZxWjA0",
-            "https://checkout.stripe.com/c/pay/cs_test_a1#fidkdWxOYHwnPyd1blpxYHZxWjA0",
-        ),
-        (
-            "https://invoice.stripe.com/i/acct_1/test_2?s=ap",
-            "https://invoice.stripe.com/i/acct_1/test_2?s=ap",
-        ),
-    ]:
-        assert invoice_part({**INVOICE_PART, "url": url})["url"] == href, url
-    # A link the WHATWG parser would rewrite in any other way is refused
-    # rather than normalized by a guess, so nothing sent reads back changed.
-    for url in [
-        "https://buy.stripe.com/a b",
-        "https://buy.stripe.com/a/../b",
-        "https://buy.stripe.com/a/%2E/b",
-        "https://buy.stripe.com/café",
-        "https://%62uy.stripe.com/x",
-    ]:
-        assert invoice_part({**INVOICE_PART, "url": url}) == INVOICE_URL_ERROR, url
-
-
-def test_parse_invoice_block_reads_json_the_way_json_parse_does():
-    assert parse_invoice_block(json.dumps(INVOICE_PART)) == INVOICE_PART
-    assert parse_invoice_block("{not json") == "the invoice block is not valid JSON"
-    body = json.dumps(INVOICE_PART).replace("2400", "NaN")
-    assert parse_invoice_block(body) == "the invoice block is not valid JSON"
-
-
-def test_split_invoice_lifts_the_block_and_keeps_the_words():
-    answer = "Ready to check out?\n\n" + invoice_fence(INVOICE_PART)
-    assert split_invoice(answer) == ("Ready to check out?", INVOICE_PART, None)
-    assert split_invoice("Before\n" + invoice_fence(INVOICE_PART) + "\nAfter") == (
-        "Before\n\nAfter", INVOICE_PART, None,
-    )
-    # An invoice needs no words of its own.
-    assert split_invoice(invoice_fence(INVOICE_PART)) == ("", INVOICE_PART, None)
+    # A payment needs no words of its own.
+    assert split_payment(payment_fence(PAYMENT_FIELDS)) == ("", PAYMENT_FIELDS, None)
     crlf = (
-        "Pay here:\r\n```invoice\r\n" + json.dumps(INVOICE_PART) + "\r\n```\r\nThanks"
+        "Pay here:\r\n```payment\r\n" + json.dumps(PAYMENT_FIELDS) + "\r\n```\r\nThanks"
     )
-    assert split_invoice(crlf) == ("Pay here:\n\nThanks", INVOICE_PART, None)
-    assert split_invoice("Pay\n" + invoice_fence(INVOICE_PART, "json")) == (
-        "Pay", INVOICE_PART, None,
+    assert split_payment(crlf) == ("Pay here:\n\nThanks", PAYMENT_FIELDS, None)
+    assert split_payment("Pay\n" + payment_fence(PAYMENT_FIELDS, "json")) == (
+        "Pay", PAYMENT_FIELDS, None,
     )
-    assert split_invoice("  plain words  ") == ("  plain words  ", None, None)
-    for untouched in ["```json\n[1]\n```", "Pay\n```invoiceish\n{}\n```"]:
-        assert split_invoice(untouched) == (untouched, None, None)
-
-
-def test_split_invoice_leaves_a_bad_block_in_the_words_and_says_why():
-    answer = "Pay here\n" + invoice_fence("not an invoice")
-    assert split_invoice(answer) == (
-        answer, None, "the invoice block must be a JSON object",
-    )
-    answer = "Pay here\n```invoice\n{not json\n```"
-    assert split_invoice(answer) == (answer, None, "the invoice block is not valid JSON")
-    answer = "Pay here\n" + invoice_fence({**INVOICE_PART, "url": "https://example.com/pay"})
-    assert split_invoice(answer) == (answer, None, INVOICE_URL_ERROR)
-
-
-def test_split_invoice_refuses_a_second_block_buttons_or_a_selection():
-    fence = invoice_fence(INVOICE_PART)
-    for answer in [
-        fence + "\n" + fence,
-        fence + '\n```buttons\n[{"label": "Yes"}]\n```',
-        '```buttons json\n[{"label": "Yes"}]\n```\n' + fence,
-        fence + "\n" + selection_fence(SELECTION_OPTIONS),
+    assert split_payment("  plain words  ") == ("  plain words  ", None, None)
+    for untouched in [
+        "```json\n[1]\n```",
+        "Pay\n```paymentish\n{}\n```",
+        "Paid\n```payment_receipt\n{}\n```",
     ]:
-        assert split_invoice(answer) == (
-            answer, None, "send one invoice and nothing else in the same message",
-        )
+        assert split_payment(untouched) == (untouched, None, None)
 
 
-def test_invoice_guidance_carries_the_shared_runtime_words():
-    assert "never invoice out of the blue" in INVOICE_GUIDANCE
-    assert "Only a verified agent can send an invoice" in INVOICE_GUIDANCE
-    assert "any words you write arrive in a message before it" in INVOICE_GUIDANCE
-    assert "`invoice`" in INVOICE_BLOCK_INSTRUCTION
-    assert "sent after them" in INVOICE_BLOCK_INSTRUCTION
-
-
-@pytest.mark.skipif(
-    not SDK_INVOICE_TS.is_file(),
-    reason="Relay-SDK checkout is required to diff INVOICE_GUIDANCE",
-)
-def test_invoice_guidance_is_byte_identical_to_the_sdk():
-    source = SDK_INVOICE_TS.read_text(encoding="utf-8")
-    assert INVOICE_GUIDANCE == _typescript_joined_constant(source, "INVOICE_GUIDANCE")
-    assert INVOICE_BLOCK_INSTRUCTION == _typescript_string_constant(
-        source, "INVOICE_BLOCK_INSTRUCTION", {"INVOICE_FENCE": "invoice"}
+def test_split_payment_leaves_a_bad_block_in_the_words_and_says_why():
+    answer = "Pay here\n" + payment_fence("not a payment")
+    assert split_payment(answer) == (
+        answer, None, "the payment block must be a JSON object",
     )
-    assert _typescript_string_constant(source, "INVOICE_FENCE") == "invoice"
-    hosts = re.search(
-        r"^export const INVOICE_CHECKOUT_HOSTS = \[([^\]]*)\]", source, re.MULTILINE
-    )
-    assert hosts, "INVOICE_CHECKOUT_HOSTS is no longer declared in the SDK source"
-    assert INVOICE_CHECKOUT_HOSTS == tuple(re.findall(r'"([^"]+)"', hosts.group(1)))
+    answer = "Pay here\n```payment\n{not json\n```"
+    assert split_payment(answer) == (answer, None, "the payment block is not valid JSON")
+    answer = "Pay here\n" + payment_fence({"checkout_url": CHECKOUT_URL})
+    assert split_payment(answer) == (answer, None, "payment has unknown field checkout_url")
 
 
-def test_update_invoice_status_puts_the_status_by_message_id():
+def test_split_payment_refuses_a_second_block_buttons_or_a_selection():
+    fence = payment_fence(PAYMENT_FIELDS)
+    for answer in [
+        "Pay\n" + fence + "\n" + fence,
+        "Pay\n" + fence + '\n```buttons\n[{"label": "Yes"}]\n```',
+        'Pay\n```buttons\n[{"label": "Yes"}]\n```\n' + fence,
+        "Pay\n" + fence + '\n```selection\n[{"value": "a", "label": "A"}]\n```',
+    ]:
+        assert split_payment(answer) == (
+            answer, None, "send one payment and nothing else in the same message",
+        ), answer
+
+
+def test_payment_guidance_names_the_fields_and_one_line_per_category():
+    assert "physical_goods for physical things and real-world services" in PAYMENT_GUIDANCE
+    assert "digital_goods for digital content and tips" in PAYMENT_GUIDANCE
+    assert "donation for a charity or fundraiser" in PAYMENT_GUIDANCE
+    assert "minor units" in PAYMENT_GUIDANCE
+    assert "a message of its own" in PAYMENT_GUIDANCE
+    assert "`payment`" in PAYMENT_BLOCK_INSTRUCTION
+    assert '"category": "physical_goods"' in PAYMENT_BLOCK_INSTRUCTION
+    assert "sent after them" in PAYMENT_BLOCK_INSTRUCTION
+
+
+def test_create_payment_request_posts_the_request_as_given():
+    transport = FakeTransport([RelayResponse(201, PAYMENT_REQUEST)])
+    client = RelayClient(TOKEN, transport=transport)
+    request = {
+        "amount": 2_400,
+        "currency": "usd",
+        "description": "House blend, 250 g",
+        "category": "physical_goods",
+        "metadata": {"order": "42"},
+    }
+    result = asyncio.run(client.create_payment_request(request, idempotency_key="order-42"))
+    assert result == PAYMENT_REQUEST
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/v1/payment_requests"
+    assert call["body"] == request
+    assert call["headers"] == {"Idempotency-Key": "order-42"}
+
+    transport = FakeTransport([RelayResponse(201, PAYMENT_REQUEST)])
+    client = RelayClient(TOKEN, transport=transport)
+    asyncio.run(client.create_payment_request(request))
+    assert transport.calls[0]["headers"] == {}
+
+
+def test_list_get_and_cancel_payment_requests():
+    listing = {"payment_requests": [PAYMENT_REQUEST], "next_cursor": None}
+    canceled = {**PAYMENT_REQUEST, "status": "canceled"}
     transport = FakeTransport([
-        RelayResponse(200, {"message": {"id": MESSAGE_ID, "parts": [
-            {**INVOICE_PART, "status": "succeeded", "reactions": None},
-        ]}}),
+        RelayResponse(200, listing),
+        RelayResponse(200, listing),
+        RelayResponse(200, PAYMENT_REQUEST),
+        RelayResponse(200, canceled),
     ])
     client = RelayClient(TOKEN, transport=transport)
-    result = asyncio.run(client.update_invoice_status(MESSAGE_ID, "succeeded"))
-    assert result["message"]["id"] == MESSAGE_ID
-    call = transport.calls[0]
-    assert call["method"] == "PUT"
-    assert call["path"] == f"/v1/messages/{MESSAGE_ID}/invoice"
-    assert call["body"] == {"status": "succeeded"}
+
+    async def run():
+        return (
+            await client.list_payment_requests(),
+            await client.list_payment_requests(limit=5, cursor="c1", status="requested"),
+            await client.get_payment_request(PAYMENT_REQUEST_ID),
+            await client.cancel_payment_request(PAYMENT_REQUEST_ID),
+        )
+
+    first, second, fetched, cancel = asyncio.run(run())
+    assert first == second == listing
+    assert fetched == PAYMENT_REQUEST
+    assert cancel == canceled
+    calls = [(call["method"], call["path"], call["query"]) for call in transport.calls]
+    assert calls == [
+        ("GET", "/v1/payment_requests", {}),
+        ("GET", "/v1/payment_requests", {"limit": 5, "cursor": "c1", "status": "requested"}),
+        ("GET", f"/v1/payment_requests/{PAYMENT_REQUEST_ID}", {}),
+        ("POST", f"/v1/payment_requests/{PAYMENT_REQUEST_ID}/cancel", {}),
+    ]
+    assert transport.calls[3]["body"] is None
 
 
 def test_send_message_uses_chat_route_and_current_body():
@@ -1072,6 +1066,25 @@ def test_websocket_accepts_current_contact_events(event_type):
     with pytest.raises(RelayWebSocketClosed):
         asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
     assert order == ["commit:1", "ack:1"]
+
+
+@pytest.mark.parametrize(
+    "event_type", ["payment.succeeded", "payment.canceled", "payment.expired"]
+)
+def test_websocket_accepts_payment_events(event_type):
+    current = event()
+    current["event_type"] = event_type
+    current["data"] = PAYMENT_REQUEST
+    order: List[str] = []
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": current},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == ["commit:1", "ack:1"]
+    # Not a message: nothing reaches a Hermes turn.
+    assert parse_inbound(current) is None
 
 
 def test_websocket_refuses_to_ack_over_a_sequence_gap():
