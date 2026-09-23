@@ -83,16 +83,16 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
-    split_invoice,
+    split_payment,
     split_selection,
     selection_reply,
     selection_reply_context,
     bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
-    INVOICE_BLOCK_INSTRUCTION,
-    INVOICE_GUIDANCE,
     LINK_LINE_INSTRUCTION,
+    PAYMENT_BLOCK_INSTRUCTION,
+    PAYMENT_GUIDANCE,
     SELECTION_BLOCK_INSTRUCTION,
     SELECTION_GUIDANCE,
     reply_idempotency_key,
@@ -303,14 +303,14 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     """The words and the one component block under them.
 
     The SDK's ``answerMessages`` reads an answer this way (Relay-SDK
-    packages/sdk/src/links.ts): an invoice is lifted first and rules out
+    packages/sdk/src/links.ts): a payment is lifted first and rules out
     buttons and selection; then a selection, which rules out buttons, so a
     selection block leaves the words even when a buttons block follows it. A
     block that cannot be used stays in the words with a reason.
     """
-    text, invoice, error = split_invoice(answer)
-    if invoice is not None or error is not None:
-        return text, invoice, error
+    text, payment, error = split_payment(answer)
+    if payment is not None or error is not None:
+        return text, payment, error
     text, selection, error = split_selection(answer)
     if selection is not None or error is not None:
         return text, selection, error
@@ -338,11 +338,11 @@ def _place_component(
 ) -> None:
     """Put a lifted component where the SDK's ``answerMessages`` puts it.
 
-    Buttons and a selection ride under the last bubble of words. An invoice
+    Buttons and a selection ride under the last bubble of words. A payment
     must be the only part of its Message, so it goes last, after every bubble,
     and ``_message_batches`` sends it alone.
     """
-    if component.get("type") == "invoice":
+    if component.get("type") == "payment":
         parts.append(component)
     else:
         parts.insert(_buttons_slot(parts), component)
@@ -359,9 +359,9 @@ def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
             len(batch) == MAX_PARTS_PER_POST
             or (is_url_media and url_media_count == 40)
             or batch[-1].get("type") == part.get("type") == "text"
-            # A link or an invoice must be the only part in its Message.
+            # A link or a payment must be the only part in its Message.
             or "link" in (batch[-1].get("type"), part.get("type"))
-            or "invoice" in (batch[-1].get("type"), part.get("type"))
+            or "payment" in (batch[-1].get("type"), part.get("type"))
         ):
             batches.append(batch)
             batch = []
@@ -1271,7 +1271,7 @@ class RelayAdapter(BasePlatformAdapter):
         if not chat_id:
             return SendResult(success=False, error="no Chat id")
 
-        # An invoice, a selection or buttons rides in the model's words as a
+        # A payment, a selection or buttons rides in the model's words as a
         # fenced block; lift it out before markdown formatting can touch the JSON.
         answer = content
         content, component, component_error = _lift_component(content)
@@ -1301,7 +1301,7 @@ class RelayAdapter(BasePlatformAdapter):
             )
         if component is not None:
             # Under the last bubble of words; a buttons-only message is one
-            # the server takes, and a link must travel alone. An invoice goes
+            # the server takes, and a link must travel alone. A payment goes
             # after the words as its own, final Message.
             _place_component(parts, component)
         if not parts:
@@ -1458,23 +1458,24 @@ class RelayAdapter(BasePlatformAdapter):
                 )
                 return SendResult(success=True, message_id=None)
             if (
-                [part.get("type") for part in parts] == ["invoice"]
+                [part.get("type") for part in parts] == ["payment"]
                 and error.status is not None
                 and 400 <= error.status < 500
                 and not error.retryable
             ):
-                # The server refused the invoice itself (403 unverified agent,
-                # 422 storefront region, 400 validation). The invoice is the
-                # last Message of the answer, so any words before it are
-                # already delivered. A failure here would make Hermes take its
-                # plain-text fallback (gateway/platforms/base.py
+                # The server refused the payment itself (403 not the request's
+                # creator, 404 not one of this agent's requests, 409 no longer
+                # requested, 422 storefront region, 400 validation). The
+                # payment is the last Message of the answer, so any words
+                # before it are already delivered. A failure here would make
+                # Hermes take its plain-text fallback (gateway/platforms/base.py
                 # _send_with_retry), which resends those words under
                 # "(Response formatting failed, plain text:)", or sends that
-                # prefix alone for an invoice-only answer, and asks for the
-                # same refused invoice again. The words stand; the card is
+                # prefix alone for a payment-only answer, and asks for the
+                # same refused payment again. The words stand; the card is
                 # dropped and the reason logged.
                 logger.warning(
-                    "[%s] invoice refused; not resending as plain text: "
+                    "[%s] payment refused; not resending as plain text: "
                     "HTTP %s: %s", self.name, error.status, error,
                 )
                 return SendResult(success=True, message_id=None)
@@ -1804,7 +1805,7 @@ PLATFORM_HINT = (
     "request, or anything genuinely worth saying. "
     f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
     f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
-    f"{INVOICE_BLOCK_INSTRUCTION} {INVOICE_GUIDANCE}"
+    f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE}"
 )
 
 
