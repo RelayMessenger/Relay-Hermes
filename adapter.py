@@ -162,7 +162,11 @@ WEBSOCKET_READY_TIMEOUT_SECONDS = 30.0
 @dataclasses.dataclass
 class _TurnEvent:
     event_id: str
+    # The inbound message the turn answers, and how many payment requests the
+    # turn has created: together the retry-stable payment Idempotency-Key.
+    message_id: str = ""
     next_ordinal: int = 0
+    next_payment: int = 0
 
 
 _TURN_EVENT: contextvars.ContextVar[Optional[_TurnEvent]] = (
@@ -308,9 +312,13 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     selection block leaves the words even when a buttons block follows it. A
     block that cannot be used stays in the words with a reason.
     """
-    text, payment, error = split_payment(answer)
-    if payment is not None or error is not None:
-        return text, payment, error
+    text, request, error = split_payment(answer)
+    if request is not None:
+        # Held until send time: the checkout_url exists only once the adapter
+        # has created the payment request (_create_payment).
+        return text, {"type": "payment", "request": request}, None
+    if error is not None:
+        return text, None, error
     text, selection, error = split_selection(answer)
     if selection is not None or error is not None:
         return text, selection, error
@@ -346,6 +354,15 @@ def _place_component(
         parts.append(component)
     else:
         parts.insert(_buttons_slot(parts), component)
+
+
+def _held_payment(batch: List[Dict[str, Any]]) -> bool:
+    """Whether a batch is a payment whose request is not created yet."""
+    return (
+        len(batch) == 1
+        and batch[0].get("type") == "payment"
+        and isinstance(batch[0].get("request"), dict)
+    )
 
 
 def _message_batches(parts: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -998,7 +1015,10 @@ class RelayAdapter(BasePlatformAdapter):
 
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        _TURN_EVENT.set(
+            _TurnEvent(event_id, str(event.message_id or event_id))
+            if event_id else None
+        )
         # This event owns a turn now: its own on_processing_complete settles
         # its row, so no other turn's completion may sweep it.
         event._relay_turn_started = True
@@ -1127,7 +1147,10 @@ class RelayAdapter(BasePlatformAdapter):
         """
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         event_id = str(raw.get("event_id") or "")
-        token = _TURN_EVENT.set(_TurnEvent(event_id) if event_id else None)
+        token = _TURN_EVENT.set(
+            _TurnEvent(event_id, str(event.message_id or event_id))
+            if event_id else None
+        )
         try:
             # handle_message creates the background turn task here. asyncio
             # copies this Context into that task, so overlapping Chats cannot
@@ -1407,6 +1430,11 @@ class RelayAdapter(BasePlatformAdapter):
         """Send ordered parts in current MessageContent batches."""
         first: Optional[SendResult] = None
         for ordinal, batch in enumerate(_message_batches(parts)):
+            if _held_payment(batch):
+                batch, refused = await self._create_payment(batch[0]["request"])
+                if refused is not None:
+                    # A refused request leaves the words already delivered.
+                    return first if refused.success and first else refused
             result = await self._post_message(
                 chat_id,
                 batch,
@@ -1418,6 +1446,56 @@ class RelayAdapter(BasePlatformAdapter):
             if first is None:
                 first = result
         return first or SendResult(success=False, error="nothing to send")
+
+    async def _create_payment(
+        self, request: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Optional[SendResult]]:
+        """Create the payment request a block asked for; its card, or why not.
+
+        The Idempotency-Key is the inbound message id and the turn's payment
+        count, so a Hermes retry of the same turn gets the first request back
+        (200) instead of creating a second one.
+        """
+        assert self._client is not None
+        entry = _TURN_EVENT.get()
+        key: Optional[str] = None
+        if entry is not None:
+            key = f"payment-request-{entry.message_id}-{entry.next_payment}"
+            entry.next_payment += 1
+        try:
+            created = await self._client.create_payment_request(
+                request, idempotency_key=key,
+            )
+        except RelayApiError as error:
+            if (
+                error.status is not None
+                and 400 <= error.status < 500
+                and not error.retryable
+            ):
+                # Refused (403 Stripe not connected, 400 Stripe's own message,
+                # 409 the key reused with another body). The same handling as
+                # a refused payment send below: the words stand, the card is
+                # dropped and the reason logged, never resent as plain text.
+                logger.warning(
+                    "[%s] payment request refused; not resending as plain "
+                    "text: HTTP %s: %s", self.name, error.status, error,
+                )
+                return [], SendResult(success=True, message_id=None)
+            logger.warning("[%s] payment request failed: %s", self.name, error)
+            return [], SendResult(
+                success=False,
+                error=f"HTTP {error.status}: {error}" if error.status else str(error),
+                retryable=error.retryable,
+            )
+        except Exception as exc:
+            logger.error("[%s] payment request error: %s", self.name, exc)
+            return [], SendResult(success=False, error=str(exc))
+        checkout_url = created.get("checkout_url")
+        if not isinstance(checkout_url, str) or not checkout_url:
+            return [], SendResult(
+                success=False, error="payment request returned no checkout_url",
+            )
+        return [{"type": "payment", "checkout_url": checkout_url}], None
 
     async def _post_message(
         self,
@@ -1770,6 +1848,15 @@ async def _standalone_send(
             # have the server dedupe the second away.
             stamp = time.time_ns()
             for index, batch in enumerate(_message_batches(parts)):
+                if _held_payment(batch):
+                    created = await client.create_payment_request(
+                        batch[0]["request"],
+                        idempotency_key=f"hermes-cron-{chat_id}-{stamp}-payment",
+                    )
+                    batch = [{
+                        "type": "payment",
+                        "checkout_url": created.get("checkout_url"),
+                    }]
                 body = await client.send_message(
                     chat_id,
                     batch,

@@ -54,6 +54,7 @@ class FakeClient:
         self.calls: List[Dict[str, Any]] = []
         self.uploads: List[Dict[str, Any]] = []
         self.reads: List[str] = []
+        self.payment_requests: List[Dict[str, Any]] = []
         self._transfer_http = None
 
     async def mark_read(self, chat_id: str) -> None:
@@ -76,6 +77,22 @@ class FakeClient:
             "timeout": timeout,
         })
         return {"chat_id": chat_id, "message": {"id": "message-id"}}
+
+    async def create_payment_request(
+        self,
+        request: Dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.payment_requests.append({
+            "request": request, "idempotency_key": idempotency_key,
+        })
+        return {
+            "id": "01993d50-ef7b-7b37-886b-23fd80c7ec30",
+            "object": "payment_request",
+            "status": "requested",
+            "checkout_url": "https://pay.relayapp.im/pr_test_123",
+        }
 
     async def upload_attachment(
         self,
@@ -1930,10 +1947,18 @@ def test_standalone_send_lifts_a_selection_block(plugin, monkeypatch):
     ]
 
 
+PAYMENT_FIELDS = {
+    "description": "House blend, 250 g",
+    "amount": 2400,
+    "currency": "usd",
+    "category": "physical_goods",
+}
+# What the adapter sends once it has created the request (FakeClient's url).
 PAYMENT_PART = {
     "type": "payment",
     "checkout_url": "https://pay.relayapp.im/pr_test_123",
 }
+TURN_MESSAGE_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec11"
 
 
 def payment_fence(value: Any) -> str:
@@ -1960,7 +1985,7 @@ def test_platform_hint_carries_the_payment_rules(plugin):
         f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
         f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE}"
     )
-    assert "the card reads its amount and title from that request" in hint
+    assert "digital_goods for digital content and tips" in hint
 
 
 def test_send_puts_the_words_first_and_the_payment_alone_after_them(plugin, tmp_path):
@@ -1973,7 +1998,7 @@ def test_send_puts_the_words_first_and_the_payment_alone_after_them(plugin, tmp_
         await adapter.on_processing_start(event)
         answer = (
             "Here is the bag you picked.\n\n"
-            + payment_fence({"checkout_url": PAYMENT_PART["checkout_url"]})
+            + payment_fence(PAYMENT_FIELDS)
             + "\n\nThanks for the order!"
         )
         result = await adapter.send(event.source.chat_id, answer, reply_to="source-message")
@@ -1987,6 +2012,110 @@ def test_send_puts_the_words_first_and_the_payment_alone_after_them(plugin, tmp_
     # Two Messages, two keys; only the first carries the reply anchor.
     assert len({call["idempotency_key"] for call in client.calls}) == 2
     assert client.calls[1]["reply_to"] is None
+    # The adapter, not the model, created the request the card carries.
+    assert client.payment_requests == [{
+        "request": PAYMENT_FIELDS,
+        "idempotency_key": f"payment-request-{TURN_MESSAGE_ID}-0",
+    }]
+
+
+def test_a_retried_turn_reuses_the_payment_request_key(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-payment-retry")
+    answer = "Here is the bag.\n\n" + payment_fence(PAYMENT_FIELDS)
+
+    async def attempt():
+        # Hermes starts the same turn again after a failed attempt.
+        await adapter.on_processing_start(event)
+        assert (await adapter.send(event.source.chat_id, answer)).success
+
+    asyncio.run(attempt())
+    asyncio.run(attempt())
+    keys = [call["idempotency_key"] for call in client.payment_requests]
+    # Same inbound message, same key: Relay returns the first request (200)
+    # instead of creating a second one.
+    assert keys == [f"payment-request-{TURN_MESSAGE_ID}-0"] * 2
+
+    # A second payment in the same turn is a second request.
+    async def two_payments():
+        await adapter.on_processing_start(event)
+        await adapter.send(event.source.chat_id, payment_fence(PAYMENT_FIELDS))
+        await adapter.send(event.source.chat_id, payment_fence(PAYMENT_FIELDS))
+
+    client.payment_requests.clear()
+    asyncio.run(two_payments())
+    assert [call["idempotency_key"] for call in client.payment_requests] == [
+        f"payment-request-{TURN_MESSAGE_ID}-0",
+        f"payment-request-{TURN_MESSAGE_ID}-1",
+    ]
+
+
+class RefusingCreateClient(FakeClient):
+    """Refuses every payment request create with ``status``."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__()
+        self.status = status
+
+    async def create_payment_request(self, request, *, idempotency_key=None):
+        from relay_hermes.relay_api import RelayApiError, classify_status
+
+        self.payment_requests.append({
+            "request": request, "idempotency_key": idempotency_key,
+        })
+        raise RelayApiError(
+            f"relay: POST /v1/payment_requests failed with {self.status}: "
+            "Connect Stripe in the Relay Console to accept payments.",
+            kind=classify_status(self.status),
+            status=self.status,
+            code="2003",
+        )
+
+
+@pytest.mark.parametrize("status", [403, 400])
+def test_a_refused_payment_request_keeps_the_words_and_sends_no_card(
+    plugin, tmp_path, caplog, status
+):
+    adapter = make_adapter(plugin, tmp_path)
+    client = RefusingCreateClient(status)
+    adapter._client = client
+    event = message_event(plugin, adapter, f"event-payment-create-refused-{status}")
+
+    async def run(content):
+        await adapter.on_processing_start(event)
+        return await adapter._send_with_retry(event.source.chat_id, content)
+
+    with caplog.at_level("WARNING"):
+        with_words = asyncio.run(run("Here is the bag.\n\n" + payment_fence(PAYMENT_FIELDS)))
+        alone = asyncio.run(run(payment_fence(PAYMENT_FIELDS)))
+    assert with_words.success and with_words.message_id == "message-id"
+    assert alone.success and alone.message_id is None
+    # The words once, no card, no plain-text resend, and one create per answer.
+    assert [call["parts"] for call in client.calls] == [
+        [{"type": "text", "value": "Here is the bag."}],
+    ]
+    assert len(client.payment_requests) == 2
+    assert "Response formatting failed" not in caplog.text
+    assert "payment request refused; not resending as plain text" in caplog.text
+    assert f"HTTP {status}" in caplog.text
+    assert "Connect Stripe in the Relay Console" in caplog.text
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_transient_payment_request_failure_is_retryable(plugin, tmp_path, status):
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._client = RefusingCreateClient(status)
+    event = message_event(plugin, adapter, f"event-payment-create-transient-{status}")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter.send(event.source.chat_id, payment_fence(PAYMENT_FIELDS))
+
+    result = asyncio.run(run())
+    assert not result.success and result.retryable
+    assert adapter._client.calls == []
 
 
 def test_send_keeps_a_payment_only_answer_instead_of_reading_it_as_silence(
@@ -1999,7 +2128,7 @@ def test_send_keeps_a_payment_only_answer_instead_of_reading_it_as_silence(
 
     async def run():
         await adapter.on_processing_start(event)
-        result = await adapter.send(event.source.chat_id, payment_fence(PAYMENT_PART))
+        result = await adapter.send(event.source.chat_id, payment_fence(PAYMENT_FIELDS))
         assert result.success and result.message_id is not None
 
     asyncio.run(run())
@@ -2016,7 +2145,7 @@ def test_send_splits_links_ahead_of_the_payment(plugin, tmp_path):
         await adapter.on_processing_start(event)
         answer = (
             "Here's the order:\n\nhttps://example.com/cart\n\n"
-            + payment_fence(PAYMENT_PART)
+            + payment_fence(PAYMENT_FIELDS)
         )
         assert (await adapter.send(event.source.chat_id, answer)).success
 
@@ -2049,16 +2178,17 @@ def test_send_keeps_a_conflicting_or_unusable_payment_block_as_text(plugin, tmp_
     event = message_event(plugin, adapter, "event-payment-bad")
     answers = [
         # A payment cannot accompany buttons or a selection, in either order.
-        "Pay\n" + payment_fence(PAYMENT_PART) + '\n```buttons\n[{"label": "Yes"}]\n```',
-        'Pay\n```buttons\n[{"label": "Yes"}]\n```\n' + payment_fence(PAYMENT_PART),
-        "Pay\n" + payment_fence(PAYMENT_PART) + "\n" + selection_fence(SELECTION_OPTIONS),
+        "Pay\n" + payment_fence(PAYMENT_FIELDS) + '\n```buttons\n[{"label": "Yes"}]\n```',
+        'Pay\n```buttons\n[{"label": "Yes"}]\n```\n' + payment_fence(PAYMENT_FIELDS),
+        "Pay\n" + payment_fence(PAYMENT_FIELDS) + "\n" + selection_fence(SELECTION_OPTIONS),
         # Two payments in one answer.
-        "Pay\n" + payment_fence(PAYMENT_PART) + "\n" + payment_fence(PAYMENT_PART),
+        "Pay\n" + payment_fence(PAYMENT_FIELDS) + "\n" + payment_fence(PAYMENT_FIELDS),
         # Invalid JSON and values the server would refuse.
-        "Pay\n```payment\n{checkout_url: x}\n```",
-        "Pay\n" + payment_fence({**PAYMENT_PART, "checkout_url": ""}),
-        "Pay\n" + payment_fence({**PAYMENT_PART, "checkout_url": "x" * 2_049}),
-        "Pay\n" + payment_fence({**PAYMENT_PART, "amount": 2400}),
+        "Pay\n```payment\n{description: bag}\n```",
+        "Pay\n" + payment_fence({**PAYMENT_FIELDS, "category": "services"}),
+        "Pay\n" + payment_fence({**PAYMENT_FIELDS, "amount": "2400"}),
+        "Pay\n" + payment_fence({**PAYMENT_FIELDS, "checkout_url": "https://x"}),
+        "Pay\n" + payment_fence({**PAYMENT_FIELDS, "mode": "subscription"}),
     ]
 
     async def run():
@@ -2083,7 +2213,7 @@ def test_send_keeps_the_link_card_when_a_payment_block_is_refused(plugin, tmp_pa
     event = message_event(plugin, adapter, "event-payment-bad-link")
     answer = (
         "https://example.com/x\n\n"
-        + payment_fence(PAYMENT_PART)
+        + payment_fence(PAYMENT_FIELDS)
         + '\n```buttons\n[{"label": "Yes"}]\n```'
     )
 
@@ -2141,7 +2271,7 @@ def test_a_refused_payment_after_its_words_is_not_resent_as_plain_text(
         # Hermes's own delivery path, whose plain-text fallback resent the
         # words under "(Response formatting failed, plain text:)".
         return await adapter._send_with_retry(
-            event.source.chat_id, "Here is the bag.\n\n" + payment_fence(PAYMENT_PART)
+            event.source.chat_id, "Here is the bag.\n\n" + payment_fence(PAYMENT_FIELDS)
         )
 
     with caplog.at_level("WARNING"):
@@ -2169,7 +2299,7 @@ def test_a_refused_payment_only_answer_is_not_resent_as_plain_text(
     async def run():
         await adapter.on_processing_start(event)
         return await adapter._send_with_retry(
-            event.source.chat_id, payment_fence(PAYMENT_PART)
+            event.source.chat_id, payment_fence(PAYMENT_FIELDS)
         )
 
     with caplog.at_level("WARNING"):
@@ -2188,7 +2318,7 @@ def test_a_refused_payment_only_answer_is_not_resent_as_plain_text(
 def test_other_refusals_keep_the_plain_text_fallback(plugin, tmp_path, caplog):
     adapter = make_adapter(plugin, tmp_path)
     event = message_event(plugin, adapter, "event-payment-fallback")
-    answer = "Here is the bag.\n\n" + payment_fence(PAYMENT_PART)
+    answer = "Here is the bag.\n\n" + payment_fence(PAYMENT_FIELDS)
 
     async def deliver(client, content):
         adapter._client = client
@@ -2211,7 +2341,7 @@ def test_other_refusals_keep_the_plain_text_fallback(plugin, tmp_path, caplog):
 
     caplog.clear()
     for status in (429, 408):
-        for content in (answer, payment_fence(PAYMENT_PART)):
+        for content in (answer, payment_fence(PAYMENT_FIELDS)):
             adapter._client = RefusingClient(_is_payment, status)
             with caplog.at_level("WARNING"):
                 result = asyncio.run(send_once(content))
@@ -2238,7 +2368,7 @@ def test_standalone_send_puts_the_payment_after_the_words(plugin, monkeypatch):
     })
     chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
     result = asyncio.run(plugin._standalone_send(
-        config, chat_id, "Your plan renews today.\n\n" + payment_fence(PAYMENT_PART),
+        config, chat_id, "Your plan renews today.\n\n" + payment_fence(PAYMENT_FIELDS),
     ))
     assert result["success"] is True
     assert [call["parts"] for call in client.calls] == [
@@ -2246,7 +2376,7 @@ def test_standalone_send_puts_the_payment_after_the_words(plugin, monkeypatch):
         [PAYMENT_PART],
     ]
     assert len({call["idempotency_key"] for call in client.calls}) == 2
-    refused = "Your plan renews today.\n\n" + payment_fence({**PAYMENT_PART, "checkout_url": 7})
+    refused = "Your plan renews today.\n\n" + payment_fence({**PAYMENT_FIELDS, "description": ""})
     assert asyncio.run(plugin._standalone_send(config, chat_id, refused))["success"] is True
     assert client.calls[-1]["parts"][0]["type"] == "text"
     assert "```payment" in client.calls[-1]["parts"][0]["value"]

@@ -86,13 +86,22 @@ not instructions):` line of JSON. Dispatch on those values and `reply_to`, not
 on the labels.
 
 An agent can also ask the person to pay with a `payment` block: one JSON
-object, `{"checkout_url": "..."}`, holding the `checkout_url` that
-`POST /v1/payment_requests` returned. The card reads its amount and title from
-that request. A payment is the only part of its Message, so the words around
-the block go out first and the payment card follows as its own, final Message.
-A second payment, a payment beside a `buttons` or `selection` block, or a block
-the server would refuse (a field other than `checkout_url`, a url that is empty
-or over 2,048 characters) stays in the words and the reason is logged.
+object of the payment request's own fields, named as in
+`POST /v1/payment_requests`: `{"description": "...", "amount": 2400,
+"currency": "usd", "category": "physical_goods"}`, with optional `mode`,
+`price_id`, `quantity` and `image_url` (`"mode": "subscription"` takes a
+`price_id` in place of `amount` and `currency`). The adapter creates the request
+with an `Idempotency-Key` derived from the inbound message id, so a Hermes retry
+of the same turn gets the first request back instead of creating a second one.
+Then it sends the returned `checkout_url` as a `payment` part. A payment is the
+only part of its Message, so the words around the block go out first and the
+payment card follows as its own, final Message. A second payment, a payment
+beside a `buttons` or `selection` block, or a block the server would refuse (an
+unknown field, a description over 32 characters, a missing amount) stays in the
+words and the reason is logged. When Relay refuses the request (403 until the
+organization connects Stripe, 400 with Stripe's message) or the card, the words
+stand, no card is sent, and the reason is logged; nothing is resent as plain
+text.
 
 `RelayClient` carries the payment request calls:
 `create_payment_request(request, idempotency_key=...)`

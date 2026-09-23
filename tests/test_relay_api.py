@@ -40,7 +40,7 @@ from relay_hermes.relay_api import (
     split_buttons,
     PAYMENT_BLOCK_INSTRUCTION,
     PAYMENT_GUIDANCE,
-    payment_part,
+    payment_request_fields,
     parse_payment_block,
     split_payment,
     parse_selection_block,
@@ -590,8 +590,18 @@ def test_selection_guidance_is_byte_identical_to_the_sdk():
 
 
 CHECKOUT_URL = "https://pay.relayapp.im/pr_test_123"
-PAYMENT_PART = {"type": "payment", "checkout_url": CHECKOUT_URL}
-PAYMENT_URL_ERROR = "payment checkout_url is not a string of 1 to 2048 characters"
+PAYMENT_FIELDS = {
+    "description": "House blend, 250 g",
+    "amount": 2_400,
+    "currency": "usd",
+    "category": "physical_goods",
+}
+SUBSCRIPTION_FIELDS = {
+    "description": "Coffee club",
+    "category": "physical_goods",
+    "mode": "subscription",
+    "price_id": "price_test_123",
+}
 PAYMENT_REQUEST_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec30"
 PAYMENT_REQUEST = {
     "id": PAYMENT_REQUEST_ID,
@@ -616,59 +626,121 @@ def payment_fence(value: Any, info: str = "") -> str:
     return f"```{tag}\n" + json.dumps(value) + "\n```"
 
 
-def test_payment_part_accepts_the_whole_part_or_its_field():
-    assert payment_part(PAYMENT_PART) == PAYMENT_PART
-    assert payment_part({"checkout_url": CHECKOUT_URL}) == PAYMENT_PART
-    # Sent exactly as written: the server matches it byte for byte.
-    odd = "HTTPS://Pay.RelayApp.im/pr_test_123?x=1"
-    assert payment_part({"checkout_url": odd}) == {"type": "payment", "checkout_url": odd}
-    assert payment_part({"checkout_url": "x" * 2_048})["checkout_url"] == "x" * 2_048
-    # Counted in UTF-16 units, as the server's zod max counts them.
-    assert payment_part({"checkout_url": "\U0001F600" * 1_024})["type"] == "payment"
-    assert payment_part({"checkout_url": "\U0001F600" * 1_025}) == PAYMENT_URL_ERROR
+def test_payment_request_fields_take_the_create_fields_as_written():
+    assert payment_request_fields(PAYMENT_FIELDS) == PAYMENT_FIELDS
+    full = {
+        **PAYMENT_FIELDS,
+        "mode": "payment",
+        "currency": "USD",
+        "description": "  House blend  ",
+        "image_url": "https://files.example/bag.png",
+    }
+    # The server trims and lowercases; the body goes out as the model wrote it.
+    assert payment_request_fields(full) == full
+    assert payment_request_fields({**SUBSCRIPTION_FIELDS, "quantity": 2}) == {
+        **SUBSCRIPTION_FIELDS, "quantity": 2,
+    }
+    for category in ("physical_goods", "digital_goods", "donation"):
+        assert payment_request_fields({**PAYMENT_FIELDS, "category": category})[
+            "category"
+        ] == category
+    # JSON integers the way Number.isInteger reads them.
+    assert type(payment_request_fields({**PAYMENT_FIELDS, "amount": 2400.0})["amount"]) is int
+    # Code points, the server's count, after its trim.
+    assert payment_request_fields({**PAYMENT_FIELDS, "description": "x" * 32})
+    assert payment_request_fields({**PAYMENT_FIELDS, "description": "\U0001F600" * 32})
+    assert payment_request_fields({**PAYMENT_FIELDS, "image_url": "x" * 2_048})
 
 
-def test_payment_part_leaves_a_bad_value_out_and_says_why():
+def test_payment_request_fields_leave_a_bad_value_out_and_say_why():
+    description_error = "payment description must be 1 to 32 characters"
     cases = [
-        ({**PAYMENT_PART, "amount": 2_400}, "payment has unknown field amount"),
-        ({**PAYMENT_PART, "status": "requested"}, "payment has unknown field status"),
-        ({**PAYMENT_PART, "type": "buttons"}, "payment part needs type payment"),
-        ({**PAYMENT_PART, "type": None}, "payment part needs type payment"),
-        ({**PAYMENT_PART, "checkout_url": ""}, PAYMENT_URL_ERROR),
-        ({**PAYMENT_PART, "checkout_url": None}, PAYMENT_URL_ERROR),
-        ({**PAYMENT_PART, "checkout_url": 7}, PAYMENT_URL_ERROR),
-        ({**PAYMENT_PART, "checkout_url": "x" * 2_049}, PAYMENT_URL_ERROR),
-        ({"type": "payment"}, PAYMENT_URL_ERROR),
+        ({**PAYMENT_FIELDS, "checkout_url": CHECKOUT_URL}, "payment has unknown field checkout_url"),
+        ({**PAYMENT_FIELDS, "metadata": {}}, "payment has unknown field metadata"),
+        ({**PAYMENT_FIELDS, "type": "payment"}, "payment has unknown field type"),
+        ({**PAYMENT_FIELDS, "description": ""}, description_error),
+        ({**PAYMENT_FIELDS, "description": "   "}, description_error),
+        ({**PAYMENT_FIELDS, "description": "x" * 33}, description_error),
+        ({**PAYMENT_FIELDS, "description": 7}, description_error),
+        ({k: v for k, v in PAYMENT_FIELDS.items() if k != "description"}, description_error),
+        (
+            {**PAYMENT_FIELDS, "category": "physical"},
+            "payment category must be physical_goods, digital_goods or donation",
+        ),
+        (
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "category"},
+            "payment category must be physical_goods, digital_goods or donation",
+        ),
+        ({**PAYMENT_FIELDS, "mode": "setup"}, "payment mode must be payment or subscription"),
+        ({**PAYMENT_FIELDS, "amount": 1.5}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "amount": "2400"}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "amount": True}, "payment amount must be an integer"),
+        ({**PAYMENT_FIELDS, "currency": "us"}, "payment currency must be a 3-letter code"),
+        ({**PAYMENT_FIELDS, "currency": "usd\n"}, "payment currency must be a 3-letter code"),
+        ({**SUBSCRIPTION_FIELDS, "price_id": ""}, "payment price_id must be a nonempty string"),
+        ({**SUBSCRIPTION_FIELDS, "quantity": 0}, "payment quantity must be an integer of at least 1"),
+        (
+            {**PAYMENT_FIELDS, "image_url": ""},
+            "payment image_url is not a string of 1 to 2048 characters",
+        ),
+        (
+            {**PAYMENT_FIELDS, "image_url": "x" * 2_049},
+            "payment image_url is not a string of 1 to 2048 characters",
+        ),
+        (
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "amount"},
+            "payment amount is required in payment mode",
+        ),
+        (
+            {k: v for k, v in PAYMENT_FIELDS.items() if k != "currency"},
+            "payment currency is required in payment mode",
+        ),
+        (
+            {**PAYMENT_FIELDS, "price_id": "price_test_123"},
+            "payment price_id is for subscription mode only",
+        ),
+        ({**PAYMENT_FIELDS, "quantity": 1}, "payment quantity is for subscription mode only"),
+        (
+            {k: v for k, v in SUBSCRIPTION_FIELDS.items() if k != "price_id"},
+            "payment price_id is required in subscription mode",
+        ),
+        (
+            {**SUBSCRIPTION_FIELDS, "amount": 2_400},
+            "payment amount must be omitted in subscription mode",
+        ),
+        (
+            {**SUBSCRIPTION_FIELDS, "currency": "usd"},
+            "payment currency must be omitted in subscription mode",
+        ),
         (None, "the payment block must be a JSON object"),
         ("payment", "the payment block must be a JSON object"),
         ([], "the payment block must be a JSON object"),
     ]
     for value, error in cases:
-        assert payment_part(value) == error, value
+        assert payment_request_fields(value) == error, value
 
 
 def test_parse_payment_block_reads_json_the_way_json_parse_does():
-    assert parse_payment_block(json.dumps(PAYMENT_PART)) == PAYMENT_PART
+    assert parse_payment_block(json.dumps(PAYMENT_FIELDS)) == PAYMENT_FIELDS
     assert parse_payment_block("{not json") == "the payment block is not valid JSON"
-    assert parse_payment_block('{"checkout_url": NaN}') == (
-        "the payment block is not valid JSON"
-    )
+    body = json.dumps(PAYMENT_FIELDS).replace("2400", "NaN")
+    assert parse_payment_block(body) == "the payment block is not valid JSON"
 
 
 def test_split_payment_lifts_the_block_and_keeps_the_words():
-    answer = "Ready to check out?\n\n" + payment_fence(PAYMENT_PART)
-    assert split_payment(answer) == ("Ready to check out?", PAYMENT_PART, None)
-    assert split_payment("Before\n" + payment_fence(PAYMENT_PART) + "\nAfter") == (
-        "Before\n\nAfter", PAYMENT_PART, None,
+    answer = "Ready to check out?\n\n" + payment_fence(PAYMENT_FIELDS)
+    assert split_payment(answer) == ("Ready to check out?", PAYMENT_FIELDS, None)
+    assert split_payment("Before\n" + payment_fence(PAYMENT_FIELDS) + "\nAfter") == (
+        "Before\n\nAfter", PAYMENT_FIELDS, None,
     )
     # A payment needs no words of its own.
-    assert split_payment(payment_fence(PAYMENT_PART)) == ("", PAYMENT_PART, None)
+    assert split_payment(payment_fence(PAYMENT_FIELDS)) == ("", PAYMENT_FIELDS, None)
     crlf = (
-        "Pay here:\r\n```payment\r\n" + json.dumps(PAYMENT_PART) + "\r\n```\r\nThanks"
+        "Pay here:\r\n```payment\r\n" + json.dumps(PAYMENT_FIELDS) + "\r\n```\r\nThanks"
     )
-    assert split_payment(crlf) == ("Pay here:\n\nThanks", PAYMENT_PART, None)
-    assert split_payment("Pay\n" + payment_fence(PAYMENT_PART, "json")) == (
-        "Pay", PAYMENT_PART, None,
+    assert split_payment(crlf) == ("Pay here:\n\nThanks", PAYMENT_FIELDS, None)
+    assert split_payment("Pay\n" + payment_fence(PAYMENT_FIELDS, "json")) == (
+        "Pay", PAYMENT_FIELDS, None,
     )
     assert split_payment("  plain words  ") == ("  plain words  ", None, None)
     for untouched in [
@@ -686,12 +758,12 @@ def test_split_payment_leaves_a_bad_block_in_the_words_and_says_why():
     )
     answer = "Pay here\n```payment\n{not json\n```"
     assert split_payment(answer) == (answer, None, "the payment block is not valid JSON")
-    answer = "Pay here\n" + payment_fence({"checkout_url": ""})
-    assert split_payment(answer) == (answer, None, PAYMENT_URL_ERROR)
+    answer = "Pay here\n" + payment_fence({"checkout_url": CHECKOUT_URL})
+    assert split_payment(answer) == (answer, None, "payment has unknown field checkout_url")
 
 
 def test_split_payment_refuses_a_second_block_buttons_or_a_selection():
-    fence = payment_fence(PAYMENT_PART)
+    fence = payment_fence(PAYMENT_FIELDS)
     for answer in [
         "Pay\n" + fence + "\n" + fence,
         "Pay\n" + fence + '\n```buttons\n[{"label": "Yes"}]\n```',
@@ -703,11 +775,14 @@ def test_split_payment_refuses_a_second_block_buttons_or_a_selection():
         ), answer
 
 
-def test_payment_guidance_names_the_url_source_and_the_lone_card():
-    assert "POST /v1/payment_requests" in PAYMENT_GUIDANCE
+def test_payment_guidance_names_the_fields_and_one_line_per_category():
+    assert "physical_goods for physical things and real-world services" in PAYMENT_GUIDANCE
+    assert "digital_goods for digital content and tips" in PAYMENT_GUIDANCE
+    assert "donation for a charity or fundraiser" in PAYMENT_GUIDANCE
+    assert "minor units" in PAYMENT_GUIDANCE
     assert "a message of its own" in PAYMENT_GUIDANCE
     assert "`payment`" in PAYMENT_BLOCK_INSTRUCTION
-    assert '{"checkout_url": "..."}' in PAYMENT_BLOCK_INSTRUCTION
+    assert '"category": "physical_goods"' in PAYMENT_BLOCK_INSTRUCTION
     assert "sent after them" in PAYMENT_BLOCK_INSTRUCTION
 
 

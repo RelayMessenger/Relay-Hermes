@@ -1690,21 +1690,31 @@ def selection_reply_context(
 
 
 # A payment, lifted out of an agent's words the way buttons and selection are:
-# the model ends its answer with a fenced block tagged ``payment`` holding one
-# JSON object, the part exactly as the API takes it. The card's amount and title are read from the
-# payment request, never from the message, so the part carries only the
-# ``checkout_url`` that ``POST /v1/payment_requests`` returned. A payment must
-# be the only part of its Message, so the words around the block go out first
-# and the payment follows as its own, final Message. The limit is the server's
-# (Relay-Server server/src/messaging.ts: a string of 1 to 2,048 characters,
-# matched exactly against the sender's own requests).
+# the model ends its answer with a fenced block tagged ``payment`` holding the
+# payment request's own fields, the CreatePaymentRequestRequest names
+# unchanged. The model holds no Relay token, so the adapter creates the request
+# (``POST /v1/payment_requests``) and sends the ``checkout_url`` it returns as
+# the ``payment`` part. A payment must be the only part of its Message, so the
+# words around the block go out first and the payment follows as its own,
+# final Message. The checks are the server's own (Relay-Server
+# server/src/payments.ts createPaymentRequestSchema at 51bc3ecd).
 PAYMENT_FENCE = "payment"
-PAYMENT_URL_MAX_LENGTH = 2_048
+PAYMENT_DESCRIPTION_MAX_LENGTH = 32
+PAYMENT_IMAGE_URL_MAX_LENGTH = 2_048
+PAYMENT_CATEGORIES = ("physical_goods", "digital_goods", "donation")
+PAYMENT_MODES = ("payment", "subscription")
+# The create fields the block may carry. metadata, customer_id and discount are
+# the developer's own records and Stripe ids, never the model's to write.
+PAYMENT_BLOCK_FIELDS = (
+    "description", "amount", "currency", "category",
+    "mode", "price_id", "quantity", "image_url",
+)
 
-# What the model cannot know about a payment: where the url comes from, and
-# that the card travels alone.
+# What the model cannot know about a payment: the fields and the categories.
 PAYMENT_GUIDANCE = " ".join([
-    "checkout_url is the one POST /v1/payment_requests returned for a request your agent created, exactly as returned; the card reads its amount and title from that request.",
+    "description is the card's title, 1 to 32 characters; amount is in the currency's minor units (2400 is 24.00).",
+    "For a subscription, send \"mode\": \"subscription\" and a \"price_id\", with an optional \"quantity\", instead of amount and currency. An optional \"image_url\" is the product picture.",
+    "category: physical_goods for physical things and real-world services; digital_goods for digital content and tips; donation for a charity or fundraiser.",
     "The payment card is a message of its own, sent after your words, with no buttons or selection in the same answer.",
 ])
 
@@ -1712,7 +1722,8 @@ PAYMENT_GUIDANCE = " ".join([
 PAYMENT_BLOCK_INSTRUCTION = (
     "To ask the person to pay, end your answer with a fenced code block tagged `"
     + PAYMENT_FENCE
-    + "` holding one JSON object: {\"checkout_url\": \"...\"}. "
+    + "` holding one JSON object: {\"description\": \"...\", \"amount\": 2400, "
+    "\"currency\": \"usd\", \"category\": \"physical_goods\"}. "
     "The block is removed from your words and drawn as its own payment card, sent after them."
 )
 
@@ -1728,54 +1739,119 @@ _BUTTONS_OR_SELECTION_FENCE_RE = re.compile(
 )
 
 
+def _json_integer(value: Any) -> Optional[int]:
+    """The integer a JSON number holds, as ``Number.isInteger`` reads it.
+
+    ``2400.0`` and ``2.4e3`` are integers to JavaScript; ``true`` is not.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _reject_json_constant(name: str) -> Any:
     # ``JSON.parse`` has no NaN or Infinity; Python's reader would take them.
     raise ValueError(f"{name} is not JSON")
 
 
-def payment_part(parsed: Any) -> Union[Dict[str, Any], str]:
-    """A ``payment`` part from a decoded fields object or whole part, or why not.
+def payment_request_fields(parsed: Any) -> Union[Dict[str, Any], str]:
+    """The ``POST /v1/payment_requests`` body a block holds, or why not.
 
     The checks are the server's own, so a bad value fails here with a
-    readable reason instead of a 400 from the API. ``checkout_url`` is sent
-    exactly as written: the server matches it byte for byte against the
-    agent's own payment requests.
+    readable reason instead of a 400 from the API. Values go out as written;
+    the server trims ``description`` and lowercases ``currency`` itself.
     """
     if not isinstance(parsed, dict):
         return "the payment block must be a JSON object"
-    unknown = [key for key in parsed if key not in ("type", "checkout_url")]
+    unknown = [key for key in parsed if key not in PAYMENT_BLOCK_FIELDS]
     if unknown:
         return f"payment has unknown field {unknown[0]}"
-    if "type" in parsed and parsed["type"] != "payment":
-        return "payment part needs type payment"
-    checkout_url = parsed.get("checkout_url")
+    fields: Dict[str, Any] = {}
+    description = parsed.get("description")
+    # Code points, the server's count ([...value].length), after its trim.
     if (
-        not isinstance(checkout_url, str)
-        or not checkout_url
-        or utf16_len(checkout_url) > PAYMENT_URL_MAX_LENGTH
+        not isinstance(description, str)
+        or not 1 <= len(description.strip()) <= PAYMENT_DESCRIPTION_MAX_LENGTH
     ):
         return (
-            "payment checkout_url is not a string of 1 to "
-            f"{PAYMENT_URL_MAX_LENGTH} characters"
+            "payment description must be 1 to "
+            f"{PAYMENT_DESCRIPTION_MAX_LENGTH} characters"
         )
-    return {"type": "payment", "checkout_url": checkout_url}
+    fields["description"] = description
+    if parsed.get("category") not in PAYMENT_CATEGORIES:
+        return "payment category must be physical_goods, digital_goods or donation"
+    fields["category"] = parsed["category"]
+    mode = parsed.get("mode", "payment")
+    if mode not in PAYMENT_MODES:
+        return "payment mode must be payment or subscription"
+    if "mode" in parsed:
+        fields["mode"] = mode
+    if "amount" in parsed:
+        amount = _json_integer(parsed["amount"])
+        if amount is None:
+            return "payment amount must be an integer"
+        fields["amount"] = amount
+    if "currency" in parsed:
+        currency = parsed["currency"]
+        if not isinstance(currency, str) or not re.fullmatch(r"[A-Za-z]{3}", currency):
+            return "payment currency must be a 3-letter code"
+        fields["currency"] = currency
+    if "price_id" in parsed:
+        price_id = parsed["price_id"]
+        if not isinstance(price_id, str) or not price_id:
+            return "payment price_id must be a nonempty string"
+        fields["price_id"] = price_id
+    if "quantity" in parsed:
+        quantity = _json_integer(parsed["quantity"])
+        if quantity is None or quantity < 1:
+            return "payment quantity must be an integer of at least 1"
+        fields["quantity"] = quantity
+    if "image_url" in parsed:
+        image_url = parsed["image_url"]
+        if (
+            not isinstance(image_url, str)
+            or not 1 <= utf16_len(image_url) <= PAYMENT_IMAGE_URL_MAX_LENGTH
+        ):
+            return (
+                "payment image_url is not a string of 1 to "
+                f"{PAYMENT_IMAGE_URL_MAX_LENGTH} characters"
+            )
+        fields["image_url"] = image_url
+    if mode == "payment":
+        for name in ("amount", "currency"):
+            if name not in fields:
+                return f"payment {name} is required in payment mode"
+        for name in ("price_id", "quantity"):
+            if name in fields:
+                return f"payment {name} is for subscription mode only"
+    else:
+        if "price_id" not in fields:
+            return "payment price_id is required in subscription mode"
+        for name in ("amount", "currency"):
+            if name in fields:
+                return f"payment {name} must be omitted in subscription mode"
+    return fields
 
 
 def parse_payment_block(body: str) -> Union[Dict[str, Any], str]:
-    """A ``payment`` part from one block's body, or why it cannot be one."""
+    """The payment request fields in one block's body, or why they cannot be."""
     try:
         parsed = json.loads(body, parse_constant=_reject_json_constant)
     except ValueError:
         return "the payment block is not valid JSON"
-    return payment_part(parsed)
+    return payment_request_fields(parsed)
 
 
 def split_payment(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
     """Lift the one payment block out of an answer.
 
-    Returns ``(text, payment_part, error)``. The payment is never attached to
-    the words: ``text`` is what goes out first, as its own Message(s), and may
-    be empty. A block that cannot be read, a second one, or buttons or a
+    Returns ``(text, request_fields, error)``. The payment is never attached
+    to the words: ``text`` is what goes out first, as its own Message(s), and
+    may be empty. A block that cannot be read, a second one, or buttons or a
     selection in the same answer leave the answer untouched and name the
     reason, the handling selection uses for selection beside buttons.
     """
@@ -1785,9 +1861,9 @@ def split_payment(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[
     if len(matches) != 1 or _BUTTONS_OR_SELECTION_FENCE_RE.search(answer):
         return answer, None, "send one payment and nothing else in the same message"
     match = matches[0]
-    part = parse_payment_block(match.group(2))
-    if isinstance(part, str):
-        return answer, None, part
+    fields = parse_payment_block(match.group(2))
+    if isinstance(fields, str):
+        return answer, None, fields
     before = answer[:match.start()].rstrip()
     after = answer[match.end():].lstrip()
-    return "\n\n".join(filter(None, [before, after])), part, None
+    return "\n\n".join(filter(None, [before, after])), fields, None
