@@ -569,6 +569,132 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/location/request:
+    post:
+      operationId: requestLocation
+      summary: Request a person's location
+      description: >-
+        Ask the person in this one-to-one chat to share their location. The
+        chat gets a new Message from your agent carrying one
+        `location_request` part; the person chooses whether to share and for
+        how long. The request does not return coordinates: subscribe to
+        `location.sharing.started`, then read the location with
+        `GET /v1/chats/{chatId}/location`. Returns 409 while the person is
+        already sharing in this chat, and for a group chat or a chat with no
+        person. Rate limited per chat, since each request prompts the person:
+        one request per chat per 60 seconds, then 429 with `Retry-After`.
+      tags: [Chats]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: One-to-one chat between your agent and a person.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The request was sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocationRequestResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The person is already sharing, or the chat is not a one-to-one chat with a person.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                already_sharing:
+                  summary: The person is already sharing their location
+                  value:
+                    error:
+                      status: 409
+                      code: 1005
+                      message: This person is already sharing their location. Read it with GET /v1/chats/{chatId}/location.
+                      doc_url: https://docs.relayapp.im/error/codes/1xxx/1005
+                    success: false
+                group_chat:
+                  summary: Group chats are not supported
+                  value:
+                    error:
+                      status: 409
+                      code: 2016
+                      message: Location sharing is not supported in group chats.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2016
+                    success: false
+                no_person:
+                  summary: The chat has no person
+                  value:
+                    error:
+                      status: 409
+                      code: 2017
+                      message: Location sharing works only between a person and an agent.
+                      doc_url: https://docs.relayapp.im/error/codes/2xxx/2017
+                    success: false
+        "429":
+          description: >-
+            A location request already went to this chat in the last 60
+            seconds (error code `2008`). Wait `retry_after` seconds, which the
+            `Retry-After` header repeats.
+          headers:
+            Retry-After:
+              description: Seconds to wait before requesting again.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/chats/{chatId}/location:
+    get:
+      operationId: getLocation
+      summary: Get shared locations
+      description: >-
+        Read the current location of everyone sharing with your agent in this
+        chat. `data` is a GeoJSON FeatureCollection (RFC 7946) with one
+        Feature per person sharing; `coordinates` are `[longitude, latitude]`.
+        `features` is empty when nobody is sharing: never shared, stopped, or
+        past the share's end. There is no webhook per position update; poll
+        this route and use `properties.updated_at` to judge freshness. The
+        response is not cached.
+      tags: [Chats]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Chat in which your agent is an active participant.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current shared locations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetChatLocationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /v1/chats/{chatId}/typing:
     post:
       operationId: startTyping
@@ -2830,6 +2956,192 @@ components:
               const: call.ended
             data:
               $ref: "#/components/schemas/CallResult"
+    LocationRequestResponse:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+          const: true
+        message:
+          type: string
+          const: Location request sent
+    GetChatLocationResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          required: [type, features]
+          properties:
+            type:
+              type: string
+              const: FeatureCollection
+            features:
+              type: array
+              items:
+                $ref: "#/components/schemas/LocationFeature"
+    LocationFeature:
+      type: object
+      required: [type, geometry, properties]
+      properties:
+        type:
+          type: string
+          const: Feature
+        geometry:
+          type: object
+          required: [type, coordinates]
+          properties:
+            type:
+              type: string
+              const: Point
+            coordinates:
+              type: array
+              description: "[longitude, latitude]"
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
+        properties:
+          type: object
+          required: [handle, updated_at]
+          properties:
+            handle:
+              type: string
+              description: Handle of the person sharing.
+            updated_at:
+              type: string
+              format: date-time
+              description: When this position arrived.
+    LocationRequestPartResponse:
+      type: object
+      description: >-
+        A request for the person's location, sent by an agent with
+        `POST /v1/chats/{chatId}/location/request`. It cannot be sent as a
+        message part. A client that does not draw it shows the Message's text,
+        "<agent display name> requested your location".
+      required: [type, reactions]
+      properties:
+        type:
+          type: string
+          enum: [location_request]
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+    LocationPartResponse:
+      type: object
+      description: >-
+        A person's location share, the card the person's app draws. It carries
+        the share's state, not its position: read the position with
+        `GET /v1/chats/{chatId}/location`. It cannot be sent as a message part.
+        A share whose `ends_at` has passed reads as `ended` with `ended_at`
+        equal to `ends_at`.
+      required: [type, state, began_at, ends_at, ended_at, reactions]
+      properties:
+        type:
+          type: string
+          enum: [location]
+        state:
+          type: string
+          enum: [live, ended]
+        began_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        ends_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the share ends by itself; null when it has no end.
+        ended_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
+    LocationSharingStartedEvent:
+      type: object
+      required: [shared_by, shared_with, chat_id, began_at, ends_at]
+      properties:
+        shared_by:
+          type: string
+          description: Handle of the person who started sharing.
+        shared_with:
+          type: string
+          description: Handle of your agent.
+        chat_id:
+          type: string
+          format: uuid
+        began_at:
+          type: string
+          format: date-time
+        ends_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: When the share ends by itself; null when it has no end.
+    LocationSharingStoppedEvent:
+      type: object
+      required: [shared_by, shared_with, chat_id, began_at, ended_at]
+      properties:
+        shared_by:
+          type: string
+          description: Handle of the person who stopped sharing.
+        shared_with:
+          type: string
+          description: Handle of your agent.
+        chat_id:
+          type: string
+          format: uuid
+        began_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          description: When the share ended. Equals the share's `ends_at` when it ran out.
+    LocationSharingStartedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: location.sharing.started
+            data:
+              $ref: "#/components/schemas/LocationSharingStartedEvent"
+    LocationSharingStoppedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: location.sharing.stopped
+            data:
+              $ref: "#/components/schemas/LocationSharingStoppedEvent"
     AddParticipantRequest:
       type: object
       required:
@@ -3500,6 +3812,32 @@ components:
           description: Agents only.
         visibility:
           $ref: "#/components/schemas/AgentVisibility"
+        creator:
+          description: >-
+            Who made the agent: its organization, by the name the organization
+            gave in the Relay Console. Null when the organization has not
+            given a name. Agents only.
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - kind
+                - name
+                - handle
+              properties:
+                kind:
+                  type: string
+                  enum:
+                    - organization
+                name:
+                  type: string
+                  minLength: 1
+                handle:
+                  type:
+                    - string
+                    - "null"
+                  description: The maker's Relay Handle. Null until Relay stores one.
+            - type: "null"
     AgentCategory:
       type: string
       description: Where the directory files the agent.
@@ -3799,6 +4137,7 @@ components:
         - handle
         - first_name
         - is_active
+        - is_verified
         - kind
         - last_name
         - image_url
@@ -3826,6 +4165,9 @@ components:
             Relay could not read the picture.
         is_active:
           type: boolean
+        is_verified:
+          type: boolean
+          description: Whether Relay has verified this agent. Always false for a user.
         handle:
           type: string
           description: Relay Handle associated with this contact card.
@@ -4687,6 +5029,8 @@ components:
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
+              - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/LocationPartResponse"
               - $ref: "#/components/schemas/SystemPartResponse"
         reply_to:
           oneOf:
@@ -4878,6 +5222,8 @@ components:
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
+              - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/LocationPartResponse"
             discriminator:
               propertyName: type
               mapping:
@@ -4889,6 +5235,8 @@ components:
                 selection_response: "#/components/schemas/SelectionResponsePartResponse"
                 payment: "#/components/schemas/PaymentPartResponse"
                 payment_receipt: "#/components/schemas/PaymentReceiptPartResponse"
+                location_request: "#/components/schemas/LocationRequestPartResponse"
+                location: "#/components/schemas/LocationPartResponse"
         sent_at:
           type:
             - string
@@ -5507,6 +5855,8 @@ components:
               - $ref: "#/components/schemas/SelectionResponsePartResponse"
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
+              - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/LocationPartResponse"
         created_at:
           type: string
           format: date-time
@@ -6268,6 +6618,8 @@ components:
         - payment.succeeded
         - payment.canceled
         - payment.expired
+        - location.sharing.started
+        - location.sharing.stopped
     WebhookEventsResult:
       type: object
       required:
@@ -6981,6 +7333,38 @@ x-relay-webhooks:
           application/json:
             schema:
               $ref: "#/components/schemas/PaymentExpiredWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  location.sharing.started.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookLocationSharingStartedV20260830
+      summary: Location sharing started
+      description: A person started sharing their location with your agent. Read the position with GET /v1/chats/{chatId}/location. No event fires when the position moves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationSharingStartedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  location.sharing.stopped.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookLocationSharingStoppedV20260830
+      summary: Location sharing stopped
+      description: A person stopped sharing their location with your agent, or the share reached its end (within about a minute of ends_at).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationSharingStoppedWebhook"
       responses:
         "200":
           description: Webhook received successfully
