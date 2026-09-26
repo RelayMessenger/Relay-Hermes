@@ -117,10 +117,16 @@ jobs:
     timeout-minutes: 20
     env:
       MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
+      # The git pin predates Python 3.14; the 3.14 leg runs on Hermes main,
+      # which the official installer delivers with Python 3.14.7.
+      HERMES_REF: ${{ matrix.hermes-commit || 'b2aa855b626ff8688eb34b95c60ee8b6a4af3679' }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - python-version: "3.14"
+            hermes-commit: f077152871798b8a666daf48333d123549d10672
 
     steps:
       - name: Check out the exact plugin source
@@ -137,13 +143,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NousResearch/hermes-agent
-          ref: ${{ env.HERMES_AGENT_COMMIT }}
+          ref: ${{ env.HERMES_REF }}
           path: _hermes-agent
           persist-credentials: false
 
       - name: Verify the Hermes source
         run: |
-          test "$(git -C "$HERMES_AGENT_SRC" rev-parse HEAD)" = "$HERMES_AGENT_COMMIT"
+          test "$(git -C "$HERMES_AGENT_SRC" rev-parse HEAD)" = "$HERMES_REF"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -163,11 +169,24 @@ jobs:
         # commit, read from its own pyproject.toml rather than a hand-kept
         # list here. Hermes refuses wheel builds by design (setup.py guard);
         # the editable install is its supported path.
+        if: matrix.python-version != '3.14'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e "$HERMES_AGENT_SRC"
           python -m pip install -e ".[dev]"
           python -m pip check
+
+      - name: Install Hermes main and the plugin on Python 3.14
+        # Hermes main's package version is the placeholder 0.0.0 (its commit
+        # 9cc319f9a1), which pip reads as outside hermes-agent>=0.19.0; Hermes
+        # PM drops that self-dependency (pm/plugin_declarations.py
+        # applicable_requirements), so the plugin goes in without it here too.
+        if: matrix.python-version == '3.14'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "$HERMES_AGENT_SRC"
+          python -m pip install --no-deps -e .
+          python -m pip install "pytest>=8" "pyyaml>=6"
 
       - name: Download the one CI-built distribution pair
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -200,6 +219,8 @@ jobs:
           test "$wrong_origin_rc" -eq 2
 
       - name: Run Hermes Plugin Doctor on the exact sdist
+        # Packaging is proven on the pinned release line (3.11-3.13).
+        if: matrix.python-version != '3.14'
         run: |
           doctor_root="${RUNNER_TEMP}/relay-hermes-doctor-${MATRIX_PYTHON_VERSION}"
           mkdir -p "$doctor_root"
@@ -216,6 +237,8 @@ jobs:
           PY
 
       - name: Clean-install the exact wheel and sdist
+        # Packaging is proven on the pinned release line (3.11-3.13).
+        if: matrix.python-version != '3.14'
         run: |
           wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
           sdist_venv="${RUNNER_TEMP}/relay-hermes-sdist-${MATRIX_PYTHON_VERSION}"
@@ -249,6 +272,8 @@ jobs:
           done
 
       - name: Run Hermes against the exact clean wheel
+        # Packaging is proven on the pinned release line (3.11-3.13).
+        if: matrix.python-version != '3.14'
         run: |
           wheel_venv="${RUNNER_TEMP}/relay-hermes-wheel-${MATRIX_PYTHON_VERSION}"
           hermes_home="${RUNNER_TEMP}/hermes-wheel-home-${MATRIX_PYTHON_VERSION}"
@@ -289,9 +314,11 @@ jobs:
       HERMES_GUARD_SRC: ${{ github.workspace }}/_hermes-main
     steps:
       - name: Check out the exact plugin source
+        # Its own folder: the scan covers exactly what a clone holds.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SOURCE_SHA }}
+          path: relay-hermes
           persist-credentials: false
 
       - name: Check out Hermes main at its pinned commit
@@ -311,6 +338,7 @@ jobs:
         run: |
           test "$(git -C "$HERMES_GUARD_SRC" rev-parse HEAD)" = "$HERMES_MAIN_COMMIT"
           python -m pip install --disable-pip-version-check "pytest>=8"
+          cd relay-hermes
           python -m pytest -q tests/test_hermes_install_scan.py -p no:cacheprovider
 
   # The durable inbox opens SQLite by pathname and walks its directory without

@@ -377,15 +377,15 @@ WINDOWS_MAX_PATH = 260
 
 
 def test_every_tracked_path_fits_hermes_windows_workspace():
+    import subprocess
+
+    # What `hermes plugins install` clones: the tracked tree. CI keeps other
+    # checkouts (_hermes-agent) and build output beside it, untracked.
     root = MANIFEST.parent
-    skipped = {".git", "__pycache__", ".pytest_cache", ".venv", "venv", "build", "dist"}
-    paths = [
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-        and not skipped.intersection(path.relative_to(root).parts)
-        and not any(part.endswith(".egg-info") for part in path.parts)
-    ]
+    listed = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True,
+    )
+    paths = listed.stdout.split()
     assert paths
     longest = max(paths, key=len)
     assert WINDOWS_MEMBER_PREFIX + 1 + len(longest) < WINDOWS_MAX_PATH - 12, longest
