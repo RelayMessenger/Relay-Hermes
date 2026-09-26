@@ -40,23 +40,18 @@ def plugin():
     return importlib.import_module("relay_hermes.adapter")
 
 
-# The person relay_event() says sent each message, and who owns the agent.
-OWNER_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
-OWNER_HANDLE = "advait"
+# The person relay_event() says sent each message.
+PERSON_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
+PERSON_HANDLE = "advait"
 
 
 def make_adapter(plugin, tmp_path):
-    """An adapter whose owner is relay_event()'s sender, as connect learns it."""
     from gateway.config import PlatformConfig
 
-    adapter = plugin.RelayAdapter(PlatformConfig(extra={
+    return plugin.RelayAdapter(PlatformConfig(extra={
         "token": "relay-test-token",
         "state_dir": str(tmp_path),
     }))
-    adapter._owner_ids = {OWNER_ID}
-    adapter._owner_handle = OWNER_HANDLE
-    adapter._admit_principal(OWNER_ID)
-    return adapter
 
 
 class FakeClient:
@@ -69,18 +64,6 @@ class FakeClient:
 
     async def mark_read(self, chat_id: str) -> None:
         self.reads.append(chat_id)
-
-    async def get_me(self) -> Dict[str, Any]:
-        return {
-            "id": "01993d50-ef7b-7b37-886b-23fd80c7ec13",
-            "handle": "relay_agent",
-            "kind": "agent",
-            "display_name": "Agent",
-            "owner": {"kind": "user", "handle": OWNER_HANDLE, "display_name": "Advait"},
-            "owner_people": [
-                {"id": OWNER_ID, "handle": OWNER_HANDLE, "display_name": "Advait"},
-            ],
-        }
 
     async def send_message(
         self,
@@ -890,81 +873,6 @@ def test_env_enablement_keeps_chat_allowlist_without_operator_support(
     assert "RELAY_ALLOW_ALL_CONTACTS" not in os.environ
 
 
-def test_without_an_allowlist_only_the_owner_and_the_owners_agents_are_admitted(
-    plugin, tmp_path,
-):
-    """Connected agents answer only their owner by default (ruling 2026-09-25).
-
-    Hermes's own gateway denies everyone no allowlist names; the owner is the
-    one principal Relay can name without asking, from GET /v1/me.
-    """
-    from gateway.config import PlatformConfig
-
-    config = PlatformConfig(extra={"token": "relay-test-token", "state_dir": str(tmp_path)})
-    adapter = plugin.RelayAdapter(config)
-    assert config.extra["allowed_users"] == [] and config.extra["allow_from"] == []
-    adapter._client = FakeClient()
-    asyncio.run(adapter._learn_owner())
-
-    owner = {"id": OWNER_ID, "kind": "user", "handle": OWNER_HANDLE}
-    own_agent = {
-        "id": "own-agent", "kind": "agent", "handle": "helper",
-        "owner": {"kind": "user", "handle": OWNER_HANDLE, "display_name": "Advait"},
-    }
-    other_agent = {
-        "id": "other-agent", "kind": "agent", "handle": "stranger",
-        "owner": {"kind": "user", "handle": "someone_else", "display_name": "Else"},
-    }
-    stranger = {"id": "stranger", "kind": "user", "handle": "stranger"}
-    assert adapter._admits(owner) is True
-    assert adapter._admits(own_agent) is True
-    assert adapter._admits(other_agent) is False
-    assert adapter._admits(stranger) is False
-    # Hermes's gate reads the same lists, so it agrees with each admission.
-    assert config.extra["allowed_users"] == [OWNER_ID, "own-agent"]
-    assert config.extra["group_allow_from"] == [OWNER_ID, "own-agent"]
-
-
-def test_an_explicit_star_allowlist_admits_everyone(plugin, tmp_path):
-    from gateway.config import PlatformConfig
-
-    adapter = plugin.RelayAdapter(PlatformConfig(extra={
-        "token": "relay-test-token", "state_dir": str(tmp_path), "allowed_contacts": "*",
-    }))
-    assert adapter._admits({"id": "anyone", "kind": "agent"}) is True
-
-
-def test_a_different_owners_agent_is_ignored_without_a_turn(plugin, tmp_path, monkeypatch):
-    adapter = make_adapter(plugin, tmp_path)
-    adapter._inbox.open()
-    payload = relay_event("event-stranger")
-    payload["data"]["sender_handle"] = {
-        "id": "other-agent", "handle": "stranger", "kind": "agent",
-        "owner": {"kind": "user", "handle": "someone_else", "display_name": "Else"},
-    }
-    assert adapter._inbox.accept("1", payload) is True
-    dispatched = []
-
-    async def capture(inbound):
-        dispatched.append(inbound)
-        return True
-
-    original_complete = adapter._inbox.complete
-
-    def stop(event_id, *, ignored=False):
-        original_complete(event_id, ignored=ignored)
-        adapter._running = False
-
-    monkeypatch.setattr(adapter, "_on_inbound", capture)
-    monkeypatch.setattr(adapter._inbox, "complete", stop)
-    adapter._message_handler = object()
-    adapter._running = True
-    asyncio.run(adapter._process_inbox())
-    assert dispatched == []
-    assert adapter._inbox.status("event-stranger") == "ignored"
-    adapter._inbox.close()
-
-
 def test_ordinary_contacts_continue_to_dispatch_normal_chat(
     plugin,
     tmp_path,
@@ -979,7 +887,7 @@ def test_ordinary_contacts_continue_to_dispatch_normal_chat(
     })
     adapter = plugin.RelayAdapter(config)
 
-    assert adapter._admits({"id": "ordinary-contact"}) is True
+    assert adapter._allow_contact("ordinary-contact") is True
     assert config.extra["allowed_users"] == ["ordinary-contact"]
     dispatched = []
 
@@ -1148,8 +1056,7 @@ def test_multiplexed_profiles_never_fall_through_to_process_relay_settings(
     assert profile_b._base_url == plugin.DEFAULT_BASE_URL
     assert profile_b._allowed_contacts == set()
     assert profile_b._inbox.path.parent == tmp_path / "profile-b" / "relay"
-    # No allowlist: Hermes's gate denies until connect learns the owner.
-    assert config_b.extra["allowed_users"] == []
+    assert config_b.extra["allowed_users"] == ["*"]
     assert "allow_admin_from" not in config_b.extra
 
     assert profile_a._inbox.path != profile_b._inbox.path
@@ -1663,14 +1570,14 @@ def test_reaction_inbound_hook(plugin, tmp_path, action, registered):
     payload["event_type"] = "reaction." + action
     payload["data"] = {
         "chat_id": "chat", "message_id": "message", "part_index": 0,
-        "from_handle": {"id": OWNER_ID}, "is_from_me": False,
+        "from_handle": {"id": "contact"}, "is_from_me": False,
         "reaction_type": "custom", "custom_emoji": "\U0001f44d", "reacted_at": "now",
     }
     assert asyncio.run(adapter._handle_non_message_event(payload)) is True
     if registered:
         handler.assert_awaited_once_with({
             "platform": "relayapp", "event_name": "reaction:" + action,
-            "reaction": "\U0001f44d", "user_id": OWNER_ID, "item_user_id": None,
+            "reaction": "\U0001f44d", "user_id": "contact", "item_user_id": None,
             "item_type": "message", "channel_id": "chat", "message_ts": "message",
             "team_id": "", "event_ts": "now", "raw_event": payload,
         })
@@ -1735,7 +1642,7 @@ def test_inbox_routes_non_message_events(plugin, tmp_path, kind):
     payload = relay_event()
     payload["event_type"] = kind
     payload["data"] = {"message_id": "message", "chat_id": "chat",
-                       "from_handle": {"id": OWNER_ID}, "reaction_type": "like"}
+                       "from_handle": {"id": "contact"}, "reaction_type": "like"}
     adapter._inbox = Mock()
     adapter._inbox.next_pending.return_value = (payload["event_id"], payload)
     adapter._message_handler = AsyncMock()
@@ -2595,7 +2502,7 @@ def _agent_event(plugin, adapter, event_id, message_id, *, opening="text"):
     data["id"] = message_id
     data["sender_handle"] = {
         "id": "own-agent", "handle": "helper", "kind": "agent",
-        "owner": {"kind": "user", "handle": OWNER_HANDLE, "display_name": "Advait"},
+        "owner": {"kind": "user", "handle": PERSON_HANDLE, "display_name": "Advait"},
     }
     if opening == "buttons":
         data["parts"] = [{"type": "buttons", "items": [{"label": "Yes"}]}]

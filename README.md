@@ -173,7 +173,7 @@ The CLI writes these settings to `<HERMES_HOME>/.env`:
 - `RELAY_AGENT_TOKEN` is the required Agent Token.
 - `RELAY_BASE_URL` is the agent's API origin. The adapter default is `https://api.relayapp.im`.
 - `RELAY_STATE_DIR` is the durable inbox directory, set to `<HERMES_HOME>/relay`.
-- `RELAY_ALLOWED_CONTACTS` is an optional comma-separated list of Contact ids allowed to start turns; `*` allows everyone. The CLI writes it only when set. Unset, the agent answers only its owner and the owner's own agents, read from `GET /v1/me` when the gateway connects. Messages from anyone else are acknowledged and ignored, as Hermes's own gateway denies everyone its allowlists do not name.
+- `RELAY_ALLOWED_CONTACTS` is an optional comma-separated list of Contact ids allowed to start turns. The CLI writes it only when set; unset allows all reachable Contacts.
 
 Additional adapter settings:
 

@@ -660,11 +660,6 @@ class RelayClient:
     async def stop_typing(self, chat_id: str) -> None:
         await self._request("DELETE", f"/v1/chats/{quote(chat_id, safe='')}/typing")
 
-    async def get_me(self) -> Dict[str, Any]:
-        """``GET /v1/me``: this agent, its owner and the people who run it."""
-        response = await self._request("GET", "/v1/me")
-        return response.body if isinstance(response.body, dict) else {}
-
     async def get_message(self, message_id: str) -> Dict[str, Any]:
         response = await self._request("GET", f"/v1/messages/{quote(message_id, safe='')}")
         return response.body if isinstance(response.body, dict) else {}

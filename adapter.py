@@ -227,26 +227,20 @@ def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
 
 
 def _install_access_policy(config: PlatformConfig) -> set[str]:
-    """Mirror the Contact allowlist into Hermes's central chat gate.
-
-    An explicit ``RELAY_ALLOWED_CONTACTS`` (or ``allowed_contacts``) is the
-    list; ``*`` admits everyone. With neither, the agent answers only its
-    owner, as the owner ruled for connected agents on 2026-09-25 and as
-    Hermes's own gateway denies everyone no allowlist names (Hermes security
-    guide, "If no allowlists are configured ... all users are denied"). The
-    owner is learned from ``GET /v1/me`` at connect; until then Hermes's gate
-    holds an empty list, which denies.
-    """
+    """Mirror the Contact allowlist into Hermes's central chat gate."""
 
     extra = dict(getattr(config, "extra", {}) or {})
     config.extra = extra
     allowed_contacts = _resolve_contact_allowlist(extra)
-    chat_principals = sorted(allowed_contacts)
-    # New lists: the adapter adds principals it admits (the owner, the
-    # owner's own agents) to these same objects, which Hermes's gate reads.
-    extra["allowed_users"] = list(chat_principals)
-    extra["allow_from"] = list(chat_principals)
-    extra["group_allow_from"] = list(chat_principals)
+
+    # The adapter enforces allowed_contacts before dispatch. Mirroring the
+    # same decision here lets Hermes's central chat gate accept only messages
+    # that this profile's adapter admitted. "*" preserves Relay's documented
+    # default that every reachable Contact may chat.
+    chat_principals = sorted(allowed_contacts) or ["*"]
+    extra["allowed_users"] = chat_principals
+    extra["allow_from"] = chat_principals
+    extra["group_allow_from"] = chat_principals
     return allowed_contacts
 
 
@@ -437,9 +431,6 @@ class RelayAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
 
         self._allowed_contacts = _install_access_policy(config)
-        # Filled from GET /v1/me at connect when no allowlist is configured.
-        self._owner_ids: set = set()
-        self._owner_handle = ""
         extra = config.extra
         self._base_url = normalize_base_url(_configured_base_url(extra))
         self._token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
@@ -550,7 +541,6 @@ class RelayAdapter(BasePlatformAdapter):
             self._apply_full_snapshot(self._inbox.load_full_snapshot())
             self._client = RelayClient(self._token, self._base_url)
             self._client.open()
-            await self._learn_owner()
         except RelayStateBindingError as error:
             self._set_fatal_error(
                 "relay_state_account_mismatch",
@@ -661,73 +651,8 @@ class RelayAdapter(BasePlatformAdapter):
 
     # -- Receive -----------------------------------------------------------
 
-    def _admits(self, sender: Any) -> bool:
-        """Whether this Relay Contact may talk to the agent.
-
-        ``sender`` is a message's ``sender_handle`` or a reaction's
-        ``from_handle``. An explicit allowlist decides alone. Otherwise the
-        owner may, and so may the owner's own agents: an agent whose handle
-        names the same owning person (``ChatHandle.owner``), as the 9/25
-        ruling admits "the owner and the owner's own agents".
-        """
-        if not isinstance(sender, dict):
-            return False
-        contact_id = str(sender.get("id") or "")
-        if not contact_id:
-            return False
-        if self._allowed_contacts:
-            return "*" in self._allowed_contacts or contact_id in self._allowed_contacts
-        if contact_id in self._owner_ids:
-            return True
-        owner = sender.get("owner")
-        if (
-            sender.get("kind") == "agent"
-            and self._owner_handle
-            and isinstance(owner, dict)
-            and owner.get("kind") == "user"
-            and owner.get("handle") == self._owner_handle
-        ):
-            self._admit_principal(contact_id)
-            return True
-        return False
-
-    def _admit_principal(self, contact_id: str) -> None:
-        """Let Hermes's own chat gate agree with a sender this adapter admits."""
-        extra = self.config.extra
-        for key in ("allowed_users", "allow_from", "group_allow_from"):
-            principals = extra.get(key)
-            if isinstance(principals, list) and contact_id not in principals:
-                principals.append(contact_id)
-
-    async def _learn_owner(self) -> None:
-        """Read the agent's owner once per connect when no allowlist is set."""
-        if self._allowed_contacts or self._client is None:
-            return
-        me = await self._client.get_me()
-        people = me.get("owner_people") if isinstance(me.get("owner_people"), list) else []
-        self._owner_ids = {
-            str(person.get("id"))
-            for person in people
-            if isinstance(person, dict) and person.get("id")
-        }
-        owner = me.get("owner") if isinstance(me.get("owner"), dict) else {}
-        self._owner_handle = (
-            str(owner.get("handle") or "") if owner.get("kind") == "user" else ""
-        )
-        for contact_id in sorted(self._owner_ids):
-            self._admit_principal(contact_id)
-        if self._owner_ids:
-            logger.info(
-                "[%s] answering only this agent's owner and the owner's agents; "
-                "set RELAY_ALLOWED_CONTACTS to choose who else may talk to it",
-                self.name,
-            )
-        else:
-            logger.warning(
-                "[%s] Relay names no owner for this agent, so nobody is admitted; "
-                "set RELAY_ALLOWED_CONTACTS to the Contact ids that may talk to it",
-                self.name,
-            )
+    def _allow_contact(self, contact_id: str) -> bool:
+        return not self._allowed_contacts or contact_id in self._allowed_contacts
 
     async def _run_websocket(self) -> None:
         assert self._client is not None
@@ -923,7 +848,7 @@ class RelayAdapter(BasePlatformAdapter):
                 if inbound is None:
                     self._inbox.complete(event_id, ignored=True)
                     continue
-                if not self._admits(inbound.message.get("sender_handle")):
+                if not self._allow_contact(inbound.sender_contact_id):
                     self._inbox.complete(event_id, ignored=True)
                     continue
                 dispatched = await self._on_inbound(inbound)
@@ -949,7 +874,7 @@ class RelayAdapter(BasePlatformAdapter):
             return False
         sender = data.get("from_handle") or {}
         handler = self._reaction_handler
-        if handler is None or data.get("is_from_me") or not self._admits(sender):
+        if handler is None or data.get("is_from_me") or not self._allow_contact(sender.get("id")):
             self._inbox.complete(event_id, ignored=True)
             return True
         # Hermes Slack adapter's reaction hook envelope (including its field names).
