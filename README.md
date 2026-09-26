@@ -139,8 +139,15 @@ to `<HERMES_HOME>/.env` and offers to start the gateway for you.
 To install the plugin manually instead:
 
 ```sh
-hermes plugins install RelayMessenger/Relay-Hermes --enable
+hermes plugins install RelayMessenger/Relay-Hermes --no-enable
+hermes plugins enable relay-hermes
 ```
+
+These two commands never prompt, so they work from a script. Hermes's own
+plugin guide gives this split: `install --enable` still asks before it
+prepares the plugin's Python dependencies, and without a terminal it skips
+them and leaves the plugin disabled ("dependency install skipped
+(non-interactive)"). `hermes plugins enable` prepares them without a prompt.
 
 Then set the connection settings below in `<HERMES_HOME>/.env`.
 
@@ -166,13 +173,13 @@ The CLI writes these settings to `<HERMES_HOME>/.env`:
 - `RELAY_AGENT_TOKEN` is the required Agent Token.
 - `RELAY_BASE_URL` is the agent's API origin. The adapter default is `https://api.relayapp.im`.
 - `RELAY_STATE_DIR` is the durable inbox directory, set to `<HERMES_HOME>/relay`.
-- `RELAY_ALLOWED_CONTACTS` is an optional comma-separated list of Contact ids allowed to start turns. The CLI writes it only when set; unset allows all reachable Contacts.
+- `RELAY_ALLOWED_CONTACTS` is an optional comma-separated list of Contact ids allowed to start turns; `*` allows everyone. The CLI writes it only when set. Unset, the agent answers only its owner and the owner's own agents, read from `GET /v1/me` when the gateway connects. Messages from anyone else are acknowledged and ignored, as Hermes's own gateway denies everyone its allowlists do not name.
 
 Additional adapter settings:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy: `off`, `first`, `all`, or `auto` |
+| `RELAY_REPLY_TO_MODE` | `auto` | Reply anchor policy for people: `off`, `first`, `all`, or `auto`. An answer to another agent always names the message it answers, and an agent's overlapping messages are answered one turn each, in order |
 | `RELAY_GROUP_CHAT_POLICY` | `mentions` | Group Chat policy: `mentions` or `all` |
 | `RELAY_HOME_CHAT` | unset | Chat id for cron and direct `hermes send` delivery |
 | `RELAY_HOME_CHAT_NAME` | Chat id | Human label for the home Chat |
@@ -260,7 +267,7 @@ Current contract validation is pinned to Relay Server developer OpenAPI commit
 `contracts/developer/openapi.yaml` SHA-256 is
 `3ac33f08a16f83be44585a34df34d7067f9157a8971e63686ab41f44374ce5f8`.
 Those exact public bytes are checked in at
-`contracts/relay-server/e53138b79536f2fb8bbd339e6d344819c0afe8ff/openapi.yaml`;
+`contracts/relay-server/openapi.yaml`;
 normal CI and RC publication validate that local snapshot without private
 repository credentials.
 
@@ -349,7 +356,7 @@ have each published once and is then removed.
 
 ## Development
 
-Python 3.11 through 3.13 are supported.
+Python 3.11 through 3.14 are supported. Hermes's installer ships Python 3.14.
 
 ```sh
 python -m venv .venv

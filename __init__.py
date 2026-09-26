@@ -31,7 +31,7 @@ HERMES_DISTRIBUTION = "hermes-agent"
 # The oldest Hermes the adapter is proven against. Older versions are refused.
 HERMES_MIN_VERSION = "0.19.0"
 # Patch releases in the tested minor load silently; newer minors warn and run.
-HERMES_MAX_TESTED_VERSION = "0.21.3"
+HERMES_MAX_TESTED_VERSION = "0.21.5"
 SUPPORTED_HERMES = (
     f"{HERMES_DISTRIBUTION} >= {HERMES_MIN_VERSION}; "
     f"tested through {HERMES_MAX_TESTED_VERSION} (newer minors warn and run)"
@@ -81,23 +81,46 @@ def plugin_version() -> str:
     return match.group(1) if match else "unknown"
 
 
-def hermes_version() -> str | None:
-    """The Hermes version in this process, or None when Hermes is absent.
+# Hermes main commits a placeholder package version: "0.0.0" in pyproject.toml
+# since its commit 9cc319f9a1 (2026-09-21, "main carries 0.0.0 ... a build
+# stamps the real one"). That value is not a release and is never compared.
+_PLACEHOLDER_VERSIONS = {"0.0.0", "unknown", ""}
 
-    The distribution metadata is authoritative (pip, uv and an editable git
-    checkout all write it). ``hermes_cli.__version__`` covers a bare source
-    tree on ``PYTHONPATH``, which is how the plugin's own tests run.
+
+def hermes_version() -> str | None:
+    """The version Hermes reports for itself, or None when Hermes is absent.
+
+    Hermes's own answer comes first: ``hermes_cli.version_info
+    .get_version_info().base_version``, which reads the install stamp a
+    build writes, else the checkout's release tags. That is the value Hermes
+    gates a plugin's ``requires_hermes`` on (``hermes_cli.plugins_manifest
+    .running_hermes_version``). Older Hermes wheels have no ``version_info``;
+    their distribution metadata is the real release. A placeholder from
+    either source is reported as ``"unknown"``, never as a release.
     """
     try:
-        return _distribution_version(HERMES_DISTRIBUTION)
-    except PackageNotFoundError:
+        from hermes_cli.version_info import get_version_info
+    except ImportError:
         pass
+    else:
+        try:
+            found = str(get_version_info().base_version or "").strip()
+        except Exception:  # noqa: BLE001 - a broken stamp must not stop the load
+            found = ""
+        if found not in _PLACEHOLDER_VERSIONS:
+            return found
+    try:
+        found = _distribution_version(HERMES_DISTRIBUTION)
+    except PackageNotFoundError:
+        found = None
+    if found is not None:
+        return found if found not in _PLACEHOLDER_VERSIONS else "unknown"
     try:
         module = importlib.import_module("hermes_cli")
     except ImportError:
         return None
-    found = getattr(module, "__version__", None)
-    return str(found) if found else None
+    found = str(getattr(module, "__version__", "") or "")
+    return found if found not in _PLACEHOLDER_VERSIONS else "unknown"
 
 
 def parse_version(text: str) -> tuple[int, ...]:
@@ -137,14 +160,17 @@ def check_hermes() -> str:
         )
         _report(message, error=True)
         raise HermesVersionError(message)
-    if parse_version(found) < parse_version(HERMES_MIN_VERSION):
+    # A version Hermes cannot name is not compared: the symbol check below
+    # decides whether the adapter can run on it.
+    known = found != "unknown" and bool(parse_version(found))
+    if known and parse_version(found) < parse_version(HERMES_MIN_VERSION):
         message = (
             f"{prefix}: found {HERMES_DISTRIBUTION} {found}, which is older "
             f"than {HERMES_MIN_VERSION}. Supported: {SUPPORTED_HERMES}."
         )
         _report(message, error=True)
         raise HermesVersionError(message)
-    if parse_version(found)[:2] > parse_version(HERMES_MAX_TESTED_VERSION)[:2]:
+    if known and parse_version(found)[:2] > parse_version(HERMES_MAX_TESTED_VERSION)[:2]:
         logger.warning(
             "Relay plugin tested through Hermes %s; you have %s. It will try to run.",
             HERMES_MAX_TESTED_VERSION,

@@ -1119,6 +1119,61 @@ def test_websocket_accepts_payment_events(event_type):
     assert parse_inbound(current) is None
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "location.sharing.started",
+        "location.sharing.stopped",
+        "task.created",
+        "task.message",
+        "task.canceled",
+        "task.updated",
+        "community.post.created",
+        "community.comment.created",
+    ],
+)
+def test_websocket_accepts_every_staging_event_type(event_type):
+    """Relay-SDK staging RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx."""
+    current = event()
+    current["event_type"] = event_type
+    current["data"] = {"post": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec41"}}
+    order: List[str] = []
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": current},
+    ], order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=OrderedInbox(order)))
+    assert order == ["commit:1", "ack:1"]
+    # Not a message: nothing reaches a Hermes turn.
+    assert parse_inbound(current) is None
+
+
+def test_websocket_skips_and_acknowledges_an_unknown_event_type():
+    """A type newer than this release is acked, never stored, reported once.
+
+    Before, it raised "invalid event", the gateway stopped, and the unacked
+    event came back on every reconnect. The TS SDK skips and acks it.
+    """
+    order: List[str] = []
+    logged: List[str] = []
+    later = event()
+    later["event_type"] = "community.vote.created"
+    another = dict(later, event_id="01993d50-ef7b-7b37-886b-23fd80c7ec99")
+    socket = FakeSocket([
+        ready(),
+        {"type": "event", "sequence": "1", "event": later},
+        {"type": "event", "sequence": "2", "event": another},
+        {"type": "event", "sequence": "3", "event": event()},
+    ], order)
+    inbox = OrderedInbox(order)
+    with pytest.raises(RelayWebSocketClosed):
+        asyncio.run(consume_websocket(socket, inbox=inbox, log=logged.append))
+    assert order == ["ack:1", "ack:2", "commit:3", "ack:3"]
+    assert inbox.events == [event()]
+    assert len(logged) == 1 and "community.vote.created" in logged[0]
+
+
 @pytest.mark.parametrize("event_type", ["call.created", "call.updated", "call.ended"])
 def test_websocket_accepts_call_events(event_type):
     current = event()

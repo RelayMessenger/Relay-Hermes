@@ -46,7 +46,7 @@ def test_supported_range_matches_package_policy():
     text = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert 'HERMES_MIN_VERSION = "0.19.0"' in text
     assert "HERMES_PUBLISHED_VERSION: 0.19.0" in ci
-    assert 'HERMES_MAX_TESTED_VERSION = "0.21.3"' in text
+    assert 'HERMES_MAX_TESTED_VERSION = "0.21.5"' in text
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"hermes-agent>=0.19.0,<0.22"' in pyproject
 
@@ -57,7 +57,7 @@ def test_missing_hermes_fails_loudly(compat, monkeypatch, capsys):
         compat.check_hermes()
     message = str(raised.value)
     assert message.startswith("relay-hermes 9.9.9 cannot load: hermes-agent is not installed")
-    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.3 (newer minors warn and run)." in message
+    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.5 (newer minors warn and run)." in message
     assert capsys.readouterr().err.strip() == message
 
 
@@ -68,7 +68,7 @@ def test_older_hermes_fails_loudly(compat, monkeypatch, capsys):
     message = str(raised.value)
     assert "relay-hermes 9.9.9 cannot load: found hermes-agent 0.18.9" in message
     assert "older than 0.19.0" in message
-    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.3 (newer minors warn and run)." in message
+    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.5 (newer minors warn and run)." in message
     assert capsys.readouterr().err.strip() == message
 
 
@@ -79,7 +79,7 @@ def test_missing_symbol_is_named(compat, monkeypatch, capsys):
         compat.check_hermes()
     message = str(raised.value)
     assert "hermes-agent 0.21.1 is missing gateway.platforms.helpers.strip_markdown" in message
-    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.3 (newer minors warn and run)." in message
+    assert "Supported: hermes-agent >= 0.19.0; tested through 0.21.5 (newer minors warn and run)." in message
     assert capsys.readouterr().err.strip() == message
 
 
@@ -105,7 +105,7 @@ def test_newer_minor_warns_and_continues(compat, monkeypatch, capsys, caplog, fo
     assert compat.check_hermes() == found
     assert capsys.readouterr().err == ""
     assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
-        ("WARNING", f"Relay plugin tested through Hermes 0.21.3; you have {found}. It will try to run.")
+        ("WARNING", f"Relay plugin tested through Hermes 0.21.5; you have {found}. It will try to run.")
     ]
 
 
@@ -130,3 +130,30 @@ def compat_parse(text):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.parse_version(text)
+
+
+def test_hermes_main_placeholder_reads_the_version_hermes_reports(monkeypatch):
+    """Hermes main's package metadata says 0.0.0 (its commit 9cc319f9a1).
+
+    The plugin must read the version Hermes reports for itself, the install
+    stamp or release tag behind ``hermes_cli.version_info``, and load.
+    """
+    spec = importlib.util.spec_from_file_location("_relay_hermes_main", ROOT / "__init__.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    version_info = types.ModuleType("hermes_cli.version_info")
+    version_info.get_version_info = lambda: types.SimpleNamespace(base_version="0.21.5")
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.version_info", version_info)
+    monkeypatch.setattr(module, "_distribution_version", lambda name: "0.0.0")
+    assert module.hermes_version() == "0.21.5"
+
+
+def test_placeholder_version_alone_is_never_compared(compat, monkeypatch, capsys):
+    """With no real version anywhere, the capability check decides."""
+    monkeypatch.setitem(sys.modules, "hermes_cli.version_info", None)
+    monkeypatch.setattr(compat, "_distribution_version", lambda name: "0.0.0")
+    assert compat.hermes_version() == "unknown"
+    _install_fake_hermes(monkeypatch, compat)
+    assert compat.check_hermes() == "unknown"
+    assert capsys.readouterr().err == ""

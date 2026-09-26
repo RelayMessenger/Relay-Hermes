@@ -23,10 +23,13 @@ env:
   SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
   HERMES_AGENT_COMMIT: b2aa855b626ff8688eb34b95c60ee8b6a4af3679
   HERMES_AGENT_SRC: ${{ github.workspace }}/_hermes-agent
+  # Hermes main as its official installer delivers it (0.21.5 on 2026-09-26):
+  # the install-time plugin scan runs this commit's tools/plugin_guard.py.
+  HERMES_MAIN_COMMIT: f077152871798b8a666daf48333d123549d10672
   # The newest hermes-agent wheel on PyPI (2026-09-09) and the oldest Hermes
   # relay_hermes.check_hermes() accepts. The git pin above is the newest.
   HERMES_PUBLISHED_VERSION: 0.19.0
-  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/e53138b79536f2fb8bbd339e6d344819c0afe8ff/openapi.yaml
+  RELAY_OPENAPI_SNAPSHOT: contracts/relay-server/openapi.yaml
   VALIDATED_ARTIFACT_NAME: relay-hermes-validated-rc
 
 jobs:
@@ -117,7 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Check out the exact plugin source
@@ -275,6 +278,68 @@ jobs:
           assert entry is not None
           assert entry.required_env == ["RELAY_AGENT_TOKEN"]
           PY
+
+  # `hermes plugins install` scans the clone and blocks a caution verdict
+  # without a prompt or --force. Run the scan of the Hermes users install.
+  hermes-install-scan:
+    name: Pass Hermes's install-time plugin scan
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    env:
+      HERMES_GUARD_SRC: ${{ github.workspace }}/_hermes-main
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Check out Hermes main at its pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_MAIN_COMMIT }}
+          path: _hermes-main
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Scan the plugin as the installer does
+        run: |
+          test "$(git -C "$HERMES_GUARD_SRC" rev-parse HEAD)" = "$HERMES_MAIN_COMMIT"
+          python -m pip install --disable-pip-version-check "pytest>=8"
+          python -m pytest -q tests/test_hermes_install_scan.py -p no:cacheprovider
+
+  # The durable inbox opens SQLite by pathname and walks its directory without
+  # following links; macOS (where /dev/fd names broke SQLite's journal) and
+  # Windows (no O_NOFOLLOW, reparse points instead) each prove it natively.
+  state-on-each-os:
+    name: Validate the durable inbox on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Check out the exact plugin source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Run the durable inbox tests
+        run: |
+          python -m pip install --disable-pip-version-check "pytest>=8"
+          python -m pytest -q tests/test_state.py
 
   # The plugin's users install Hermes from PyPI, which lags the git pin the
   # suite above runs on (0.19.0 against 0.21.1 on 2026-09-09; 1.0.0rc3

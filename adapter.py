@@ -38,6 +38,7 @@ for the ``relayapp`` platform decide who may run them, as on Telegram.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextvars
 import dataclasses
 import logging
@@ -158,6 +159,8 @@ DEFAULT_REPLY_TO_MODE = "auto"
 GROUP_CHAT_POLICIES = {"mentions", "all"}
 DEFAULT_GROUP_CHAT_POLICY = "mentions"
 WEBSOCKET_READY_TIMEOUT_SECONDS = 30.0
+# How often a waiting message checks whether the session's turn has ended.
+WAITING_POLL_SECONDS = 0.05
 
 @dataclasses.dataclass
 class _TurnEvent:
@@ -224,20 +227,26 @@ def _resolve_contact_allowlist(extra: Dict[str, Any]) -> set[str]:
 
 
 def _install_access_policy(config: PlatformConfig) -> set[str]:
-    """Mirror the Contact allowlist into Hermes's central chat gate."""
+    """Mirror the Contact allowlist into Hermes's central chat gate.
+
+    An explicit ``RELAY_ALLOWED_CONTACTS`` (or ``allowed_contacts``) is the
+    list; ``*`` admits everyone. With neither, the agent answers only its
+    owner, as the owner ruled for connected agents on 2026-09-25 and as
+    Hermes's own gateway denies everyone no allowlist names (Hermes security
+    guide, "If no allowlists are configured ... all users are denied"). The
+    owner is learned from ``GET /v1/me`` at connect; until then Hermes's gate
+    holds an empty list, which denies.
+    """
 
     extra = dict(getattr(config, "extra", {}) or {})
     config.extra = extra
     allowed_contacts = _resolve_contact_allowlist(extra)
-
-    # The adapter enforces allowed_contacts before dispatch. Mirroring the
-    # same decision here lets Hermes's central chat gate accept only messages
-    # that this profile's adapter admitted. "*" preserves Relay's documented
-    # default that every reachable Contact may chat.
-    chat_principals = sorted(allowed_contacts) or ["*"]
-    extra["allowed_users"] = chat_principals
-    extra["allow_from"] = chat_principals
-    extra["group_allow_from"] = chat_principals
+    chat_principals = sorted(allowed_contacts)
+    # New lists: the adapter adds principals it admits (the owner, the
+    # owner's own agents) to these same objects, which Hermes's gate reads.
+    extra["allowed_users"] = list(chat_principals)
+    extra["allow_from"] = list(chat_principals)
+    extra["group_allow_from"] = list(chat_principals)
     return allowed_contacts
 
 
@@ -428,6 +437,9 @@ class RelayAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
 
         self._allowed_contacts = _install_access_policy(config)
+        # Filled from GET /v1/me at connect when no allowlist is configured.
+        self._owner_ids: set = set()
+        self._owner_handle = ""
         extra = config.extra
         self._base_url = normalize_base_url(_configured_base_url(extra))
         self._token = _resolve(extra, "token", "RELAY_AGENT_TOKEN")
@@ -508,6 +520,15 @@ class RelayAdapter(BasePlatformAdapter):
         # Chat kind, learned directly from each Relay Message event.
         self._group_chats: set = set()
         self._direct_chats: set = set()
+        # message_id -> whether the answer names it with reply_to. Written at
+        # intake for messages another agent sent; see _should_thread_reply.
+        self._agent_messages: Dict[str, bool] = {}
+        # session_key -> Relay events waiting for the running turn to end,
+        # and the task that hands them to Hermes one at a time; see
+        # _dispatch_turn. session_key -> whether the live turn answers an agent.
+        self._waiting: Dict[str, collections.deque] = {}
+        self._waiting_tasks: Dict[str, asyncio.Task] = {}
+        self._live_from_agent: Dict[str, bool] = {}
     # -- Connection lifecycle ----------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -529,6 +550,7 @@ class RelayAdapter(BasePlatformAdapter):
             self._apply_full_snapshot(self._inbox.load_full_snapshot())
             self._client = RelayClient(self._token, self._base_url)
             self._client.open()
+            await self._learn_owner()
         except RelayStateBindingError as error:
             self._set_fatal_error(
                 "relay_state_account_mismatch",
@@ -613,6 +635,15 @@ class RelayAdapter(BasePlatformAdapter):
                     pass
         self._receive_task = None
         self._process_task = None
+        waiting_tasks = list(self._waiting_tasks.values())
+        for task in waiting_tasks:
+            task.cancel()
+        await asyncio.gather(*waiting_tasks, return_exceptions=True)
+        # Their durable rows stay dispatched and replay on the next connect.
+        self._waiting_tasks.clear()
+        self._waiting.clear()
+        self._live_from_agent.clear()
+        self._agent_messages.clear()
         self._inbox.close()
 
         await self._close_client()
@@ -630,8 +661,73 @@ class RelayAdapter(BasePlatformAdapter):
 
     # -- Receive -----------------------------------------------------------
 
-    def _allow_contact(self, contact_id: str) -> bool:
-        return not self._allowed_contacts or contact_id in self._allowed_contacts
+    def _admits(self, sender: Any) -> bool:
+        """Whether this Relay Contact may talk to the agent.
+
+        ``sender`` is a message's ``sender_handle`` or a reaction's
+        ``from_handle``. An explicit allowlist decides alone. Otherwise the
+        owner may, and so may the owner's own agents: an agent whose handle
+        names the same owning person (``ChatHandle.owner``), as the 9/25
+        ruling admits "the owner and the owner's own agents".
+        """
+        if not isinstance(sender, dict):
+            return False
+        contact_id = str(sender.get("id") or "")
+        if not contact_id:
+            return False
+        if self._allowed_contacts:
+            return "*" in self._allowed_contacts or contact_id in self._allowed_contacts
+        if contact_id in self._owner_ids:
+            return True
+        owner = sender.get("owner")
+        if (
+            sender.get("kind") == "agent"
+            and self._owner_handle
+            and isinstance(owner, dict)
+            and owner.get("kind") == "user"
+            and owner.get("handle") == self._owner_handle
+        ):
+            self._admit_principal(contact_id)
+            return True
+        return False
+
+    def _admit_principal(self, contact_id: str) -> None:
+        """Let Hermes's own chat gate agree with a sender this adapter admits."""
+        extra = self.config.extra
+        for key in ("allowed_users", "allow_from", "group_allow_from"):
+            principals = extra.get(key)
+            if isinstance(principals, list) and contact_id not in principals:
+                principals.append(contact_id)
+
+    async def _learn_owner(self) -> None:
+        """Read the agent's owner once per connect when no allowlist is set."""
+        if self._allowed_contacts or self._client is None:
+            return
+        me = await self._client.get_me()
+        people = me.get("owner_people") if isinstance(me.get("owner_people"), list) else []
+        self._owner_ids = {
+            str(person.get("id"))
+            for person in people
+            if isinstance(person, dict) and person.get("id")
+        }
+        owner = me.get("owner") if isinstance(me.get("owner"), dict) else {}
+        self._owner_handle = (
+            str(owner.get("handle") or "") if owner.get("kind") == "user" else ""
+        )
+        for contact_id in sorted(self._owner_ids):
+            self._admit_principal(contact_id)
+        if self._owner_ids:
+            logger.info(
+                "[%s] answering only this agent's owner and the owner's agents; "
+                "set RELAY_ALLOWED_CONTACTS to choose who else may talk to it",
+                self.name,
+            )
+        else:
+            logger.warning(
+                "[%s] Relay names no owner for this agent, so nobody is admitted; "
+                "set RELAY_ALLOWED_CONTACTS to the Contact ids that may talk to it",
+                self.name,
+            )
 
     async def _run_websocket(self) -> None:
         assert self._client is not None
@@ -827,7 +923,7 @@ class RelayAdapter(BasePlatformAdapter):
                 if inbound is None:
                     self._inbox.complete(event_id, ignored=True)
                     continue
-                if not self._allow_contact(inbound.sender_contact_id):
+                if not self._admits(inbound.message.get("sender_handle")):
                     self._inbox.complete(event_id, ignored=True)
                     continue
                 dispatched = await self._on_inbound(inbound)
@@ -853,7 +949,7 @@ class RelayAdapter(BasePlatformAdapter):
             return False
         sender = data.get("from_handle") or {}
         handler = self._reaction_handler
-        if handler is None or data.get("is_from_me") or not self._allow_contact(sender.get("id")):
+        if handler is None or data.get("is_from_me") or not self._admits(sender):
             self._inbox.complete(event_id, ignored=True)
             return True
         # Hermes Slack adapter's reaction hook envelope (including its field names).
@@ -985,11 +1081,29 @@ class RelayAdapter(BasePlatformAdapter):
         # (its busy ack) is drawn unquoted; see _reply_anchor.
         if inbound.message_id:
             self._remember(self._last_inbound, chat_id, inbound.message_id)
+            if inbound.sender_contact_kind == "agent":
+                # The answer to another agent names this message (Relay-SDK
+                # PR 366): Relay's A2A door gives a caller the reply whose
+                # reply_to names its message. Not when the message opens with
+                # buttons or a selection: the server refuses an agent's reply
+                # to those parts, and a reply names part 0.
+                opening = parts[0].get("type") if parts and isinstance(parts[0], dict) else None
+                self._remember_bool(
+                    self._agent_messages,
+                    inbound.message_id,
+                    opening not in {"buttons", "selection"},
+                )
         await self._dispatch_turn(event)
         return True
 
     @staticmethod
     def _remember(table: Dict[str, str], key: str, value: str) -> None:
+        if len(table) > 500:
+            table.pop(next(iter(table)), None)
+        table[key] = value
+
+    @staticmethod
+    def _remember_bool(table: Dict[str, bool], key: str, value: bool) -> None:
         if len(table) > 500:
             table.pop(next(iter(table)), None)
         table[key] = value
@@ -1023,8 +1137,10 @@ class RelayAdapter(BasePlatformAdapter):
         # This event owns a turn now: its own on_processing_complete settles
         # its row, so no other turn's completion may sweep it.
         event._relay_turn_started = True
+        session_key = self._relay_session_key(event)
+        self._live_from_agent[session_key] = self._from_agent(event)
         if event_id:
-            self._handed.get(self._relay_session_key(event), {}).pop(event_id, None)
+            self._handed.get(session_key, {}).pop(event_id, None)
         chat_id = str(event.source.chat_id or "")
         if chat_id and event.message_id:
             self._remember(self._turn_starter, chat_id, str(event.message_id))
@@ -1137,7 +1253,81 @@ class RelayAdapter(BasePlatformAdapter):
         if not handed:
             self._handed.pop(session_key, None)
 
+    @staticmethod
+    def _from_agent(event: MessageEvent) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        sender = data.get("sender_handle") if isinstance(data.get("sender_handle"), dict) else {}
+        return sender.get("kind") == "agent"
+
+    def _session_busy(self, session_key: str) -> bool:
+        """Whether Hermes holds a live turn for this session.
+
+        A guard whose owner task already ended is not a live turn; Hermes
+        heals such a guard on its next intake (``_heal_stale_session_lock``).
+        """
+        if session_key not in getattr(self, "_active_sessions", {}):
+            return False
+        is_stale = getattr(self, "_session_task_is_stale", None)
+        return not (callable(is_stale) and is_stale(session_key))
+
     async def _dispatch_turn(self, event: MessageEvent) -> None:
+        """Hand one accepted turn to Hermes, or queue it behind the live one.
+
+        Hermes folds a message that arrives mid-turn into the running turn
+        (busy_input_mode interrupt redirects the live request, queue mode
+        merges the texts). That is right between people and wrong for an
+        agent: one agent calling twice in one chat must get two answers, each
+        naming its own message, or Relay's A2A door gives neither caller its
+        answer (Relay-SDK PR 366, ``replacesLiveTurn``: only a person's
+        message replaces a person's turn). So a message waits while the live
+        turn answers an agent, or while it comes from an agent; each waiting
+        message becomes its own turn, in order, once the session is free.
+        """
+        session_key = self._relay_session_key(event)
+        waiting = self._waiting.get(session_key)
+        if waiting or (
+            self._session_busy(session_key)
+            and (self._from_agent(event) or self._live_from_agent.get(session_key, False))
+        ):
+            if waiting is None:
+                waiting = self._waiting[session_key] = collections.deque()
+            waiting.append(event)
+            task = self._waiting_tasks.get(session_key)
+            if task is None or task.done():
+                self._waiting_tasks[session_key] = asyncio.create_task(
+                    self._drain_waiting(session_key)
+                )
+            return
+        await self._dispatch_now(event)
+
+    async def _drain_waiting(self, session_key: str) -> None:
+        """Start each waiting event as its own turn once the session is free."""
+        try:
+            while True:
+                waiting = self._waiting.get(session_key)
+                if not waiting:
+                    return
+                if self._session_busy(session_key):
+                    await asyncio.sleep(WAITING_POLL_SECONDS)
+                    continue
+                event = waiting.popleft()
+                try:
+                    await self._dispatch_now(event)
+                except Exception as exc:  # noqa: BLE001 - one bad turn never strands the rest
+                    raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+                    event_id = str(raw.get("event_id") or "")
+                    logger.exception("[%s] queued Relay event %s failed", self.name, event_id)
+                    if event_id:
+                        self._inbox.retry(event_id, str(exc))
+                        self._inbox_wake.set()
+        finally:
+            if not self._waiting.get(session_key):
+                self._waiting.pop(session_key, None)
+            if self._waiting_tasks.get(session_key) is asyncio.current_task():
+                self._waiting_tasks.pop(session_key, None)
+
+    async def _dispatch_now(self, event: MessageEvent) -> None:
         """Hand one accepted turn to Hermes.
 
         Nothing is settled here. After ``handle_message`` returns the event
@@ -1393,6 +1583,13 @@ class RelayAdapter(BasePlatformAdapter):
         """
         if not reply_to:
             return False
+        linkable = self._agent_messages.get(reply_to)
+        if linkable is not None:
+            # An answer to another agent names the message it answers, in
+            # every mode, unless that message opens with buttons or a
+            # selection (see _on_inbound). The iOS app draws reply_to as a
+            # reply thread, so only agents' messages are named this way.
+            return linkable
         mode = self._reply_to_mode
         if mode == "off":
             return False
@@ -1907,7 +2104,9 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["RELAY_AGENT_TOKEN"],
-        install_hint="pip install httpx websockets",
+        # check_fn fails for a missing token as often as a missing package;
+        # enabling through Hermes prepares the dependencies (PM admission).
+        install_hint="set RELAY_AGENT_TOKEN, then run: hermes plugins enable relay-hermes",
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="RELAY_HOME_CHAT",
         standalone_sender_fn=_standalone_send,

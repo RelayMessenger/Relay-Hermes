@@ -20,6 +20,24 @@ STATE_BINDING_FILENAME = ".relay-account.json"
 STATE_BINDING_SCHEMA = "relay-hermes-state-account/v1"
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
+# IsReparseTagNameSurrogate (winnt.h): the tag names another file or
+# directory. Symbolic links, junctions and mount points carry it.
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
+
+def _follows_elsewhere(metadata: os.stat_result) -> bool:
+    """Whether an ``os.lstat`` result is a link to somewhere else.
+
+    POSIX: a symbolic link. Windows: a name-surrogate reparse point, which
+    is what ``os.stat(follow_symlinks=False)`` declines to follow there.
+    """
+
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if not attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return bool(getattr(metadata, "st_reparse_tag", 0) & _REPARSE_TAG_NAME_SURROGATE)
 
 
 class RelayStateBindingError(RuntimeError):
@@ -154,6 +172,8 @@ class RelayInbox:
         self._db: Optional[sqlite3.Connection] = None
         self._directory_fd: Optional[int] = None
         self._database_fd: Optional[int] = None
+        # Windows: the state directory's (volume, file index) at open.
+        self._directory_identity: Optional[Tuple[int, int]] = None
 
     def open(self) -> "RelayInbox":
         if self._db is not None:
@@ -177,7 +197,7 @@ class RelayInbox:
             self._open_database_file()
             self._assert_state_directory()
             self._assert_database_file()
-            db = self._connect_database_descriptor()
+            db = self._connect_database()
             db.execute("PRAGMA foreign_keys=ON")
             database_binding, database_objects = self._read_database_binding(db)
             if (
@@ -274,10 +294,13 @@ class RelayInbox:
         A path-based ``mkdir(parents=True)`` can traverse a symlinked ancestor
         or race a directory replacement before the final no-follow open. Walk
         from ``/`` instead, retaining only a descriptor for each verified real
-        directory. SQLite is later reached from descriptors too; the mutable
-        pathname is never its database-open authority.
+        directory. Windows has no descriptor-relative opens; it gets the
+        equivalent walk in :meth:`_open_state_directory_windows`.
         """
 
+        if os.name == "nt":
+            self._open_state_directory_windows()
+            return
         if (
             os.name != "posix"
             or not hasattr(os, "O_DIRECTORY")
@@ -349,13 +372,79 @@ class RelayInbox:
             if descriptor is not None:
                 os.close(descriptor)
 
+    def _open_state_directory_windows(self) -> None:
+        """The Windows form of the no-follow walk.
+
+        Windows has no ``O_NOFOLLOW`` and no ``dir_fd``. Its own no-follow is
+        ``FILE_FLAG_OPEN_REPARSE_POINT``, which ``os.lstat`` uses: on Windows
+        it does not follow a name-surrogate reparse point (a symbolic link, a
+        junction or a mount point), and reports that point's tag instead
+        (Python ``os.stat`` docs; Microsoft "Reparse Point Tags",
+        ``IsReparseTagNameSurrogate``). Every component is checked that way,
+        created when missing, and the directory's volume and file index are
+        kept so :meth:`_assert_state_directory` can tell a replacement.
+        Access is the per-user ACL of the profile that holds the Hermes home,
+        as Hermes leaves its own ``state.db`` (``hermes_state.py`` skips
+        POSIX modes on Windows).
+        """
+
+        parent = self.path.parent
+        if parent == parent.parent:
+            raise RelayStateBindingError(
+                "Relay state directory cannot be the filesystem root"
+            )
+        try:
+            current = Path(parent.anchor)
+            for component in parent.parts[1:]:
+                current = current / component
+                try:
+                    metadata = os.lstat(current)
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(current, STATE_DIRECTORY_MODE)
+                    except FileExistsError:
+                        pass
+                    metadata = os.lstat(current)
+                if _follows_elsewhere(metadata) or not stat.S_ISDIR(
+                    metadata.st_mode
+                ):
+                    raise RelayStateBindingError(
+                        "Relay state directory must be a real directory on a "
+                        "no-follow path"
+                    )
+        except OSError as exc:
+            raise RelayStateBindingError(
+                "Relay state directory must be a real directory on a "
+                "no-follow path"
+            ) from exc
+        self._directory_identity = (metadata.st_dev, metadata.st_ino)
+        self._assert_state_directory()
+
     def _close_state_directory(self) -> None:
         if self._directory_fd is not None:
             os.close(self._directory_fd)
             self._directory_fd = None
+        self._directory_identity = None
 
     def _assert_state_directory(self) -> None:
         if os.name == "nt":
+            identity = self._directory_identity
+            if identity is None:
+                raise RelayStateBindingError("Relay state directory is not open")
+            try:
+                current = os.lstat(self.path.parent)
+            except OSError as exc:
+                raise RelayStateBindingError(
+                    "Relay state directory was replaced during use"
+                ) from exc
+            if (
+                _follows_elsewhere(current)
+                or not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != identity
+            ):
+                raise RelayStateBindingError(
+                    "Relay state directory was replaced during use"
+                )
             return
         descriptor = self._directory_fd
         if descriptor is None:
@@ -384,6 +473,9 @@ class RelayInbox:
     def _open_database_file(self) -> None:
         """Pin the database inode with openat(2) and O_NOFOLLOW before SQLite."""
 
+        if os.name == "nt":
+            self._open_database_file_windows()
+            return
         directory_fd = self._directory_fd
         if directory_fd is None:
             raise RelayStateBindingError("Relay state directory is not open")
@@ -434,6 +526,60 @@ class RelayInbox:
             if descriptor is not None:
                 os.close(descriptor)
 
+    def _open_database_file_windows(self) -> None:
+        """Create or open the database file without following a reparse point.
+
+        An existing entry must pass the same ``os.lstat`` no-follow check as
+        the directory before it is opened. A new one is created with
+        ``O_EXCL`` (``CREATE_NEW``), which fails rather than write through
+        an entry planted at the name. The handle stays open, without
+        ``FILE_SHARE_DELETE``, so the file cannot be renamed or deleted
+        while the inbox holds it.
+        """
+
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(
+            os, "O_NOINHERIT", 0
+        )
+        descriptor: Optional[int] = None
+        try:
+            try:
+                existing = os.lstat(self.path)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                _follows_elsewhere(existing) or not stat.S_ISREG(existing.st_mode)
+            ):
+                raise RelayStateBindingError(
+                    "Relay state database must be an owner-controlled "
+                    "single-link regular file"
+                )
+            try:
+                descriptor = os.open(
+                    self.path,
+                    flags if existing is not None else flags | os.O_CREAT | os.O_EXCL,
+                    STATE_FILE_MODE,
+                )
+            except FileExistsError:
+                raise RelayStateBindingError(
+                    "Relay state database changed during startup"
+                ) from None
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise RelayStateBindingError(
+                    "Relay state database must be an owner-controlled "
+                    "single-link regular file"
+                )
+            self._database_fd = descriptor
+            descriptor = None
+            self._assert_database_file()
+        except OSError as exc:
+            raise RelayStateBindingError(
+                "Relay state database cannot be opened without following links"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _close_database_file(self) -> None:
         if self._database_fd is not None:
             os.close(self._database_fd)
@@ -442,8 +588,30 @@ class RelayInbox:
     def _assert_database_file(self) -> None:
         """Require the pinned database and its directory entry to stay identical."""
 
-        directory_fd = self._directory_fd
         database_fd = self._database_fd
+        if os.name == "nt":
+            if database_fd is None:
+                raise RelayStateBindingError("Relay state database is not open")
+            try:
+                opened = os.fstat(database_fd)
+                current = os.lstat(self.path)
+            except OSError as exc:
+                raise RelayStateBindingError(
+                    "Relay state database was replaced during use"
+                ) from exc
+            if (
+                _follows_elsewhere(current)
+                or not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino)
+                != (current.st_dev, current.st_ino)
+            ):
+                raise RelayStateBindingError(
+                    "Relay state database was replaced during use"
+                )
+            return
+        directory_fd = self._directory_fd
         if directory_fd is None or database_fd is None:
             raise RelayStateBindingError("Relay state database is not open")
         try:
@@ -470,38 +638,33 @@ class RelayInbox:
                 "Relay state database was replaced during use"
             )
 
-    def _database_descriptor_path(self) -> str:
-        """Return the kernel-owned magic-link path for the pinned database fd."""
+    def _database_uri(self) -> str:
+        """SQLite's URI for the pinned file's own pathname, read-write only."""
 
-        descriptor = self._database_fd
-        if descriptor is None:
-            raise RelayStateBindingError("Relay state database is not open")
-        for descriptor_root in ("/proc/self/fd", "/dev/fd"):
-            if os.path.isdir(descriptor_root):
-                return f"{descriptor_root}/{descriptor}"
-        raise RelayStateBindingError(
-            "Relay state requires /proc/self/fd or /dev/fd descriptor access"
-        )
+        return f"{self.path.as_uri()}?mode=rw"
 
-    def _connect_database_descriptor(self) -> sqlite3.Connection:
-        """Connect SQLite to the already-open inode, never to ``self.path``.
+    def _connect_database(self) -> sqlite3.Connection:
+        """Connect SQLite to the pinned file by its real pathname.
 
-        Python's sqlite3 API has no file-descriptor constructor and does not
-        expose SQLite's ``SQLITE_OPEN_NOFOLLOW`` flag. On supported Linux,
-        opening ``/proc/self/fd/<n>`` duplicates the kernel-pinned file
-        description. ``mode=rw`` additionally forbids SQLite from creating a
-        pathname target. The descriptor remains open for the connection's
-        lifetime, while SQLite resolves the real filename for WAL sidecars.
+        SQLite keeps its rollback journal and WAL beside the database, named
+        after it (sqlite.org/tempfiles.html), so it must open a real pathname:
+        a ``/dev/fd/<n>`` name on macOS left it creating its journal in
+        ``/dev/fd``. The file was created owner-only and pinned before this
+        call, ``mode=rw`` forbids SQLite from creating anything at the name,
+        and the pinned identity is checked again once SQLite has opened it,
+        so a replacement between the two opens is refused before any read.
         """
 
         self._assert_state_directory()
         self._assert_database_file()
-        uri = f"file:{self._database_descriptor_path()}?mode=rw"
         try:
-            db = sqlite3.connect(uri, uri=True)
+            db = sqlite3.connect(self._database_uri(), uri=True)
         except sqlite3.Error as exc:
+            # A replaced directory or file is the likely cause; say so first.
+            self._assert_state_directory()
+            self._assert_database_file()
             raise RelayStateBindingError(
-                "Relay state database descriptor cannot be opened by SQLite"
+                "Relay state database cannot be opened by SQLite"
             ) from exc
         try:
             self._assert_state_directory()
@@ -512,6 +675,8 @@ class RelayInbox:
         return db
 
     def _chmod_database_file(self, mode: int) -> None:
+        if os.name == "nt":
+            return
         self._assert_state_directory()
         self._assert_database_file()
         descriptor = self._database_fd
@@ -523,7 +688,23 @@ class RelayInbox:
     def _state_file_open_args(self, filename: str) -> Tuple[Any, Dict[str, Any]]:
         if os.name != "nt" and self._directory_fd is not None:
             return filename, {"dir_fd": self._directory_fd}
-        return self.path.parent / filename, {}
+        target = self.path.parent / filename
+        if os.name == "nt":
+            # No O_NOFOLLOW here: refuse a reparse point at the name instead.
+            try:
+                metadata = os.lstat(target)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RelayStateBindingError(
+                    f"Relay state file {filename!r} cannot be opened safely"
+                ) from exc
+            else:
+                if _follows_elsewhere(metadata):
+                    raise RelayStateBindingError(
+                        f"Relay state file {filename!r} cannot be opened safely"
+                    )
+        return target, {}
 
     def _chmod_state_file(self, filename: str, mode: int) -> None:
         if os.name == "nt":
