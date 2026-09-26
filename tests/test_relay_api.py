@@ -150,7 +150,7 @@ def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
     assert RELAY_OPENAPI_COMMIT == "b1e534c03fb9d2826ac63ea0d6cc7a0b843276e9"
     assert RELAY_OPENAPI_SHA256 == (
-        "1a145cd9dbf977de1d4f40191ec861825a19f1c7ab637f60fd507eeea0007402"
+        "57c553a8b0d281ed5e815fc08184285315fcf9a85bedde92628f3ed33235b15d"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
@@ -182,6 +182,10 @@ def test_render_text_uses_value_and_link_parts():
         {"type": "link", "value": "https://example.com"},
     ]
     assert render_text(message) == "one\nhttps://example.com"
+
+
+def titled(options: Any) -> Any:
+    return {"title": SELECTION_TITLE, "options": options}
 
 
 def test_render_text_reads_a_tap_as_text_and_its_own_buttons_as_nothing():
@@ -229,7 +233,8 @@ SELECTION_OPTIONS = [
     {"value": "research", "label": "Research"},
     {"value": "design", "label": "Design"},
 ]
-SELECTION_PART = {"type": "selection", "options": SELECTION_OPTIONS}
+SELECTION_TITLE = "Topics"
+SELECTION_PART = {"type": "selection", "title": SELECTION_TITLE, "options": SELECTION_OPTIONS}
 SELECTION_REPLY_PARTS = [
     {"type": "text", "value": "\N{BULLET} Research\n\N{BULLET} Design"},
     {"type": "selection_response", "selected_values": ["research", "design"]},
@@ -239,6 +244,9 @@ SELECTION_REPLY_TO = {"message_id": MESSAGE_ID, "part_index": 1}
 
 def selection_fence(value: Any, info: str = "") -> str:
     tag = f"selection {info}" if info else "selection"
+    # A bare options list rides in a titled block; anything else is sent as is.
+    if isinstance(value, list):
+        value = {"title": SELECTION_TITLE, "options": value}
     return f"```{tag}\n" + json.dumps(value) + "\n```"
 
 
@@ -266,19 +274,43 @@ def test_split_selection_lifts_the_block_and_keeps_the_question():
     assert split_selection(fenced) == (fenced, None, None)
     crlf = (
         "Choose topics\r\n```selection\r\n"
-        + json.dumps(SELECTION_OPTIONS)
+        + json.dumps({"title": SELECTION_TITLE, "options": SELECTION_OPTIONS})
         + "\r\n```\r\nThanks"
     )
     assert split_selection(crlf) == ("Choose topics\n\nThanks", SELECTION_PART, None)
     wrapped = "Choose topics\n" + selection_fence(SELECTION_PART)
     assert split_selection(wrapped) == ("Choose topics", SELECTION_PART, None)
+    # type may be left out, and the title is trimmed.
+    bare = "Choose\n" + selection_fence({"title": "  Topics ", "options": SELECTION_OPTIONS})
+    assert split_selection(bare) == ("Choose", SELECTION_PART, None)
+
+
+def test_split_selection_sends_a_titled_block_with_no_words():
+    fence = selection_fence(SELECTION_OPTIONS)
+    assert split_selection(fence) == ("", SELECTION_PART, None)
+    assert parts_with_selection("", SELECTION_PART) == [SELECTION_PART]
+
+
+def test_split_selection_refuses_a_missing_or_bad_title():
+    title_error = "selection needs a title of 1 to 60 characters"
+    for body, error in [
+        (json.dumps(SELECTION_OPTIONS), title_error + " and its options in one object"),
+        (json.dumps({"options": SELECTION_OPTIONS}), title_error),
+        (json.dumps({"title": "  ", "options": SELECTION_OPTIONS}), title_error),
+        (json.dumps({"title": 7, "options": SELECTION_OPTIONS}), title_error),
+        (json.dumps({"title": "x" * 61, "options": SELECTION_OPTIONS}), title_error),
+    ]:
+        answer = "Choose topics\n\n```selection\n" + body + "\n```"
+        assert split_selection(answer) == (answer, None, error), body
+    exact = {"title": "x" * 60, "options": SELECTION_OPTIONS}
+    assert selection_part(exact)["title"] == "x" * 60
 
 
 def test_split_selection_leaves_a_bad_block_in_the_words_and_says_why():
     for body, error in [
         ('[{"value": research}]', "the selection block is not valid JSON"),
         ("[]", "selection needs 1 to 25 options"),
-        ("null", "selection needs 1 to 25 options"),
+        ('{"title": "Topics", "options": null}', "selection needs 1 to 25 options"),
         (
             json.dumps([{"value": f"v{index}", "label": "X"} for index in range(26)]),
             "selection needs 1 to 25 options",
@@ -311,15 +343,16 @@ def test_split_selection_leaves_a_bad_block_in_the_words_and_says_why():
             "option 1 needs a trimmed label of 1 to 80 characters",
         ),
         (
-            '{"type": "selection", "options": [{"value": "x", "label": "X"}], "has_responded": false}',
+            '{"type": "selection", "title": "T", "options": [{"value": "x", "label": "X"}], "has_responded": false}',
             "selection has unknown field has_responded",
         ),
         (
-            '{"type": "buttons", "options": [{"value": "x", "label": "X"}]}',
+            '{"type": "buttons", "title": "T", "options": [{"value": "x", "label": "X"}]}',
             "selection part needs type selection",
         ),
-        ('{"options": [{"value": "x", "label": "X"}]}', "selection part needs type selection"),
     ]:
+        if body.startswith("["):
+            body = '{"title": "Topics", "options": ' + body + "}"
         answer = "Choose topics\n\n```selection\n" + body + "\n```"
         assert split_selection(answer) == (answer, None, error), body
 
@@ -335,9 +368,6 @@ def test_split_selection_refuses_a_second_block_buttons_or_a_blank_question():
         assert split_selection(answer) == (
             answer, None, "send one selection and no buttons in the same message",
         )
-    assert split_selection(fence) == (
-        fence, None, "selection needs a nonblank text prompt",
-    )
 
 
 def test_selection_part_accepts_the_exact_option_label_and_value_limits():
@@ -345,41 +375,43 @@ def test_selection_part_accepts_the_exact_option_label_and_value_limits():
         {"value": str(index).ljust(SELECTION_VALUE_MAX_LENGTH, "a"), "label": "x" * 80}
         for index in range(SELECTION_MAX_OPTIONS)
     ]
-    assert selection_part(options) == {"type": "selection", "options": options}
-    assert selection_part(options + [{"value": "extra", "label": "X"}]) == (
+    assert selection_part(titled(options)) == {"type": "selection", "title": SELECTION_TITLE, "options": options}
+    assert selection_part(titled(options + [{"value": "extra", "label": "X"}])) == (
         "selection needs 1 to 25 options"
     )
-    assert selection_part([{"value": "a" * 101, "label": "X"}]).startswith("option 1 needs")
-    assert selection_part([{"value": "a", "label": "x" * 81}]).startswith("option 1 needs")
+    assert selection_part(titled([{"value": "a" * 101, "label": "X"}])).startswith("option 1 needs")
+    assert selection_part(titled([{"value": "a", "label": "x" * 81}])).startswith("option 1 needs")
     # The label is measured after trimming, in the server's UTF-16 units.
-    assert selection_part([{"value": "a", "label": "  " + "x" * 80 + " "}]) == {
-        "type": "selection", "options": [{"value": "a", "label": "x" * 80}],
+    assert selection_part(titled([{"value": "a", "label": "  " + "x" * 80 + " "}])) == {
+        "type": "selection", "title": SELECTION_TITLE, "options": [{"value": "a", "label": "x" * 80}],
     }
-    assert selection_part([{"value": "a", "label": "\U0001f600" * 41}]).startswith("option 1 needs")
+    assert selection_part(titled([{"value": "a", "label": "\U0001f600" * 41}])).startswith("option 1 needs")
 
 
 def test_selection_part_trims_labels_and_keeps_values_case_sensitive():
-    assert selection_part([
+    assert selection_part(titled([
         {"value": "A", "label": " Same "},
         {"value": "a", "label": "Same"},
-    ]) == {
+    ])) == {
         "type": "selection",
+        "title": SELECTION_TITLE,
         "options": [{"value": "A", "label": "Same"}, {"value": "a", "label": "Same"}],
     }
     assert selection_part(SELECTION_PART) == SELECTION_PART
     assert parse_selection_block("{") == "the selection block is not valid JSON"
-    assert parse_selection_block(json.dumps(SELECTION_OPTIONS)) == SELECTION_PART
+    assert parse_selection_block(json.dumps(titled(SELECTION_OPTIONS))) == SELECTION_PART
 
 
-def test_parts_with_selection_needs_a_nonblank_question_and_a_valid_part():
+def test_parts_with_selection_needs_a_valid_part():
     assert parts_with_selection("Choose topics", SELECTION_PART) == [
         {"type": "text", "value": "Choose topics"},
         SELECTION_PART,
     ]
-    with pytest.raises(ValueError, match="nonblank"):
-        parts_with_selection(" \n", SELECTION_PART)
+    assert parts_with_selection(" \n", SELECTION_PART) == [SELECTION_PART]
+    with pytest.raises(ValueError, match="title"):
+        parts_with_selection("Choose topics", {"type": "selection", "options": SELECTION_OPTIONS})
     with pytest.raises(ValueError, match="1 to 25 options"):
-        parts_with_selection("Choose topics", {"type": "selection", "options": []})
+        parts_with_selection("Choose topics", {"type": "selection", "title": "T", "options": []})
 
 
 def test_selection_reply_needs_an_explicit_source_part_and_never_parses_text():

@@ -4467,12 +4467,17 @@ components:
     SelectionPart:
       type: object
       additionalProperties: false
-      description: Agent-only multiselect prompt. One selection per Message, with nonblank text and no buttons. The text is the prompt's title. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.
-      required: [type, options]
+      description: Agent-only multiselect prompt. One selection per Message and no buttons. `title` is the question, shown as the card's title and the sheet's title. A text part is optional; when present it is an ordinary chat bubble shown above the card. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.
+      required: [type, title, options]
       properties:
         type:
           type: string
           enum: [selection]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 60
+          description: The question, trimmed before storage.
         options:
           type: array
           minItems: 1
@@ -4481,11 +4486,13 @@ components:
             $ref: "#/components/schemas/SelectionOption"
     SelectionPartResponse:
       type: object
-      required: [type, options, has_responded, selected_values, reactions]
+      required: [type, title, options, has_responded, selected_values, reactions]
       properties:
         type:
           type: string
           enum: [selection]
+        title:
+          type: string
         options:
           type: array
           items:

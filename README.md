@@ -66,13 +66,17 @@ Edits and unsend are not supported.
 The platform hint carries the same buttons, link, selection and payment rules
 as every other Relay runtime, so Hermes writes a component by ending its answer
 with a fenced code block. A `buttons` block holds 1 to 5 items; a `selection` block
-holds 1 to 25 `{"value": "stable_token", "label": "Readable label"}` options
-and asks the person to choose several, then Send once. Either block leaves the
+holds `{"title": "Pizza toppings", "options": [...]}` with 1 to 25
+`{"value": "stable_token", "label": "Readable label"}` options and asks the
+person to choose several, then Send once. Put the question in `title` (1 to 60
+characters, a few words, e.g. "Pizza toppings"). Anything else you want to say
+goes in the text part, which shows as a normal message above the card. Either block leaves the
 words and is sent as a part beside the last bubble of text; a URL alone on its
 own line is sent as its own `link` Message.
 
-One selection per Message, never beside buttons, and always beside a nonblank
-question. A block the server would refuse (bad JSON, too many options, a value
+One selection per Message, never beside buttons; words beside it are optional.
+A block the server would refuse (bad JSON, a missing title or one longer than 60
+after trimming, too many options, a value
 that is not a unique `^[A-Za-z0-9][A-Za-z0-9._:-]*$` token of at most 100
 characters, a label longer than 80 after trimming, a second block, or nothing
 but a link outside it) stays in the words and the reason is logged, so nothing
@@ -254,7 +258,8 @@ The staging helper refuses every other API origin.
 Current contract validation is pinned to Relay Server developer OpenAPI commit
 `b1e534c03fb9d2826ac63ea0d6cc7a0b843276e9`. The exact
 `contracts/developer/openapi.yaml` SHA-256 is
-`1a145cd9dbf977de1d4f40191ec861825a19f1c7ab637f60fd507eeea0007402`.
+`57c553a8b0d281ed5e815fc08184285315fcf9a85bedde92628f3ed33235b15d` (the locked bytes plus the selection `title` edit;
+see `contracts/relay-server/README.md`).
 Those exact public bytes are checked in at
 `contracts/relay-server/b1e534c03fb9d2826ac63ea0d6cc7a0b843276e9/openapi.yaml`;
 normal CI and RC publication validate that local snapshot without private

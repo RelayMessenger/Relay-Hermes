@@ -10,10 +10,14 @@ instead of checking out another repository during CI or publication.
 | Source commit date | `2026-09-24T16:03:27-04:00` |
 | Source path | `contracts/developer/openapi.yaml` |
 | Local snapshot | `b1e534c03fb9d2826ac63ea0d6cc7a0b843276e9/openapi.yaml` |
-| Byte length | `243261` |
-| SHA-256 | `1a145cd9dbf977de1d4f40191ec861825a19f1c7ab637f60fd507eeea0007402` |
+| Byte length | `243571` |
+| SHA-256 | `57c553a8b0d281ed5e815fc08184285315fcf9a85bedde92628f3ed33235b15d` |
 
-The snapshot was copied byte-for-byte from the locked source. Validate both its
+The snapshot was copied byte-for-byte from the locked source, then its
+`SelectionPart` and `SelectionPartResponse` were edited to the owner-approved
+selection `title` shape (Relay `_artifacts/selection-title-20260926/SPEC.md`,
+2026-09-26) ahead of the Relay-Server commit that ships it; re-lock to that
+commit once it lands. Validate both its
 identity and the Relay-Hermes contract expectations from the repository root:
 
 ```sh

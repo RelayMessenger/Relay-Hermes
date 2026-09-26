@@ -1705,13 +1705,17 @@ SELECTION_OPTIONS = [
     {"value": "research", "label": "Research"},
     {"value": "design", "label": "Design"},
 ]
-SELECTION_PART = {"type": "selection", "options": SELECTION_OPTIONS}
+SELECTION_TITLE = "Topics"
+SELECTION_PART = {"type": "selection", "title": SELECTION_TITLE, "options": SELECTION_OPTIONS}
 
 
 def selection_fence(value: Any, info: str = "") -> str:
     import json
 
     tag = f"selection {info}" if info else "selection"
+    # A bare options list rides in a titled block; anything else is sent as is.
+    if isinstance(value, list):
+        value = {"title": SELECTION_TITLE, "options": value}
     return f"```{tag}\n" + json.dumps(value) + "\n```"
 
 
@@ -1770,9 +1774,10 @@ def test_send_keeps_a_conflicting_or_unusable_selection_block_as_text(plugin, tm
         "Pick\n" + selection_fence([{"label": "Research"}]),
         "Pick\n" + selection_fence([{"value": "x/y", "label": "Research"}]),
         "Pick\n" + selection_fence([{"value": "x", "label": "  "}]),
-        # A selection needs words of its own; a link part travels alone.
+        # A link part travels alone, so a selection cannot ride beside only a link.
         "https://example.com/topics\n" + selection_fence(SELECTION_OPTIONS),
-        selection_fence(SELECTION_OPTIONS),
+        # A selection with no title is refused.
+        "Pick\n" + selection_fence({"options": SELECTION_OPTIONS}),
     ]
 
     async def run():
@@ -1809,6 +1814,22 @@ def test_send_splits_links_around_a_selection_block(plugin, tmp_path):
         [{"type": "link", "value": "https://example.com/listing/42"}],
         [{"type": "text", "value": "Which topics?"}, SELECTION_PART],
     ]
+
+
+def test_send_sends_a_titled_selection_with_no_words(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-selection-alone")
+
+    async def run():
+        await adapter.on_processing_start(event)
+        answer = selection_fence(SELECTION_OPTIONS)
+        assert (await adapter.send(event.source.chat_id, answer)).success
+
+    asyncio.run(run())
+    assert client.calls[-1]["parts"] == [SELECTION_PART]
+    assert client.calls[-1]["parts"][0]["title"] == "Topics"
 
 
 def test_send_accepts_the_exact_selection_limits(plugin, tmp_path):
@@ -1848,7 +1869,7 @@ def test_send_accepts_the_exact_selection_limits(plugin, tmp_path):
     asyncio.run(run())
     assert client.calls[0]["parts"] == [
         {"type": "text", "value": "Which topics?"},
-        {"type": "selection", "options": options},
+        {"type": "selection", "title": SELECTION_TITLE, "options": options},
     ]
     for call in client.calls[1:]:
         assert all(part["type"] != "selection" for part in call["parts"])
