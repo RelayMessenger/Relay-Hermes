@@ -328,15 +328,16 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
 def _needs_words(
     component: Optional[Dict[str, Any]], parts: List[Dict[str, Any]]
 ) -> bool:
-    """Whether a lifted selection has no text part left to ride under.
+    """Whether a lifted selection would be left beside only a link.
 
-    The server takes a selection only beside nonblank text, and a link part
-    must travel alone, so an answer whose only remaining words are a URL keeps
-    the whole block as text instead of sending half a component.
+    A selection may travel alone (its ``title`` is the question), but a link
+    part must travel alone too, so an answer whose only remaining words are a
+    URL keeps the whole block as text instead of splitting it.
     """
     return (
         component is not None
         and component.get("type") == "selection"
+        and bool(parts)
         and not any(part.get("type") == "text" for part in parts)
     )
 
@@ -1315,7 +1316,7 @@ class RelayAdapter(BasePlatformAdapter):
         # Message, drawn as a card; the rest are text.
         parts = [bubble_part(chunk) for chunk in _bubble_chunks(content)]
         if _needs_words(component, parts):
-            component, component_error = None, "selection needs a nonblank text prompt"
+            component, component_error = None, "a selection cannot ride beside only a link"
             content = self.format_message(answer)
             parts = [bubble_part(chunk) for chunk in _bubble_chunks(content)]
         if component_error:
@@ -1827,7 +1828,7 @@ async def _standalone_send(
     message, component, component_error = _lift_component(message)
     parts = [bubble_part(chunk) for chunk in _bubble_chunks(message)]
     if _needs_words(component, parts):
-        component, component_error = None, "selection needs a nonblank text prompt"
+        component, component_error = None, "a selection cannot ride beside only a link"
         parts = [bubble_part(chunk) for chunk in _bubble_chunks(answer)]
     if component_error:
         logger.warning(

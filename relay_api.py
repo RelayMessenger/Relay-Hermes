@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.relayapp.im"
 RELAY_API_VERSION = "v1"
 RELAY_WEBHOOK_VERSION = "2026-08-30"
-RELAY_OPENAPI_COMMIT = "b1e534c03fb9d2826ac63ea0d6cc7a0b843276e9"
+RELAY_OPENAPI_COMMIT = "e53138b79536f2fb8bbd339e6d344819c0afe8ff"
 RELAY_OPENAPI_SHA256 = (
-    "1a145cd9dbf977de1d4f40191ec861825a19f1c7ab637f60fd507eeea0007402"
+    "3ac33f08a16f83be44585a34df34d7067f9157a8971e63686ab41f44374ce5f8"
 )
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
@@ -1438,11 +1438,13 @@ def split_buttons(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[
 # Selection under a message, the way the Relay SDK's ``splitSelection`` lifts
 # it out of an agent's words (Relay-SDK packages/sdk/src/selection.ts, ported
 # here like the rest of this file). The model ends its answer with a fenced
-# block tagged ``selection`` holding the part's ``options`` array; the block
-# becomes the selection part and the words stay the text. Limits are the
-# server's (Relay-Server server/src/selection.ts): 1 to 25 options, a trimmed
-# label of 1 to 80, and a unique case-sensitive ASCII token value of 1 to 100.
+# block tagged ``selection`` holding the part's ``title`` and ``options``; the
+# block becomes the selection part and the words, if any, stay the text above
+# it. Limits are the server's (Relay-Server server/src/selection.ts): a trimmed
+# title of 1 to 60, 1 to 25 options, a trimmed label of 1 to 80, and a unique
+# case-sensitive ASCII token value of 1 to 100.
 SELECTION_FENCE = "selection"
+SELECTION_TITLE_MAX_LENGTH = 60
 SELECTION_MAX_OPTIONS = 25
 SELECTION_LABEL_MAX_LENGTH = 80
 SELECTION_VALUE_MAX_LENGTH = 100
@@ -1451,7 +1453,8 @@ SELECTION_VALUE_MAX_LENGTH = 100
 SELECTION_GUIDANCE = " ".join([
     "Use selection when the person can choose several known options, then Send once.",
     "If the person asks for selections or multiple choices to submit together, send a selection, not buttons.",
-    "Include a nonblank text question and 1 to 25 options with explicit stable value and readable label.",
+    "Put the question in `title` (1 to 60 characters, a few words, e.g. \"Pizza toppings\"). Anything else you want to say goes in the text part, which shows as a normal message above the card.",
+    "Include 1 to 25 options with explicit stable value and readable label.",
     "Labels are trimmed, 1 to 80 characters; values are unique case-sensitive ASCII tokens of 1 to 100 characters matching ^[A-Za-z0-9][A-Za-z0-9._:-]*$.",
     "Do not mix selection with buttons. The person opens the prompt, checks any number of options and submits them once; checking sends nothing and only the submit does. A person answers a given selection once, and reopening it afterwards shows what they chose without letting them change it.",
     "Selection inherits existing Chat membership rules: at most one human user, with multiple agents allowed.",
@@ -1465,8 +1468,8 @@ SELECTION_GUIDANCE = " ".join([
 SELECTION_BLOCK_INSTRUCTION = (
     "To offer multiple selections, end your answer with a fenced code block tagged `"
     + SELECTION_FENCE
-    + "` containing [{\"value\":\"stable_token\",\"label\":\"Readable label\"}]. "
-    "Include the question outside the block."
+    + "` containing {\"title\":\"Pizza toppings\",\"options\":[{\"value\":\"stable_token\",\"label\":\"Readable label\"}]}. "
+    "Any other words go outside the block."
 )
 
 # The most JSON one agent-context line carries. A model that is handed an
@@ -1537,19 +1540,33 @@ def _selection_option(
 
 
 def selection_part(parsed: Any) -> Union[Dict[str, Any], str]:
-    """A ``selection`` part from a decoded options array or whole part, or why not.
+    """A ``selection`` part from a decoded part object, or why not.
 
+    ``type`` may be left out; ``title`` and ``options`` are required.
     Read-back fields (``has_responded``, ``reactions``) are not accepted: this
     is what the agent sends, not what it reads.
     """
-    options: Any = parsed
-    if isinstance(parsed, dict):
-        unknown = [key for key in parsed if key not in ("type", "options")]
-        if unknown:
-            return f"selection has unknown field {unknown[0]}"
-        if parsed.get("type") != "selection":
-            return "selection part needs type selection"
-        options = parsed.get("options")
+    if not isinstance(parsed, dict):
+        return (
+            f"selection needs a title of 1 to {SELECTION_TITLE_MAX_LENGTH} "
+            "characters and its options in one object"
+        )
+    unknown = [key for key in parsed if key not in ("type", "title", "options")]
+    if unknown:
+        return f"selection has unknown field {unknown[0]}"
+    if parsed.get("type", "selection") != "selection":
+        return "selection part needs type selection"
+    title = parsed.get("title")
+    if (
+        not isinstance(title, str)
+        or not title.strip()
+        or utf16_len(title.strip()) > SELECTION_TITLE_MAX_LENGTH
+    ):
+        return (
+            f"selection needs a title of 1 to {SELECTION_TITLE_MAX_LENGTH} "
+            "characters"
+        )
+    options = parsed.get("options")
     if (
         not isinstance(options, list)
         or not options
@@ -1564,7 +1581,7 @@ def selection_part(parsed: Any) -> Union[Dict[str, Any], str]:
             return option
         values.add(option["value"])
         result.append(option)
-    return {"type": "selection", "options": result}
+    return {"type": "selection", "title": title.strip(), "options": result}
 
 
 def parse_selection_block(body: str) -> Union[Dict[str, Any], str]:
@@ -1597,24 +1614,22 @@ def split_selection(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     before = answer[:start].rstrip()
     after = answer[match.end():].lstrip()
     text = f"{before}\n\n{after}" if before and after else (before or after)
-    if not text.strip():
-        return answer, None, "selection needs a nonblank text prompt"
     return text, part, None
 
 
 def parts_with_selection(
     text: str, selection: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """The parts one selection Message carries: the question, then the options.
+    """The parts one selection Message carries: any words, then the selection.
 
-    Nothing is truncated; a question or a selection the server would refuse
-    raises instead.
+    The text is optional; blank text sends the selection alone. Nothing is
+    truncated; a selection the server would refuse raises instead.
     """
-    if not text.strip():
-        raise ValueError("selection needs a nonblank text prompt")
     validated = selection_part(selection)
     if isinstance(validated, str):
         raise ValueError(validated)
+    if not text.strip():
+        return [validated]
     return [{"type": "text", "value": text}, validated]
 
 
