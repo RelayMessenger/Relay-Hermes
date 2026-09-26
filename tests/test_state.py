@@ -300,9 +300,8 @@ def test_directory_replacement_before_sqlite_connect_cannot_redirect_or_mutate(
     with pytest.raises(RelayStateBindingError, match="replaced during use"):
         open_inbox(path)
 
-    assert str(before_connect["database"]).startswith(
-        ("file:/proc/self/fd/", "file:/dev/fd/")
-    )
+    # SQLite opens the real pathname read-write, never creating it.
+    assert before_connect["database"] == f"{path.as_uri()}?mode=rw"
     displaced_database = displaced / "inbox.sqlite3"
     assert displaced_database.read_bytes() == before_connect["bytes"] == b""
     assert displaced_database.stat().st_mode & 0o777 == before_connect["mode"]
@@ -334,9 +333,7 @@ def test_database_replacement_before_sqlite_connect_cannot_reach_dangling_target
     with pytest.raises(RelayStateBindingError):
         open_inbox(path)
 
-    assert str(connected_to[0]).startswith(
-        ("file:/proc/self/fd/", "file:/dev/fd/")
-    )
+    assert connected_to[0] == f"{path.as_uri()}?mode=rw"
     assert path.is_symlink()
     assert not victim.exists()
     assert not (state_dir / STATE_BINDING_FILENAME).exists()
@@ -429,7 +426,7 @@ def test_token_switch_refuses_before_requeue_or_snapshot_processing(tmp_path):
     inbox.close()
 
     with pytest.raises(RelayStateBindingError, match="different API origin or Agent Token"):
-        open_inbox(path, token="different-agent-token")
+        open_inbox(path, token=TOKEN + "-other")
 
     with sqlite3.connect(path) as db:
         assert db.execute(
@@ -527,3 +524,84 @@ def test_unbound_existing_database_is_not_adopted_or_requeued(tmp_path):
         assert db.execute(
             "SELECT status FROM events WHERE event_id='legacy'"
         ).fetchone()[0] == "processing"
+
+
+def test_sqlite_journal_and_wal_live_beside_the_real_database(tmp_path):
+    """SQLite names its journal and WAL after the path it opened.
+
+    On macOS the old ``/dev/fd/<n>`` name made SQLite try to create
+    ``/dev/fd/<n>-journal`` and every open failed with "unable to open
+    database file" (live Hermes test, 2026-09-26). The inbox must open the
+    real pathname, so the WAL lands in the owner-only state directory.
+    """
+
+    state_dir = tmp_path / "relay"
+    path = state_dir / "inbox.sqlite3"
+    inbox = open_inbox(path)
+    try:
+        assert inbox.accept("1", payload("event-1")) is True
+        database = inbox._connection().execute("PRAGMA database_list").fetchone()[2]
+        assert os.path.realpath(database) == os.path.realpath(path)
+        assert (state_dir / "inbox.sqlite3-wal").exists()
+    finally:
+        inbox.close()
+    reopened = open_inbox(path)
+    try:
+        assert reopened.next_pending()[0] == "event-1"
+    finally:
+        reopened.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point walk")
+def test_windows_inbox_opens_and_refuses_a_junction(tmp_path):
+    """Windows has no O_NOFOLLOW; a junction in the path must be refused."""
+
+    import subprocess
+
+    path = tmp_path / "relay" / "inbox.sqlite3"
+    inbox = open_inbox(path)
+    try:
+        assert inbox.accept("1", payload("event-1")) is True
+    finally:
+        inbox.close()
+
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(RelayStateBindingError, match="no-follow"):
+        open_inbox(junction / "relay" / "inbox.sqlite3")
+    assert list(target.iterdir()) == []
+
+
+def test_name_surrogate_reparse_points_count_as_links():
+    """Symbolic links and junctions are refused; other reparse points are not."""
+
+    import stat as stat_module
+    from types import SimpleNamespace
+
+    from relay_hermes.state import _follows_elsewhere
+
+    directory = stat_module.S_IFDIR | 0o700
+    reparse = stat_module.FILE_ATTRIBUTE_REPARSE_POINT
+    junction = SimpleNamespace(
+        st_mode=directory, st_file_attributes=reparse, st_reparse_tag=0xA0000003
+    )
+    symlink = SimpleNamespace(
+        st_mode=directory, st_file_attributes=reparse, st_reparse_tag=0xA000000C
+    )
+    cloud_placeholder = SimpleNamespace(
+        st_mode=directory, st_file_attributes=reparse, st_reparse_tag=0x9000001A
+    )
+    plain = SimpleNamespace(st_mode=directory, st_file_attributes=0)
+    posix_link = SimpleNamespace(st_mode=stat_module.S_IFLNK | 0o777)
+
+    assert _follows_elsewhere(junction) is True
+    assert _follows_elsewhere(symlink) is True
+    assert _follows_elsewhere(posix_link) is True
+    assert _follows_elsewhere(cloud_placeholder) is False
+    assert _follows_elsewhere(plain) is False

@@ -7,7 +7,7 @@ name = "relay-hermes"
 version = "1.0.0rc6.dev15"
 description = "Connect Hermes Agent to Relay as an always-on agent"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Companion, Inc." }]
 keywords = ["hermes", "hermes-agent", "relay", "messaging", "agent", "websocket"]
@@ -16,6 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Communications :: Chat",
 ]
 dependencies = [

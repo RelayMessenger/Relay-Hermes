@@ -8,6 +8,10 @@ description: >
   on a live connection, are saved before they are answered, are never answered
   twice, and every reply is sent back to Relay.
 author: Companion, Inc.
+# Hermes itself gates on this (hermes_cli/plugins_manifest.py
+# requires_hermes_error) with the version it reports for itself, not the
+# placeholder package version Hermes main carries.
+requires_hermes: ">=0.19.0"
 homepage: https://github.com/RelayMessenger/Relay-Hermes
 license: MIT
 tags:

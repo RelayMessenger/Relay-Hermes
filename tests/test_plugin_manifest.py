@@ -34,7 +34,7 @@ OPENAPI_SHA256 = (
     "3ac33f08a16f83be44585a34df34d7067f9157a8971e63686ab41f44374ce5f8"
 )
 OPENAPI_RELATIVE_PATH = (
-    f"contracts/relay-server/{OPENAPI_COMMIT}/openapi.yaml"
+    "contracts/relay-server/openapi.yaml"
 )
 
 KNOWN_MANIFEST_FIELDS = {
@@ -45,6 +45,7 @@ KNOWN_MANIFEST_FIELDS = {
     "manifest_version", "api_version", "requires_plugins",
     "python_dependencies", "config_schema", "license", "homepage", "tags",
     "capabilities", "emits", "listens", "hermes", "depends",
+    "requires_hermes", "python_runtime",
 }
 
 KNOWN_ENV_KEYS = {"name", "description", "prompt", "url", "password", "category"}
@@ -62,6 +63,8 @@ def test_every_top_level_key_is_in_the_contract(manifest):
 
 def test_declares_a_platform_plugin(manifest):
     assert manifest["kind"] == "platform"
+    # The floor Hermes enforces itself, with the version it reports.
+    assert manifest["requires_hermes"] == ">=0.19.0"
     assert manifest["manifest_version"] == 1
     assert manifest["name"] == "relay-hermes"
     assert manifest["label"] == "Relay"
@@ -240,7 +243,7 @@ def test_reusable_ci_covers_full_release_compatibility():
     path = MANIFEST.parent / ".github" / "workflows" / "ci.yml"
     text = path.read_text(encoding="utf-8")
     assert "workflow_call:" in text
-    assert 'python-version: ["3.11", "3.12", "3.13"]' in text
+    assert 'python-version: ["3.11", "3.12", "3.13", "3.14"]' in text
     assert text.count("python -m build --outdir release/dist") == 1
     assert "Retain the distributions before validation" in text
     assert "Download the one CI-built distribution pair" in text
@@ -266,7 +269,9 @@ def test_ci_reads_the_version_from_the_tree_and_rehearses_both_lanes():
     assert 'os.environ["EXPECTED_MANIFEST_VERSION"]' in text
     assert set(jobs) == {
         "build", "test", "published-hermes", "staging-bump-dry-run", "release-dry-run",
+        "state-on-each-os", "hermes-install-scan",
     }
+    assert jobs["state-on-each-os"]["strategy"]["matrix"]["os"] == ["macos-latest", "windows-latest"]
     assert "python scripts/release_version.py staging --dry-run" in text
     assert "python scripts/release_version.py release --dry-run" in text
     assert "grep -q '^release plan only: skip$' plan-b.txt" in text
@@ -346,3 +351,51 @@ def test_release_lanes_share_one_check_step_and_identical_gated_uploads():
 def test_shipped_copy_carries_no_em_dashes(name):
     text = (MANIFEST.parent / name).read_text(encoding="utf-8")
     assert "\u2014" not in text
+
+
+def test_python_314_joins_hermes_dependency_workspace():
+    """Hermes's installer ships Python 3.14.7, and PM refuses a member whose
+    requires-python excludes it ("requires Python >=3.11,<3.14, but Hermes
+    runs on Python 3.14.7"): uv intersects every member's requires-python."""
+    from packaging.specifiers import SpecifierSet
+
+    metadata = tomllib.loads((MANIFEST.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    requires = metadata["project"]["requires-python"]
+    for version in ("3.11.0", "3.12.0", "3.13.0", "3.14.7"):
+        assert SpecifierSet(requires).contains(version), (requires, version)
+    assert "Programming Language :: Python :: 3.14" in metadata["project"]["classifiers"]
+
+
+# Hermes copies the whole plugin into its dependency workspace before it
+# resolves it: <HERMES_HOME>\installs\<16>\environments\<32>\workspace\
+# plugin-sources\relay-hermes-<16>\ (pm/workspace.py _workspace_member). Under
+# the Windows SYSTEM profile that prefix measured 189 characters (Daytona,
+# 2026-09-26), and Windows refuses a directory past 248 and a file past 260
+# (MAX_PATH), which surfaced as WinError 206 at 265 characters.
+WINDOWS_MEMBER_PREFIX = 189
+WINDOWS_MAX_PATH = 260
+
+
+def test_every_tracked_path_fits_hermes_windows_workspace():
+    import subprocess
+
+    # What `hermes plugins install` clones: the tracked tree. CI keeps other
+    # checkouts (_hermes-agent) and build output beside it, untracked.
+    root = MANIFEST.parent
+    listed = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True,
+    )
+    paths = listed.stdout.split()
+    assert paths
+    longest = max(paths, key=len)
+    assert WINDOWS_MEMBER_PREFIX + 1 + len(longest) < WINDOWS_MAX_PATH - 12, longest
+
+
+def test_documented_manual_install_never_prompts():
+    """``install --enable`` asks before preparing Python dependencies and,
+    without a terminal, skips them and leaves the plugin disabled
+    (hermes_cli/plugins_cmd_install.py _consent_python_deps). ``--no-enable``
+    then ``enable`` is Hermes's non-interactive path."""
+    readme = (MANIFEST.parent / "README.md").read_text(encoding="utf-8")
+    assert "hermes plugins install RelayMessenger/Relay-Hermes --no-enable\nhermes plugins enable relay-hermes\n" in readme
+    assert "hermes plugins install RelayMessenger/Relay-Hermes --enable" not in readme

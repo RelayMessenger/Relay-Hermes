@@ -58,6 +58,8 @@ _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+# The event types this release knows: Relay-SDK packages/sdk/src/operations.ts
+# RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx, staging, 2026-09-26.
 _WEBHOOK_EVENT_TYPES = {
     "message.sent",
     "message.received",
@@ -81,6 +83,14 @@ _WEBHOOK_EVENT_TYPES = {
     "payment.succeeded",
     "payment.canceled",
     "payment.expired",
+    "location.sharing.started",
+    "location.sharing.stopped",
+    "task.created",
+    "task.message",
+    "task.canceled",
+    "task.updated",
+    "community.post.created",
+    "community.comment.created",
 }
 _DISCONNECT_REASONS = {
     "revoked",
@@ -834,10 +844,18 @@ async def consume_websocket(
     pong_timeout_seconds: float = HEARTBEAT_PONG_TIMEOUT_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    log: Callable[[str], None] = logger.warning,
+    unknown_event_types: Optional[set] = None,
 ) -> None:
-    """Commit before cumulative ACK; transport ACK never processes or Reads."""
+    """Commit before cumulative ACK; transport ACK never processes or Reads.
+
+    ``unknown_event_types`` holds the unknown types already reported, so each
+    is logged once per process rather than once per connection.
+    """
 
     last_pong_at = monotonic()
+    if unknown_event_types is None:
+        unknown_event_types = set()
 
     async def receive() -> None:
         nonlocal last_pong_at
@@ -1017,7 +1035,8 @@ async def consume_websocket(
                 not isinstance(event, dict)
                 or event.get("api_version") != RELAY_API_VERSION
                 or event.get("webhook_version") != RELAY_WEBHOOK_VERSION
-                or event.get("event_type") not in _WEBHOOK_EVENT_TYPES
+                or not isinstance(event.get("event_type"), str)
+                or not event["event_type"]
                 or not isinstance(event.get("event_id"), str)
                 or _UUID_PATTERN.fullmatch(event["event_id"]) is None
                 or not isinstance(event.get("created_at"), str)
@@ -1034,7 +1053,20 @@ async def consume_websocket(
                 raise RelayWebSocketProtocolError(
                     "Relay WebSocket sequence is not contiguous"
                 )
-            inbox.accept(sequence, event)
+            if event["event_type"] in _WEBHOOK_EVENT_TYPES:
+                inbox.accept(sequence, event)
+            else:
+                # A type newer than this release: skipped and acknowledged
+                # like a handled event, never stored, so it cannot come back
+                # on every reconnect. The TS SDK does the same
+                # (websocket.ts, RelayUnknownEventTypeError, reported once).
+                if event["event_type"] not in unknown_event_types:
+                    unknown_event_types.add(event["event_type"])
+                    log(
+                        f"Relay sent event type {event['event_type']!r}, which "
+                        "this relay-hermes release does not know; it is skipped. "
+                        "Update relay-hermes to receive it."
+                    )
             accepted_through = sequence_number
             await socket.send(json.dumps({
                 "type": "ack",
@@ -1095,6 +1127,7 @@ async def run_websocket_loop(
         raise RuntimeError("relay: websockets is required")
     url = websocket_url(client.base_url)
     attempt = 0
+    unknown_event_types: set = set()
     while should_continue():
         try:
             async with connector(
@@ -1115,6 +1148,8 @@ async def run_websocket_loop(
                     on_accepted=on_accepted,
                     on_ready=mark_ready,
                     on_full_sync=on_full_sync,
+                    log=log,
+                    unknown_event_types=unknown_event_types,
                 )
         except asyncio.CancelledError:
             raise

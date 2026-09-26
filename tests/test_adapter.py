@@ -40,6 +40,11 @@ def plugin():
     return importlib.import_module("relay_hermes.adapter")
 
 
+# The person relay_event() says sent each message.
+PERSON_ID = "01993d50-ef7b-7b37-886b-23fd80c7ec12"
+PERSON_HANDLE = "advait"
+
+
 def make_adapter(plugin, tmp_path):
     from gateway.config import PlatformConfig
 
@@ -2489,3 +2494,150 @@ def test_send_puts_a_url_bubble_out_as_its_own_link_message(plugin, tmp_path):
         ],
     ]
     assert len({call["idempotency_key"] for call in client.calls}) == 3
+
+
+def _agent_event(plugin, adapter, event_id, message_id, *, opening="text"):
+    event = _event_with_message_id(plugin, adapter, event_id, message_id)
+    data = event.raw_message["data"]
+    data["id"] = message_id
+    data["sender_handle"] = {
+        "id": "own-agent", "handle": "helper", "kind": "agent",
+        "owner": {"kind": "user", "handle": PERSON_HANDLE, "display_name": "Advait"},
+    }
+    if opening == "buttons":
+        data["parts"] = [{"type": "buttons", "items": [{"label": "Yes"}]}]
+    elif opening == "selection":
+        data["parts"] = [{"type": "selection", "title": "Pick", "options": [{"value": "a", "label": "A"}]}]
+    return event
+
+
+def _intake(plugin, adapter, event):
+    """Run the adapter's own intake for one message; dispatch is recorded."""
+    api = importlib.import_module("relay_hermes.relay_api")
+    dispatched = []
+
+    async def capture(turn):
+        dispatched.append(turn)
+
+    adapter._dispatch_turn = capture
+    adapter._client = FakeClient()
+
+    async def run():
+        assert await adapter._on_inbound(api.parse_inbound(event.raw_message)) is True
+        await asyncio.gather(*adapter._read_tasks)
+
+    asyncio.run(run())
+    del adapter._dispatch_turn
+    return dispatched
+
+
+@pytest.mark.parametrize("mode", ["auto", "off", "first"])
+def test_an_answer_to_another_agent_names_the_message_it_answers(plugin, tmp_path, mode):
+    """Relay-SDK PR 366: an answer to an agent carries reply_to naming its
+    message, so Relay's A2A door hands each caller its own answer. Under the
+    old "auto" rule the newest message was never named."""
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._reply_to_mode = mode
+    message_id = "01993d50-ef7b-7b37-886b-23fd80c7ec31"
+    _intake(plugin, adapter, _agent_event(plugin, adapter, "event-a", message_id))
+    chat_id = "01993d50-ef7b-7b37-886b-23fd80c7ec10"
+
+    result = asyncio.run(adapter.send(chat_id, "Forty-two.", reply_to=message_id))
+
+    assert result.success
+    assert adapter._client.calls[0]["reply_to"] == {"message_id": message_id}
+
+
+def test_an_answer_to_a_person_keeps_the_auto_rule(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    person = _event_with_message_id(plugin, adapter, "event-p", "01993d50-ef7b-7b37-886b-23fd80c7ec11")
+    _intake(plugin, adapter, person)
+    asyncio.run(adapter.send(
+        "01993d50-ef7b-7b37-886b-23fd80c7ec10", "Hi.",
+        reply_to="01993d50-ef7b-7b37-886b-23fd80c7ec11",
+    ))
+    assert adapter._client.calls[0]["reply_to"] is None
+
+
+@pytest.mark.parametrize("opening", ["buttons", "selection"])
+def test_an_agents_buttons_or_selection_message_is_answered_without_a_link(
+    plugin, tmp_path, opening,
+):
+    """The server refuses an agent's reply to those parts (Relay-SDK PR 366)."""
+    adapter = make_adapter(plugin, tmp_path)
+    message_id = "01993d50-ef7b-7b37-886b-23fd80c7ec32"
+    _intake(plugin, adapter, _agent_event(plugin, adapter, "event-b", message_id, opening=opening))
+    asyncio.run(adapter.send(
+        "01993d50-ef7b-7b37-886b-23fd80c7ec10", "Done.", reply_to=message_id,
+    ))
+    assert adapter._client.calls[0]["reply_to"] is None
+
+
+def test_an_agents_overlapping_messages_each_get_their_own_turn_in_order(plugin, tmp_path):
+    """One agent calling twice in one chat gets two answers (A2A 1.0 3.1.1).
+
+    Hermes folds a message that lands mid-turn into the running turn, so the
+    second call used to ride inside the first turn and one answer went out
+    for both. The adapter now holds an agent's message until the live turn
+    ends and hands it to Hermes as a turn of its own.
+    """
+    from gateway.platforms.base import ProcessingOutcome
+
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox = RecordingInbox()
+    adapter._running = True
+    first = _agent_event(plugin, adapter, "event-1", "01993d50-ef7b-7b37-886b-23fd80c7ec41")
+    second = _agent_event(plugin, adapter, "event-2", "01993d50-ef7b-7b37-886b-23fd80c7ec42")
+    session_key = adapter._relay_session_key(first)
+    handed = []
+
+    async def hermes(incoming):
+        # Hermes starts a turn for whatever reaches it while the session is free.
+        assert session_key not in adapter._active_sessions, "folded into a live turn"
+        handed.append(incoming.message_id)
+        adapter._active_sessions[session_key] = asyncio.Event()
+        await adapter.on_processing_start(incoming)
+
+    adapter.handle_message = hermes
+
+    async def finish(event):
+        await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+        adapter._active_sessions.pop(session_key, None)
+
+    async def run():
+        await adapter._dispatch_turn(first)
+        await adapter._dispatch_turn(second)
+        assert handed == [first.message_id]
+        assert list(adapter._waiting[session_key]) == [second]
+        await finish(first)
+        for _ in range(100):
+            if len(handed) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert handed == [first.message_id, second.message_id]
+        await finish(second)
+        await asyncio.sleep(0.1)
+        assert session_key not in adapter._waiting
+        assert session_key not in adapter._waiting_tasks
+
+    asyncio.run(run())
+    assert adapter._inbox.completed == ["event-1", "event-2"]
+
+
+def test_a_persons_message_still_reaches_a_persons_live_turn(plugin, tmp_path):
+    """Between people Hermes's own busy handling stays in charge."""
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._inbox = RecordingInbox()
+    event = _event_for(plugin, adapter, "event-two", "01993d50-ef7b-7b37-886b-23fd80c7ec22")
+    session_key = adapter._relay_session_key(event)
+    adapter._active_sessions[session_key] = asyncio.Event()
+    adapter._live_from_agent[session_key] = False
+    reached = []
+
+    async def hermes(incoming):
+        reached.append(incoming)
+
+    adapter.handle_message = hermes
+    asyncio.run(adapter._dispatch_turn(event))
+    assert reached == [event]
+    assert session_key not in adapter._waiting
