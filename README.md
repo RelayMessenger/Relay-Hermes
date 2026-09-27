@@ -129,7 +129,7 @@ Connect with the [Relay CLI](https://www.npmjs.com/package/relaymessenger),
 then start the gateway:
 
 ```sh
-npx relaymessenger@staging connect hermes
+npx relaymessenger connect hermes
 hermes gateway run
 ```
 

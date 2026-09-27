@@ -399,3 +399,17 @@ def test_documented_manual_install_never_prompts():
     readme = (MANIFEST.parent / "README.md").read_text(encoding="utf-8")
     assert "hermes plugins install RelayMessenger/Relay-Hermes --no-enable\nhermes plugins enable relay-hermes\n" in readme
     assert "hermes plugins install RelayMessenger/Relay-Hermes --enable" not in readme
+
+
+def test_readme_installs_the_released_relay_cli():
+    """main is staging's exact tree and no promotion step rewrites the README
+    (release.yml publishes it verbatim as the PyPI long description), so the
+    README names the released CLI, never an npm staging tag or prerelease.
+    ``npx relaymessenger connect hermes`` resolves the ``latest`` dist-tag."""
+    readme = (MANIFEST.parent / "README.md").read_text(encoding="utf-8")
+    assert "npx relaymessenger connect hermes" in readme
+    staging_spec = re.compile(
+        r"(?:relaymessenger|@relaymessenger/[a-z-]+|relay-claude-channel)@staging\b"
+        r"|\b\d+\.\d+\.\d+-staging\.\d+\b"
+    )
+    assert staging_spec.findall(readme) == []
