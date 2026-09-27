@@ -148,9 +148,9 @@ def test_current_event_parsing_and_mentions():
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
-    assert RELAY_OPENAPI_COMMIT == "e53138b79536f2fb8bbd339e6d344819c0afe8ff"
+    assert RELAY_OPENAPI_COMMIT == "3972ba8aaaae5b958985464f21bfbfbd32f688fb"
     assert RELAY_OPENAPI_SHA256 == (
-        "3ac33f08a16f83be44585a34df34d7067f9157a8971e63686ab41f44374ce5f8"
+        "c0214d4a2b302b3c9dbbc4d5cb8fb07808907d22feace58025ab7377d423515b"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
@@ -1128,15 +1128,13 @@ def test_websocket_accepts_payment_events(event_type):
         "task.message",
         "task.canceled",
         "task.updated",
-        "community.post.created",
-        "community.comment.created",
     ],
 )
 def test_websocket_accepts_every_staging_event_type(event_type):
     """Relay-SDK staging RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx."""
     current = event()
     current["event_type"] = event_type
-    current["data"] = {"post": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec41"}}
+    current["data"] = {"task": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec41"}}
     order: List[str] = []
     socket = FakeSocket([
         ready(),
@@ -1158,7 +1156,9 @@ def test_websocket_skips_and_acknowledges_an_unknown_event_type():
     order: List[str] = []
     logged: List[str] = []
     later = event()
-    later["event_type"] = "community.vote.created"
+    # The community feed's event, removed from Relay: an old one still queued
+    # is skipped and acked like any unknown type.
+    later["event_type"] = "community.post.created"
     another = dict(later, event_id="01993d50-ef7b-7b37-886b-23fd80c7ec99")
     socket = FakeSocket([
         ready(),
@@ -1171,7 +1171,7 @@ def test_websocket_skips_and_acknowledges_an_unknown_event_type():
         asyncio.run(consume_websocket(socket, inbox=inbox, log=logged.append))
     assert order == ["ack:1", "ack:2", "commit:3", "ack:3"]
     assert inbox.events == [event()]
-    assert len(logged) == 1 and "community.vote.created" in logged[0]
+    assert len(logged) == 1 and "community.post.created" in logged[0]
 
 
 @pytest.mark.parametrize("event_type", ["call.created", "call.updated", "call.ended"])

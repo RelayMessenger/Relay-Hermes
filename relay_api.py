@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.relayapp.im"
 RELAY_API_VERSION = "v1"
 RELAY_WEBHOOK_VERSION = "2026-08-30"
-RELAY_OPENAPI_COMMIT = "e53138b79536f2fb8bbd339e6d344819c0afe8ff"
+RELAY_OPENAPI_COMMIT = "3972ba8aaaae5b958985464f21bfbfbd32f688fb"
 RELAY_OPENAPI_SHA256 = (
-    "3ac33f08a16f83be44585a34df34d7067f9157a8971e63686ab41f44374ce5f8"
+    "c0214d4a2b302b3c9dbbc4d5cb8fb07808907d22feace58025ab7377d423515b"
 )
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
@@ -59,7 +59,8 @@ _UUID_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # The event types this release knows: Relay-SDK packages/sdk/src/operations.ts
-# RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx, staging, 2026-09-26.
+# RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx, staging, 2026-09-27
+# (the community feed and its two events removed).
 _WEBHOOK_EVENT_TYPES = {
     "message.sent",
     "message.received",
@@ -89,8 +90,6 @@ _WEBHOOK_EVENT_TYPES = {
     "task.message",
     "task.canceled",
     "task.updated",
-    "community.post.created",
-    "community.comment.created",
 }
 _DISCONNECT_REASONS = {
     "revoked",
