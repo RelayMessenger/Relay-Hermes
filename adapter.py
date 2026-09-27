@@ -899,32 +899,96 @@ class RelayAdapter(BasePlatformAdapter):
             handle=inbound.agent_handle,
         )
 
-    async def _replies_to_me(self, inbound: InboundRelayMessage) -> bool:
+    async def _read_reply_target(
+        self, inbound: InboundRelayMessage, *, required: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """The Message a reply names, read once from the server.
+
+        Relay's webhook carries a reply as a bare pointer,
+        ``reply_to: {message_id, part_index}``; Telegram hands a bot the quoted
+        ``reply_to_message`` itself. The target serves both the group rule
+        below and Hermes's own reply context (``MessageEvent.reply_to_text``).
+        A retryable failure is raised only where the group rule needs the
+        target; otherwise the turn runs without it.
+        """
+        target = inbound.message.get("reply_to")
+        message_id = target.get("message_id") if isinstance(target, dict) else None
+        if not isinstance(message_id, str) or not message_id or self._client is None:
+            return None
+        try:
+            return await self._client.get_message(message_id)
+        except RelayApiError as error:
+            if error.retryable and required:
+                raise
+            logger.info(
+                "[%s] could not read Message %s that %s replies to: %s",
+                self.name, message_id, inbound.message_id, error,
+            )
+            return None
+
+    @staticmethod
+    def _replies_to_me(inbound: InboundRelayMessage, source: Optional[Dict[str, Any]]) -> bool:
         """A reply to one of this agent's own messages addresses it.
 
         A selection answer and a button tap are replies without a mention (the
         server refuses a mention on a selection answer), so the mention rule
         alone dropped the answer to this agent's own question in every group.
-        Hermes keeps no record of the ids it sent, so ask the server whose the
-        target is, the way the SDK's channel bridge does
-        (``#replyTargetsAgent``). An unreadable target is not a reply to us.
+        Hermes keeps no record of the ids it sent, so the server says whose
+        the target is, the way the SDK's channel bridge does. An unreadable
+        target is not a reply to us.
         """
         target = inbound.message.get("reply_to")
         message_id = target.get("message_id") if isinstance(target, dict) else None
-        if not isinstance(message_id, str) or not message_id or self._client is None:
-            return False
-        try:
-            source = await self._client.get_message(message_id)
-        except RelayApiError as error:
-            if error.retryable:
-                raise
-            return False
         return (
-            source.get("id") == message_id
+            source is not None
+            and source.get("id") == message_id
             and source.get("chat_id") == inbound.chat_id
             and source.get("is_from_me") is True
             and not source.get("is_system_message")
         )
+
+    @staticmethod
+    def _reply_context(
+        inbound: InboundRelayMessage, source: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Hermes's own reply fields for a swipe-reply.
+
+        Hermes renders them as ``[Replying to your previous message: "..."]``
+        above the person's words (gateway ``reply_to_text``), the way its
+        Telegram adapter fills them from ``reply_to_message``. A multipart
+        target is narrowed to the swiped part, the rule Relay's iOS app uses to
+        draw the quote; a tap or a selection answer names a part with no words,
+        so it keeps the whole Message.
+        """
+        target = inbound.message.get("reply_to")
+        message_id = target.get("message_id") if isinstance(target, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            return {}
+        fields: Dict[str, Any] = {"reply_to_message_id": message_id}
+        if source is None or source.get("chat_id") != inbound.chat_id:
+            return fields
+        parts = [part for part in (source.get("parts") or []) if isinstance(part, dict)]
+        index = target.get("part_index")
+        swiped = parts[index] if (
+            len(parts) > 1 and isinstance(index, int) and 0 <= index < len(parts)
+        ) else None
+        if swiped is not None and swiped.get("type") not in ("buttons", "selection"):
+            parts = [swiped]
+        words = [render_text({"parts": parts})] + [
+            f"[{part.get('filename') or 'attachment'}]"
+            for part in parts if part.get("type") == "media"
+        ]
+        text = "\n".join(word for word in words if word)
+        if text:
+            fields["reply_to_text"] = text
+        fields["reply_to_is_own_message"] = source.get("is_from_me") is True
+        sender = source.get("from_handle") if isinstance(source.get("from_handle"), dict) else {}
+        name = sender.get("display_name") or sender.get("handle") or source.get("from")
+        if isinstance(name, str) and name:
+            fields["reply_to_author_name"] = name
+        if isinstance(sender.get("id"), str):
+            fields["reply_to_author_id"] = sender["id"]
+        return fields
 
     async def _on_inbound(self, inbound: InboundRelayMessage) -> bool:
         """Turn one Relay event into a Hermes ``MessageEvent``."""
@@ -936,7 +1000,9 @@ class RelayAdapter(BasePlatformAdapter):
         cache.add(chat_id)
         chat_type = "group" if is_group else "dm"
 
-        if is_group and not self._addressed_in_group(inbound) and not await self._replies_to_me(inbound):
+        addressed = not is_group or self._addressed_in_group(inbound)
+        reply_source = await self._read_reply_target(inbound, required=not addressed)
+        if not addressed and not self._replies_to_me(inbound, reply_source):
             logger.debug(
                 "[%s] not mentioned in group %s, staying out of %s",
                 self.name, chat_id, inbound.message_id,
@@ -990,6 +1056,7 @@ class RelayAdapter(BasePlatformAdapter):
             timestamp=self._parse_timestamp(inbound.created_at),
             media_urls=media_paths,
             media_types=media_kinds,
+            **self._reply_context(inbound, reply_source),
         )
 
         # Read at intake, the moment the message is accepted for Hermes, as
