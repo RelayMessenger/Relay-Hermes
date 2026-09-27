@@ -55,6 +55,10 @@ Messages rebuild local indexes and never become new Hermes turns.
 
 - Typing indicators while Hermes works.
 - Reactions in both directions.
+- Swipe-replies. The plugin reads the replied-to Message once and sets
+  Hermes's own `reply_to_text`, `reply_to_is_own_message` and
+  `reply_to_author_name`, so Hermes shows the model which Message the person
+  answered (only the swiped part of a multipart Message).
 - Tool-approval answers. Reply exactly `/approve`, `/approve session`,
   `/approve always`, or `/deny`.
 - `message.failed` events are logged, not rejected.

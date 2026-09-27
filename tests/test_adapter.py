@@ -1881,6 +1881,81 @@ def test_send_accepts_the_exact_selection_limits(plugin, tmp_path):
         assert "```selection" in call["parts"][0]["value"]
 
 
+def _swipe_reply(target_id, part_index):
+    payload = relay_event("event-swipe-reply")
+    payload["data"]["parts"] = [{"type": "text", "value": "what did you mean by this?"}]
+    payload["data"]["reply_to"] = {"message_id": target_id, "part_index": part_index}
+    return payload
+
+
+def _two_bubbles(target_id, chat_id):
+    return {
+        "id": target_id,
+        "chat_id": chat_id,
+        "is_from_me": True,
+        "is_system_message": False,
+        "from": "helper",
+        "from_handle": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec13", "handle": "helper", "display_name": "Helper"},
+        "parts": [
+            {"type": "text", "value": "The flight lands at 6."},
+            {"type": "text", "value": "Take the long way round the lake."},
+        ],
+    }
+
+
+def _dispatch_reply(plugin, tmp_path, messages, target_id, part_index):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = ReplyTargetClient(messages)
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    inbound = api.parse_inbound(_swipe_reply(target_id, part_index))
+    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    return client, dispatched[0]
+
+
+def test_swipe_reply_gives_hermes_the_bubble_swiped_and_who_sent_it(plugin, tmp_path):
+    target_id = "01993d50-ef7b-7b37-886b-23fd80c7ec41"
+    chat_id = relay_event()["data"]["chat"]["id"]
+    client, event = _dispatch_reply(
+        plugin, tmp_path, {target_id: _two_bubbles(target_id, chat_id)}, target_id, 1,
+    )
+    assert client.lookups == [target_id]
+    assert event.text == "what did you mean by this?"
+    assert event.reply_to_message_id == target_id
+    assert event.reply_to_text == "Take the long way round the lake."
+    assert event.reply_to_is_own_message is True
+    assert event.reply_to_author_name == "Helper"
+
+
+def test_swipe_reply_to_a_message_that_cannot_be_read_still_names_it(plugin, tmp_path):
+    target_id = "01993d50-ef7b-7b37-886b-23fd80c7ec42"
+    _client, event = _dispatch_reply(plugin, tmp_path, {}, target_id, 0)
+    assert event.reply_to_message_id == target_id
+    assert event.reply_to_text is None
+
+
+def test_a_message_that_is_not_a_reply_reads_nothing(plugin, tmp_path):
+    api = importlib.import_module("relay_hermes.relay_api")
+    adapter = make_adapter(plugin, tmp_path)
+    client = ReplyTargetClient({})
+    adapter._client = client
+    dispatched = []
+
+    async def capture_dispatch(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture_dispatch
+    assert asyncio.run(adapter._on_inbound(api.parse_inbound(relay_event("event-plain")))) is True
+    assert client.lookups == []
+    assert dispatched[0].reply_to_message_id is None
+
+
 def test_inbound_selection_response_carries_its_values_into_the_turn(plugin, tmp_path):
     api = importlib.import_module("relay_hermes.relay_api")
     adapter = make_adapter(plugin, tmp_path)
