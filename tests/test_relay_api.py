@@ -1128,15 +1128,13 @@ def test_websocket_accepts_payment_events(event_type):
         "task.message",
         "task.canceled",
         "task.updated",
-        "community.post.created",
-        "community.comment.created",
     ],
 )
 def test_websocket_accepts_every_staging_event_type(event_type):
     """Relay-SDK staging RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx."""
     current = event()
     current["event_type"] = event_type
-    current["data"] = {"post": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec41"}}
+    current["data"] = {"task": {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec41"}}
     order: List[str] = []
     socket = FakeSocket([
         ready(),
@@ -1158,7 +1156,9 @@ def test_websocket_skips_and_acknowledges_an_unknown_event_type():
     order: List[str] = []
     logged: List[str] = []
     later = event()
-    later["event_type"] = "community.vote.created"
+    # The community feed's event, removed from Relay: an old one still queued
+    # is skipped and acked like any unknown type.
+    later["event_type"] = "community.post.created"
     another = dict(later, event_id="01993d50-ef7b-7b37-886b-23fd80c7ec99")
     socket = FakeSocket([
         ready(),
@@ -1171,7 +1171,7 @@ def test_websocket_skips_and_acknowledges_an_unknown_event_type():
         asyncio.run(consume_websocket(socket, inbox=inbox, log=logged.append))
     assert order == ["ack:1", "ack:2", "commit:3", "ack:3"]
     assert inbox.events == [event()]
-    assert len(logged) == 1 and "community.vote.created" in logged[0]
+    assert len(logged) == 1 and "community.post.created" in logged[0]
 
 
 @pytest.mark.parametrize("event_type", ["call.created", "call.updated", "call.ended"])

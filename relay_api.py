@@ -59,7 +59,8 @@ _UUID_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # The event types this release knows: Relay-SDK packages/sdk/src/operations.ts
-# RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx, staging, 2026-09-26.
+# RELAY_WEBHOOK_EVENT_TYPES and Relay-Docs events/index.mdx, staging, 2026-09-27
+# (the community feed and its two events removed).
 _WEBHOOK_EVENT_TYPES = {
     "message.sent",
     "message.received",
@@ -89,8 +90,6 @@ _WEBHOOK_EVENT_TYPES = {
     "task.message",
     "task.canceled",
     "task.updated",
-    "community.post.created",
-    "community.comment.created",
 }
 _DISCONNECT_REASONS = {
     "revoked",
