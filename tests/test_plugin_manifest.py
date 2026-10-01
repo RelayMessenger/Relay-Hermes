@@ -201,6 +201,31 @@ def test_hosted_workflows_pin_every_external_action_to_a_sha():
                 assert "${{" not in step.get("run", ""), path.name
 
 
+INFISICAL_STEP = "Load the PyPI API token from Infisical"
+
+
+def assert_token_from_infisical(job, text, name):
+    # The org's CI pattern: GitHub OIDC to the shared Infisical identity, the
+    # token at relay-yscy / prod / /ci/pypi. No repository secret is read.
+    assert "secrets.PYPI_API_TOKEN" not in text, name
+    assert job["permissions"]["id-token"] == "write", name
+    names = [step.get("name") for step in job["steps"]]
+    loader = job["steps"][names.index(INFISICAL_STEP)]
+    assert loader["uses"] == "Infisical/secrets-action@8a06c1bdcd5b8635d510c52d4b57a92c1ccef785", name
+    assert loader["with"] == {
+        "method": "oidc",
+        "identity-id": "35c5afed-649f-4b2d-8e73-cf70338b3994",
+        "project-slug": "relay-yscy",
+        "env-slug": "prod",
+        "secret-path": "/ci/pypi",
+    }, name
+    first_use = min(
+        i for i, step in enumerate(job["steps"])
+        if "PYPI_API_TOKEN" in yaml.safe_dump(step.get("with", {}))
+    )
+    assert names.index(INFISICAL_STEP) < first_use, name
+
+
 def test_rc_publish_is_manual_exact_sha_staging_only():
     path = MANIFEST.parent / ".github" / "workflows" / "publish-rc.yml"
     text = path.read_text(encoding="utf-8")
@@ -214,9 +239,10 @@ def test_rc_publish_is_manual_exact_sha_staging_only():
     assert "id-token: write" in text
     assert "attest-build-provenance@" in text
     # PyPI has no trusted publisher for this repository, so the RC uploads
-    # with a project-scoped API token. The token must reach the job as a
-    # secret reference and never as a literal in the tracked workflow.
-    assert "password: ${{ secrets.PYPI_API_TOKEN }}" in text
+    # with the PyPI API token, loaded from Infisical over OIDC and never a
+    # literal in the tracked workflow or a repository secret.
+    assert_token_from_infisical(jobs["publish"], text, "publish-rc.yml")
+    assert "password: ${{ env.PYPI_API_TOKEN }}" in text
     assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", text)
     # PEP 740 attestations only work through Trusted Publishing. With a
     # token the upload step ignores the input, so it stays off on purpose.
@@ -311,7 +337,10 @@ def test_release_lanes_share_one_check_step_and_identical_gated_uploads():
         assert job["permissions"]["id-token"] == "write", name
         check = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/check-dist")
         assert check["with"]["trusted-publishing"] == "${{ vars.PYPI_TRUSTED_PUBLISHING }}", name
-        assert check["with"]["token"] == "${{ secrets.PYPI_API_TOKEN }}", name
+        assert check["with"]["token"] == "${{ env.PYPI_API_TOKEN }}", name
+        assert_token_from_infisical(job, text, name)
+        loader = next(step for step in job["steps"] if step.get("name") == INFISICAL_STEP)
+        assert loader["if"] == gate + "vars.PYPI_TRUSTED_PUBLISHING != 'true'", name
         publishers = [
             step for step in job["steps"] if "pypa/gh-action-pypi-publish" in step.get("uses", "")
         ]
@@ -327,7 +356,7 @@ def test_release_lanes_share_one_check_step_and_identical_gated_uploads():
         assert not re.search(r"pypi-[A-Za-z0-9_-]{16,}", text), name
     assert uploads["publish-staging.yml"] == uploads["release.yml"]
     (_, _, token_with), (_, _, oidc_with) = uploads["release.yml"]
-    assert token_with["password"] == "${{ secrets.PYPI_API_TOKEN }}"
+    assert token_with["password"] == "${{ env.PYPI_API_TOKEN }}"
     assert token_with["attestations"] is False
     assert "password" not in oidc_with
     assert oidc_with["attestations"] is True

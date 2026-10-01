@@ -333,8 +333,10 @@ Both lanes check the distributions through one shared step
 per credential. Which one runs is the repository variable
 `PYPI_TRUSTED_PUBLISHING`:
 
-- unset (today): the project-scoped `PYPI_API_TOKEN` secret, attestations
-  off (PEP 740 attestations only work through Trusted Publishing);
+- unset (today): the `PYPI_API_TOKEN` API token, loaded from Infisical
+  (project `relay-yscy`, environment `prod`, path `/ci/pypi`) over GitHub
+  OIDC, attestations off (PEP 740 attestations only work through Trusted
+  Publishing);
 - `true`: PyPI Trusted Publishing over OIDC, no token, attestations on.
 
 To switch, register two trusted publishers on the `relay-hermes` project
