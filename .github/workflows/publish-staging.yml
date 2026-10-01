@@ -17,8 +17,10 @@ name: Publish staging to PyPI
 #   publish   the retained distributions, rehashed and checked by the shared
 #             .github/actions/check-dist step, uploaded by
 #             pypa/gh-action-pypi-publish on the token or the OIDC path, then
-#             read back from PyPI. The `pypi-staging` environment holds the token and
-#             any approval rule the owner sets on it.
+#             read back from PyPI. The token comes from Infisical
+#             (relay-yscy, prod, /ci/pypi) over GitHub OIDC, the org's CI
+#             pattern; the `pypi-staging` environment holds any approval rule
+#             the owner sets on it.
 #
 # A newer push to staging cancels a run in flight; the newer run re-derives
 # everything from the tip. A bump commit that published nothing is harmless:
@@ -186,13 +188,23 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Load the PyPI API token from Infisical
+        if: vars.PYPI_TRUSTED_PUBLISHING != 'true'
+        uses: Infisical/secrets-action@8a06c1bdcd5b8635d510c52d4b57a92c1ccef785 # v1.0.9
+        with:
+          method: oidc
+          identity-id: 35c5afed-649f-4b2d-8e73-cf70338b3994
+          project-slug: relay-yscy
+          env-slug: prod
+          secret-path: /ci/pypi
+
       - name: Check the distributions and the publishing switch
         uses: ./.github/actions/check-dist
         with:
           dist-dir: release/dist
           version: ${{ needs.bump.outputs.version }}
           trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
-          token: ${{ secrets.PYPI_API_TOKEN }}
+          token: ${{ env.PYPI_API_TOKEN }}
 
       # The two upload steps below are the same in release.yml, word for
       # word; tests/test_plugin_manifest.py holds them equal. They call the
@@ -201,7 +213,7 @@ jobs:
         if: vars.PYPI_TRUSTED_PUBLISHING != 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ env.PYPI_API_TOKEN }}
           packages-dir: release/dist
           repository-url: https://upload.pypi.org/legacy/
           attestations: false
