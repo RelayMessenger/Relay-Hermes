@@ -14,7 +14,8 @@ description: >-
   registers as trusted publishers.
 
   The switch is the repository variable PYPI_TRUSTED_PUBLISHING, passed in
-  by the caller. Unset: the token path (PYPI_API_TOKEN, attestations off).
+  by the caller. Unset: the token path (PYPI_API_TOKEN, loaded from
+  Infisical by the job, attestations off).
   "true": Trusted Publishing (OIDC, attestations on). Both workflows carry
   the same two gated upload steps; tests/test_plugin_manifest.py proves
   they are identical.
@@ -35,7 +36,7 @@ inputs:
     required: false
     default: ""
   token:
-    description: The PYPI_API_TOKEN secret; used only while trusted-publishing is unset
+    description: The PYPI_API_TOKEN loaded from Infisical; used only while trusted-publishing is unset
     required: false
     default: ""
 
@@ -52,7 +53,7 @@ runs:
           ("")
             if [ "$TOKEN_PRESENT" != "true" ]; then
               echo "PYPI_TRUSTED_PUBLISHING is unset and no PYPI_API_TOKEN reached the job." >&2
-              echo "Add the secret at Settings -> Secrets and variables -> Actions," >&2
+              echo "Check the Infisical step: relay-yscy, env prod, path /ci/pypi," >&2
               echo "or register the trusted publisher and set PYPI_TRUSTED_PUBLISHING=true." >&2
               exit 1
             fi

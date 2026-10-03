@@ -12,8 +12,9 @@ name: Release to PyPI
 #   push to main                -> derive, build, check, publish, verify, tag
 #   workflow_dispatch (dry_run) -> derive, build, twine check, stop
 #
-# The `pypi-release` environment holds the token and any approval rule the
-# owner sets on it. The check before the upload is the step both lanes share
+# The token comes from Infisical (relay-yscy, prod, /ci/pypi) over GitHub
+# OIDC, the org's CI pattern; the `pypi-release` environment holds any
+# approval rule the owner sets on it. The check before the upload is the step both lanes share
 # (.github/actions/check-dist) and the two upload steps are identical in both
 # lanes, so the switch to Trusted Publishing is the repository variable
 # PYPI_TRUSTED_PUBLISHING and no file here.
@@ -49,8 +50,9 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 45
     environment: pypi-release
-    # contents: write records the tag; id-token: write is the OIDC token the
-    # Trusted Publishing path exchanges (PyPI: grant it at the job level).
+    # contents: write records the tag; id-token: write is the OIDC token
+    # Infisical exchanges for the PyPI token, and the one the Trusted
+    # Publishing path exchanges with PyPI (grant it at the job level).
     permissions:
       contents: write
       id-token: write
@@ -123,6 +125,16 @@ jobs:
             sha256sum --check provenance/SHA256SUMS
           )
 
+      - name: Load the PyPI API token from Infisical
+        if: github.event_name == 'push' && steps.plan.outputs.publish == 'true' && vars.PYPI_TRUSTED_PUBLISHING != 'true'
+        uses: Infisical/secrets-action@8a06c1bdcd5b8635d510c52d4b57a92c1ccef785 # v1.0.9
+        with:
+          method: oidc
+          identity-id: 35c5afed-649f-4b2d-8e73-cf70338b3994
+          project-slug: relay-yscy
+          env-slug: prod
+          secret-path: /ci/pypi
+
       - name: Check the distributions and the publishing switch
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
         uses: ./.github/actions/check-dist
@@ -131,7 +143,7 @@ jobs:
           version: ${{ steps.plan.outputs.version }}
           forbid: ${{ steps.plan.outputs.staging_version }}
           trusted-publishing: ${{ vars.PYPI_TRUSTED_PUBLISHING }}
-          token: ${{ secrets.PYPI_API_TOKEN }}
+          token: ${{ env.PYPI_API_TOKEN }}
 
       - name: Clean-install the exact wheel and sdist
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true'
@@ -171,7 +183,7 @@ jobs:
         if: github.event_name == 'push' && steps.plan.outputs.publish == 'true' && vars.PYPI_TRUSTED_PUBLISHING != 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ env.PYPI_API_TOKEN }}
           packages-dir: release/dist
           repository-url: https://upload.pypi.org/legacy/
           attestations: false

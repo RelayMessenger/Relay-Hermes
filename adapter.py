@@ -86,6 +86,8 @@ from .relay_api import (
     split_buttons,
     split_payment,
     split_selection,
+    location_share_context,
+    place_context,
     selection_reply,
     selection_reply_context,
     bubble_part,
@@ -1016,9 +1018,15 @@ class RelayAdapter(BasePlatformAdapter):
         # way every Relay runtime does (the SDK's selectionReplyContext).
         parts = inbound.message.get("parts") or []
         target = inbound.message.get("reply_to")
-        context = selection_reply_context(
-            selection_reply(parts, target), {"parts": parts, "reply_to": target},
-        )
+        # A pin or a shared location has no words; its data joins the turn
+        # the same way (Relay-Agent src/location.ts withLocationShares).
+        context = "\n\n".join(filter(None, [
+            selection_reply_context(
+                selection_reply(parts, target), {"parts": parts, "reply_to": target},
+            ),
+            location_share_context(parts),
+            place_context(parts),
+        ]))
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
