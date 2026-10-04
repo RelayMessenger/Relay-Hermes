@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.relayapp.im"
 RELAY_API_VERSION = "v1"
 RELAY_WEBHOOK_VERSION = "2026-08-30"
-RELAY_OPENAPI_COMMIT = "65c26f166e1011be50205737b6f9273a50f08ee0"
+RELAY_OPENAPI_COMMIT = "78e958bd35f5e7f33c1ce9b77ac11be1dac3afc8"
 RELAY_OPENAPI_SHA256 = (
-    "106c738d4152b65be03f32938d89d9a433f87156478b0c8ce65abbd70ad6a1c9"
+    "abe76bc8feadd85462ff4293eba9bc1b2cea44b9929b0fbc772a120d84efb365"
 )
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_TEXT_PART_UNITS = 10_000
@@ -1242,16 +1242,48 @@ class InboundRelayMessage:
     created_at: Optional[str]
 
 
+def event_sender(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The message event's sender: ``from_handle``, else the deprecated ``sender_handle``."""
+    for key in ("from_handle", "sender_handle"):
+        sender = data.get(key)
+        if isinstance(sender, dict):
+            return sender
+    return None
+
+
+def event_chat_id(data: Dict[str, Any]) -> str:
+    """The message event's chat id: ``chat_id``, else ``chat.id``.
+
+    ``chat`` itself stays current: ``chat.is_group`` is the only group flag.
+    """
+    chat_id = data.get("chat_id")
+    if isinstance(chat_id, str) and chat_id:
+        return chat_id
+    chat = data.get("chat")
+    return str(chat.get("id") or "") if isinstance(chat, dict) else ""
+
+
+def event_is_from_me(data: Dict[str, Any]) -> Optional[bool]:
+    """Whether this agent sent the message: ``is_from_me``, else ``direction``."""
+    if isinstance(data.get("is_from_me"), bool):
+        return data["is_from_me"]
+    direction = data.get("direction")
+    if direction in ("inbound", "outbound"):
+        return direction == "outbound"
+    return None
+
+
 def parse_inbound(event: Dict[str, Any]) -> Optional[InboundRelayMessage]:
     if event.get("event_type") != "message.received":
         return None
     data = event.get("data")
-    if not isinstance(data, dict) or data.get("direction") != "inbound":
+    if not isinstance(data, dict) or event_is_from_me(data) is not False:
         return None
-    chat = data.get("chat")
-    sender = data.get("sender_handle")
+    chat = data.get("chat") if isinstance(data.get("chat"), dict) else {}
+    chat_id = event_chat_id(data)
+    sender = event_sender(data)
     parts = data.get("parts")
-    if not isinstance(chat, dict) or not isinstance(sender, dict):
+    if not chat_id or sender is None:
         return None
     if not isinstance(parts, list):
         return None
@@ -1260,7 +1292,7 @@ def parse_inbound(event: Dict[str, Any]) -> Optional[InboundRelayMessage]:
         event=event,
         event_id=str(event.get("event_id") or ""),
         message=data,
-        chat_id=str(chat.get("id") or ""),
+        chat_id=chat_id,
         message_id=str(data.get("id") or ""),
         sender_contact_id=str(sender.get("id") or ""),
         sender_contact_kind=str(sender.get("kind") or ""),

@@ -81,6 +81,7 @@ from .relay_api import (
     is_idempotency_reuse,
     mentions_agent,
     normalize_base_url,
+    event_sender,
     parse_inbound,
     render_text,
     split_buttons,
@@ -1257,7 +1258,7 @@ class RelayAdapter(BasePlatformAdapter):
     def _from_agent(event: MessageEvent) -> bool:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
-        sender = data.get("sender_handle") if isinstance(data.get("sender_handle"), dict) else {}
+        sender = event_sender(data) or {}
         return sender.get("kind") == "agent"
 
     def _session_busy(self, session_key: str) -> bool:

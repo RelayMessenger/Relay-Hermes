@@ -148,9 +148,9 @@ def test_current_event_parsing_and_mentions():
 def test_relay_contract_versions_and_product_paths_stay_current():
     assert RELAY_API_VERSION == "v1"
     assert RELAY_WEBHOOK_VERSION == "2026-08-30"
-    assert RELAY_OPENAPI_COMMIT == "65c26f166e1011be50205737b6f9273a50f08ee0"
+    assert RELAY_OPENAPI_COMMIT == "78e958bd35f5e7f33c1ce9b77ac11be1dac3afc8"
     assert RELAY_OPENAPI_SHA256 == (
-        "106c738d4152b65be03f32938d89d9a433f87156478b0c8ce65abbd70ad6a1c9"
+        "abe76bc8feadd85462ff4293eba9bc1b2cea44b9929b0fbc772a120d84efb365"
     )
     contract_harness = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "check-openapi.py")
@@ -166,6 +166,58 @@ def test_relay_contract_versions_and_product_paths_stay_current():
         assert "/v1/conversations" not in text, name
     transport = (root / "relay_api.py").read_text(encoding="utf-8")
     assert "/voicememo" not in transport
+
+
+def _message_shape(payload: Dict[str, Any], shape: str, *, outbound: bool = False) -> Dict[str, Any]:
+    """Re-key one message event as the old-only, new-only or both-key shape.
+
+    Relay-Server 519 added the REST Message's ``chat_id``, ``from_handle`` and
+    ``is_from_me`` to message events beside ``chat.id``, the deprecated
+    ``sender_handle``, and ``direction``. ``chat`` stays in every shape: its
+    ``is_group`` is the only group flag.
+    """
+    data = dict(payload["data"])
+    data["chat"] = dict(data["chat"])
+    data["direction"] = "outbound" if outbound else "inbound"
+    new = {
+        "chat_id": data["chat"]["id"],
+        "from_handle": data["sender_handle"],
+        "is_from_me": outbound,
+    }
+    if shape == "new":
+        for old in ("sender_handle", "direction"):
+            data.pop(old)
+        data["chat"].pop("id")
+    if shape in ("new", "both"):
+        data.update(new)
+    return {**payload, "data": data}
+
+
+@pytest.mark.parametrize("shape", ["old", "new", "both"])
+@pytest.mark.parametrize("group", [False, True])
+def test_message_event_old_new_and_both_key_shapes_read_the_same(shape, group):
+    inbound = parse_inbound(_message_shape(event(group=group), shape))
+    assert inbound is not None
+    assert inbound.chat_id == CHAT_ID
+    assert inbound.is_group is group
+    assert inbound.agent_handle == "helper"
+    assert inbound.message_id == MESSAGE_ID
+    assert inbound.sender_contact_id == "01993d50-ef7b-7b37-886b-23fd80c7ec15"
+    assert inbound.sender_contact_kind == "user"
+    assert inbound.sender_contact_name == "Advait"
+    assert parse_inbound(_message_shape(event(), shape, outbound=True)) is None
+
+
+def test_message_event_new_keys_win_over_the_deprecated_ones():
+    payload = _message_shape(event(), "both")
+    payload["data"]["chat"] = {"id": "01993d50-ef7b-7b37-886b-23fd80c7ec99"}
+    payload["data"]["sender_handle"] = {"id": "stale", "kind": "agent", "handle": "stale"}
+    payload["data"]["direction"] = "outbound"
+    inbound = parse_inbound(payload)
+    assert inbound is not None
+    assert inbound.chat_id == CHAT_ID
+    assert inbound.sender_contact_id == "01993d50-ef7b-7b37-886b-23fd80c7ec15"
+    assert inbound.sender_contact_kind == "user"
 
 
 def test_visible_at_text_is_not_a_structured_mention():
