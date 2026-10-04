@@ -2775,3 +2775,22 @@ def test_inbound_location_share_reaches_the_turn_as_share_data(plugin, tmp_path)
         '{"state":"live","began_at":"2026-10-03T12:00:00Z",'
         '"ends_at":"2026-10-03T13:00:00Z","ended_at":null}'
     )
+
+
+@pytest.mark.parametrize("shape", ["old", "new", "both"])
+def test_agent_sender_is_read_from_every_message_event_shape(plugin, shape):
+    """``from_handle`` first, the deprecated ``sender_handle`` second."""
+    from types import SimpleNamespace
+
+    payload = relay_event("event-shape")
+    data = payload["data"]
+    data["sender_handle"] = {**data["sender_handle"], "kind": "agent"}
+    if shape in ("new", "both"):
+        data["from_handle"] = data["sender_handle"]
+    if shape == "new":
+        del data["sender_handle"]
+    assert plugin.RelayAdapter._from_agent(SimpleNamespace(raw_message=payload)) is True
+    data["from_handle" if shape != "old" else "sender_handle"] = {
+        **data.get("from_handle", data.get("sender_handle")), "kind": "user"
+    }
+    assert plugin.RelayAdapter._from_agent(SimpleNamespace(raw_message=payload)) is False

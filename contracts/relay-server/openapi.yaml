@@ -857,11 +857,13 @@ paths:
         you, into a chat with at least one active person in it, none of whom has
         blocked or been blocked by that person. Anything else returns the same
         404. When the person deletes their account, every shared card of theirs
-        reads "Deleted Account" with no handle, photo or links and is_active
-        false. Ask both people first, with ordinary
+        keeps its id and reads first_name "Deleted Account" with handle
+        empty (""), last_name, image_url, image_color and about null, links
+        empty, and is_active false. Ask both people first, with ordinary
         buttons; Relay does not ask for you. A person's card is a snapshot of what
-        their profile shows: id, handle, name, photo and links; no email,
-        birthdate or age range.
+        their profile shows: id, handle, kind (user), first_name, last_name,
+        image_url, image_color, is_active, is_verified (always false), links
+        and about; no phone, email, birthdate or age range.
 
         A card shared by handle is a snapshot taken when it is sent: its id, handle,
         name, photo and subtitle never change afterwards, even when the agent is
@@ -1781,6 +1783,12 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: A person cannot block a built-in agent such as `relay` (error code `2003`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: The Handle is not a registered Relay Handle that can be blocked (error code `2001`).
           content:
@@ -1821,6 +1829,9 @@ paths:
 
         `reason` is a free-text note returned on the list endpoint. Nothing is
         sent to the blocked Handle, so blocking is silent from their side.
+
+        A person cannot block a built-in agent, the one every account starts
+        with (`relay`); the request is refused with `403` (error code `2003`).
     delete:
       operationId: unblockHandle
       summary: Unblock a handle
@@ -2701,6 +2712,56 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
   /v1/contacts/{handle}/rating:
+    get:
+      operationId: getMyAgentRating
+      summary: Read your rating
+      description: >-
+        Your own rating of an agent, or null when you have not rated it, the
+        way an app's page shows your stars under Tap to Rate. Only a person
+        rates; an agent token is refused with 403 (error code `2003`).
+      tags:
+        - Directory
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RatedAgentHandle"
+      responses:
+        "200":
+          description: Your rating, or null
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - rating
+                properties:
+                  rating:
+                    oneOf:
+                      - type: "null"
+                      - $ref: "#/components/schemas/AgentRating"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller is an agent (error code `2003`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The handle is not an active agent (error code `2001`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: The handle belongs to the caller (error code `1005`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     put:
       operationId: rateAgent
       summary: Rate an agent
@@ -2709,7 +2770,10 @@ paths:
         per rater per agent: sending it again replaces the stars and the
         review. Rate an agent only after a real exchange -- one chat you share
         carries at least ten messages between you and at least three from the
-        agent.
+        agent. Only a person rates; an agent token is refused with 403 (error
+        code `2003`). The agent hears it as `rating.created`, then
+        `rating.updated` each time the stars or the review change; sending the
+        same stars and review again changes nothing and sends no event.
       tags:
         - Directory
       security:
@@ -2756,7 +2820,7 @@ paths:
         "403":
           description: >-
             The exchange is below the bar: ten messages and three replies
-            (error code `1005`).
+            (error code `1005`), or the caller is an agent (error code `2003`).
           content:
             application/json:
               schema:
@@ -2778,7 +2842,10 @@ paths:
     delete:
       operationId: deleteAgentRating
       summary: Remove your rating
-      description: Take your rating and review off an agent.
+      description: >-
+        Take your rating and review off an agent. The agent hears it as
+        `rating.deleted`; a later rating is `rating.created` again. Only a
+        person rates; an agent token is refused with 403 (error code `2003`).
       tags:
         - Directory
       security:
@@ -2787,9 +2854,15 @@ paths:
         - $ref: "#/components/parameters/RatedAgentHandle"
       responses:
         "204":
-          description: The rating is gone
+          description: The rating is gone, or there was none
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller is an agent (error code `2003`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: The handle is not an active agent (error code `2001`).
           content:
@@ -3024,7 +3097,7 @@ paths:
         - Calls
       security:
         - BearerAuth: []
-      description: Start an audio Call in an existing individual Chat containing exactly one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message, or adding the agent, establishes that relationship. An agent calls only a person who added it and who has not turned off Allow Calls for it; Allow Calls is the person's own switch for each agent they added, on by default, and it never stops the person's own call to the agent. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay emits `call.created` through the agent's configured event transport. Both Contacts use the authenticated Call room for signaling and publish one WebRTC `audio` track. The callee answers by sending `join` within the 32-second ring lease; silence ends `no-answer`. A Call to a person who is already ringing or in-progress on another Call is created and finished at once with status `busy`; an agent is never marked busy by Relay. An answered Call has no duration limit. When calls are switched off on this server, every create is refused with 503 and nothing is written; `calls_enabled` on GET /v1/me says whether calls are on.
+      description: Start an audio Call in an existing individual Chat containing exactly one user and one agent. The caller comes from authentication. The user must have added the agent; sending or replying to a Message, or adding the agent, establishes that relationship. An agent calls only a person who added it and who has not turned off Allow Calls for it; Allow Calls is the person's own switch for each agent they added, on by default, and it never stops the person's own call to the agent. A block in either direction prevents the call. A group Chat is rejected even when it has only two current members. Reuse the same Idempotency-Key and body after an uncertain response. Relay emits `call.created` through the agent's configured event transport. Both Contacts use the authenticated Call room for signaling and publish one WebRTC `audio` track. The callee answers by sending `join` within the 32-second ring lease; silence ends `no-answer`. A Call to a person who is already ringing or in-progress on another Call is created and finished at once with status `busy`; an agent is never marked busy by Relay. A Call to an agent whose webhooks do not include an active subscription to `call.created` is created and finished at once with status `no-answer`, because that agent can never hear it ring; an agent with no webhook subscription receives call events over its WebSocket. An answered Call has no duration limit. When calls are switched off on this server, every create is refused with 503 and nothing is written; `calls_enabled` on GET /v1/me says whether calls are on. An agent's call to a person none of whose devices runs a Relay build that takes calls is refused with 422 and nothing is written (no Call, no call marker, no missed call).
       parameters:
         - name: chatId
           in: path
@@ -3081,7 +3154,15 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "422":
-          description: The Chat cannot take a Call because it is not an individual Chat containing exactly one user and one agent (error code `1005`).
+          description: |-
+            The Call cannot be placed (error code `1005`). A Chat that is not
+            an individual Chat containing exactly one user and one agent is
+            refused. An agent's call to a person who has no device running a
+            Relay build that takes calls is refused with "This person's Relay
+            app cannot take calls yet. They need to update Relay."; no Call
+            and no call marker are written, so the person sees no missed
+            call. Tell the person in your own words, or send a Message
+            instead.
           content:
             application/json:
               schema:
@@ -3192,7 +3273,17 @@ paths:
         new PeerConnection: Relay moves it onto a new SFU Session, the Call stays
         in progress, and both directions are pulled again after it sends
         `connected`. The room is scoped to the Call and accepts only its
-        authenticated user or agent Contact.
+        authenticated user or agent Contact. To show live Rive content, an
+        agent sends `rive`: Relay opens a Cloudflare Realtime DataChannel
+        named `rive` on its Session (unordered, `maxRetransmits` 0), first
+        sending an `offer` with `track` `rive` that sets up the Session's
+        DataChannel transport if it has none, then a `rive` frame with the
+        channel's `id`. A person whose app draws Rive sends `rive` too and
+        gets the same pair once the agent publishes: the channel is pulled
+        into its Session and the person may reply on it. Open the channel
+        with `createDataChannel("rive", {negotiated: true, id, ordered: false,
+        maxRetransmits: 0})`. After a restart onto a new Session, Relay opens
+        it again with a new `id`.
       parameters:
         - name: callId
           in: path
@@ -3335,6 +3426,91 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls, so the app can load it
+            before the call connects. Null when it has none. Present only when
+            kind is agent.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFile"
+            - type: "null"
+    RiveFile:
+      type: object
+      additionalProperties: false
+      required: [file, artboard, state_machine, view_model]
+      description: >-
+        A Rive file an agent shows in its calls: a character, a quiz, a game,
+        a chart. The app draws `artboard` and runs `state_machine`, binding
+        `view_model`; the agent drives it live on the call's `rive` data
+        channel. Names are Rive's own; a null name means the file's default.
+      properties:
+        file:
+          type: string
+          format: uri
+          description: >-
+            The .riv Relay hosts, at a permanent address that never changes
+            its bytes: `<cdn>/rive/<contact id>/<version>/file-<hash>.riv`.
+          examples:
+            - https://cdn.relayapp.im/rive/0199a000-0000-7000-8000-00000000000b/1790000000000/file-0123456789abcdef.riv
+        artboard:
+          type: ["string", "null"]
+          maxLength: 255
+          examples: [Call]
+        state_machine:
+          type: ["string", "null"]
+          maxLength: 255
+          examples: [Main]
+        view_model:
+          type: ["string", "null"]
+          maxLength: 255
+          examples: [Main]
+    RiveFileInput:
+      type: object
+      additionalProperties: false
+      description: >-
+        Send `attachment_id` for a new file, or `file` with the address the
+        card already holds to change only the names. The names you send
+        replace all three; an omitted or null name means the file's default.
+      oneOf:
+        - required: [attachment_id]
+          not: { required: [file] }
+        - required: [file]
+          not: { required: [attachment_id] }
+      properties:
+        attachment_id:
+          type: string
+          format: uuid
+          description: >-
+            This agent's completed upload from the Attachments API, as for
+            the profile picture: a Rive file (it starts with the bytes
+            `RIVE`) of at most 10 MB. Relay copies it to permanent public
+            storage. Embed every image and font in the file: the app does not
+            fetch Rive's hosted assets.
+        file:
+          type: string
+          format: uri
+          description: The `file` address this card already holds.
+        artboard:
+          type: ["string", "null"]
+          minLength: 1
+          maxLength: 255
+        state_machine:
+          type: ["string", "null"]
+          minLength: 1
+          maxLength: 255
+        view_model:
+          type: ["string", "null"]
+          minLength: 1
+          maxLength: 255
     Call:
       type: object
       additionalProperties: false
@@ -3456,12 +3632,14 @@ components:
           description: "`audio` after this participant has published its local WebRTC audio track."
         tracks:
           type: array
-          maxItems: 2
+          maxItems: 3
           uniqueItems: true
           items:
             type: string
-            enum: [audio, video]
-          description: The local tracks this participant has published, `audio` first.
+            enum: [audio, video, rive]
+          description: >-
+            The local tracks this participant has published, `audio` first,
+            and `rive` once an agent's `rive` DataChannel is open.
         muted:
           type: boolean
         video:
@@ -3472,11 +3650,11 @@ components:
           description: True after this participant reported RTCPeerConnection connectionState `connected` for its initial publication.
         receiving:
           type: array
-          maxItems: 2
+          maxItems: 3
           uniqueItems: true
           items:
             type: string
-            enum: [audio, video]
+            enum: [audio, video, rive]
           description: >-
             The other participant's tracks this participant is receiving now:
             Relay pulled the track into its Session, it answered that `offer`,
@@ -3484,7 +3662,8 @@ components:
             participant restarts, and rebuilt as the tracks are pulled again.
             Relay sends `roomState` each time it changes. Hold generated audio
             until the other participant's `receiving` contains `audio`, then play
-            it from the start.
+            it from the start. `rive` is there once the agent's `rive`
+            DataChannel is pulled into this participant's Session.
     CallRoomJoinFrame:
       type: object
       additionalProperties: false
@@ -3674,8 +3853,38 @@ components:
               maxLength: 65536
         track:
           type: string
-          enum: [audio, video]
-          description: The other participant's track this offer pulls.
+          enum: [audio, video, rive]
+          description: >-
+            The other participant's track this offer pulls. `rive` sets up
+            this Session's DataChannel transport (one SCTP section); answer it
+            like any other.
+    CallRoomRiveFrame:
+      type: object
+      additionalProperties: false
+      required: [type]
+      description: >-
+        Agent: publish the `rive` DataChannel. Person: receive the agent's.
+        Sent again with the channel open, Relay repeats its `id`.
+      properties:
+        type:
+          type: string
+          const: rive
+    CallRoomRiveChannelFrame:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      description: >-
+        The `rive` DataChannel is open on this participant's Session. Create
+        it with `createDataChannel("rive", {negotiated: true, id, ordered:
+        false, maxRetransmits: 0})`. Messages are JSON text of at most 1 KB.
+      properties:
+        type:
+          type: string
+          const: rive
+        id:
+          type: integer
+          minimum: 0
+          maximum: 65534
     CallRoomEndedFrame:
       type: object
       additionalProperties: false
@@ -3857,6 +4066,66 @@ components:
           description: Reactions on this message part
           items:
             $ref: "#/components/schemas/Reaction"
+    RatingRequestPart:
+      type: object
+      additionalProperties: false
+      description: >-
+        Ask the people in the chat to rate your agent, the way an app asks for
+        a rating. The part carries no words: Relay draws "Enjoying
+        <your agent's name>?", "Tell us what you think." and a Rate button.
+        The button opens one sheet with stars and an optional review.
+        It is the whole message and only an agent sends it, in a
+        one-to-one chat or a group; it always rates the agent that sent it.
+        Only people rate: a chat with no person is refused with 409 (error
+        code `2017`). The answer arrives as `rating.created`,
+        then `rating.updated` whenever the person changes it, and
+        `rating.deleted` when they take it back.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [rating_request]
+    RatingRequestPartResponse:
+      type: object
+      description: >-
+        A rating request from an agent. A client that does not draw it shows
+        the Message's text, "Enjoying <agent display name>?".
+      required: [type, value, rating, reactions]
+      properties:
+        type:
+          type: string
+          enum: [rating_request]
+        value:
+          type: string
+          description: >-
+            "Enjoying <agent display name>?", the words a client that does
+            not draw the card shows in its place.
+        rating:
+          description: >-
+            The reader's own rating of the agent that asked, or null when the
+            reader has not rated it. Nobody else's rating is shown here.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [stars, review]
+              properties:
+                stars:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                review:
+                  type:
+                    - string
+                    - "null"
+                  maxLength: 1000
+        reactions:
+          type:
+            - array
+            - "null"
+          description: Reactions on this message part
+          items:
+            $ref: "#/components/schemas/Reaction"
     PlacePart:
       type: object
       additionalProperties: false
@@ -3940,6 +4209,81 @@ components:
         name: Philz Coffee
         address: 101 Forest Ave, Palo Alto, CA 94301
         reactions: null
+    RatingEvent:
+      type: object
+      additionalProperties: false
+      required: [contact, stars, review, created_at, updated_at]
+      description: >-
+        A person's rating of your agent, as it is now stored. One rating per
+        person: a new one replaces the stars and the review.
+      properties:
+        contact:
+          $ref: "#/components/schemas/ContactEventContact"
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review:
+          type:
+            - string
+            - "null"
+          maxLength: 1000
+          description: The person's words, trimmed; null when they gave stars only.
+        created_at:
+          type: string
+          format: date-time
+          description: When the person first rated your agent.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the stars or the review last changed.
+    RatingCreatedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: rating.created
+            data:
+              $ref: "#/components/schemas/RatingEvent"
+    RatingUpdatedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: rating.updated
+            data:
+              $ref: "#/components/schemas/RatingEvent"
+    RatingDeletedEvent:
+      type: object
+      additionalProperties: false
+      required: [contact]
+      description: A person took their rating of your agent back.
+      properties:
+        contact:
+          $ref: "#/components/schemas/ContactEventContact"
+    RatingDeletedWebhook:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required:
+            - event_type
+            - data
+          properties:
+            event_type:
+              type: string
+              const: rating.deleted
+            data:
+              $ref: "#/components/schemas/RatingDeletedEvent"
     LocationSharingStartedEvent:
       type: object
       required: [shared_by, shared_with, chat_id, began_at, ends_at]
@@ -4488,6 +4832,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Null when the person has no Relay account. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none or have no Relay account.
     OwnerPerson:
       type: object
       additionalProperties: false
@@ -4550,6 +4903,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none.
     ChatHandle:
       type: object
       required:
@@ -4640,6 +5002,14 @@ components:
           anyOf:
             - $ref: "#/components/schemas/HandleOwner"
             - type: "null"
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls, so the app can load it
+            before the call connects. Null when it has none. Present only when
+            kind is agent.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFile"
+            - type: "null"
         timezone:
           type:
             - string
@@ -4684,6 +5054,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
         is_contact:
           type: boolean
           description: >-
@@ -4933,6 +5312,14 @@ components:
           description: Agents only.
         visibility:
           $ref: "#/components/schemas/AgentVisibility"
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls, so the app can load it
+            before a call. Null when it has none. Present only when kind is
+            agent.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFile"
+            - type: "null"
         creator:
           description: >-
             Who made the agent: its organization, by the name the organization
@@ -5009,6 +5396,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
         age_rating:
           $ref: "#/components/schemas/AgentAgeRating"
     AgentCategory:
@@ -5345,6 +5741,13 @@ components:
         - image_url
         - image_color
       properties:
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls, or null. Set it with
+            PATCH `rive`.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFile"
+            - type: "null"
         id:
           type: string
           format: uuid
@@ -5403,15 +5806,24 @@ components:
             format: uri
           description: >-
             A shared person's profile links when the card was shared, present
-            only on a person's card. A person's card carries id, handle, name,
-            photo and links, and nothing else.
-        handle:
+            only on a person's card. A person's card carries id, handle, kind,
+            first_name, last_name, image_url, image_color, is_active,
+            is_verified, links and about, and nothing else. Empty after the
+            person deleted their account.
+        about:
           type:
             - string
             - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
           description: >-
-            Relay Handle associated with this contact card. Null only on a
-            shared person's card after they deleted their account.
+            A shared person's about when the card was shared, at most 160 characters, or null when they wrote none or deleted their account. Present only on a person's card.
+        handle:
+          type: string
+          description: >-
+            Relay Handle associated with this contact card. Empty ("") only
+            on a shared person's card after they deleted their account.
         kind:
           type: string
           enum:
@@ -5428,6 +5840,7 @@ components:
         - timezone
         - age_range
         - links
+        - about
       properties:
         id:
           type: string
@@ -5483,6 +5896,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none.
     ContactRemovedEvent:
       type: object
       additionalProperties: false
@@ -6069,6 +6491,7 @@ components:
       type: object
       required:
         - type
+        - value
         - title
         - pages
         - has_responded
@@ -6079,6 +6502,10 @@ components:
           type: string
           enum:
             - form
+        value:
+          type: string
+          readOnly: true
+          description: The form's received_message.title, else its title; the words a client that does not draw the form shows in its place.
         title:
           type: string
           minLength: 1
@@ -7033,11 +7460,16 @@ components:
         - deny
     OAuth2Scope:
       type: string
+      description: >-
+        An OpenID Connect scope a Log in with Relay client may ask for.
+        `birthdate` asks for the person's birthday as the OpenID `birthdate`
+        claim (YYYY-MM-DD, or 0000-MM-DD when they gave no year).
       enum:
         - openid
         - profile
         - email
         - phone
+        - birthdate
     OAuth2Client:
       type: object
       additionalProperties: false
@@ -7226,10 +7658,11 @@ components:
           description: ID of the chat this message belongs to
           format: uuid
         from:
+          deprecated: true
           type:
             - string
             - "null"
-          description: Sender Relay Handle.
+          description: Use from_handle instead.
         from_handle:
           description: The sender of this message as a full handle object
           oneOf:
@@ -7256,6 +7689,7 @@ components:
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
               - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/RatingRequestPartResponse"
               - $ref: "#/components/schemas/LocationPartResponse"
               - $ref: "#/components/schemas/PlacePartResponse"
               - $ref: "#/components/schemas/SystemPartResponse"
@@ -7300,19 +7734,6 @@ components:
             - "null"
           format: date-time
           description: When the message was read
-        edited_at:
-          type:
-            - string
-            - "null"
-          format: date-time
-          description: When the message was last edited, or null if it was never edited.
-        unsent_at:
-          type:
-            - string
-            - "null"
-          format: date-time
-          description: When the sender unsent the message, or null. An unsent Message keeps its place in the transcript
-            and carries no parts.
         silent:
           type: boolean
           description: Whether the sender sent this Message silently, so the recipient's device showed no banner and played
@@ -7400,8 +7821,9 @@ components:
         - parts
       properties:
         chat:
+          deprecated: true
           type: object
-          description: Chat information
+          description: Chat information. Use chat_id instead, which matches the Message object.
           required:
             - id
           properties:
@@ -7434,8 +7856,29 @@ components:
             - inbound
             - outbound
         sender_handle:
-          description: The handle that sent this message
-          $ref: "#/components/schemas/ChatHandle"
+          deprecated: true
+          description: The handle that sent this message. Use from_handle instead, which matches the Message object.
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        chat_id:
+          type: string
+          description: ID of the chat this message belongs to
+          format: uuid
+        from:
+          deprecated: true
+          type:
+            - string
+            - "null"
+          description: Use from_handle instead.
+        from_handle:
+          description: The sender of this message as a full handle object
+          oneOf:
+            - $ref: "#/components/schemas/ChatHandle"
+            - type: "null"
+        is_from_me:
+          type: boolean
+          description: Whether the agent receiving this event sent this message. Same value as the Message object's is_from_me.
         parts:
           type: array
           description: Message parts (text and/or media)
@@ -7455,6 +7898,7 @@ components:
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
               - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/RatingRequestPartResponse"
               - $ref: "#/components/schemas/LocationPartResponse"
               - $ref: "#/components/schemas/PlacePartResponse"
             discriminator:
@@ -7474,6 +7918,7 @@ components:
                 payment: "#/components/schemas/PaymentPartResponse"
                 payment_receipt: "#/components/schemas/PaymentReceiptPartResponse"
                 location_request: "#/components/schemas/LocationRequestPartResponse"
+                rating_request: "#/components/schemas/RatingRequestPartResponse"
                 location: "#/components/schemas/LocationPartResponse"
                 place: "#/components/schemas/PlacePartResponse"
         sent_at:
@@ -7538,6 +7983,7 @@ components:
           suggestion_response: "#/components/schemas/SuggestionResponsePart"
           payment: "#/components/schemas/PaymentPart"
           place: "#/components/schemas/PlacePart"
+          rating_request: "#/components/schemas/RatingRequestPart"
       oneOf:
         - $ref: "#/components/schemas/TextPart"
         - $ref: "#/components/schemas/MediaPart"
@@ -7552,6 +7998,7 @@ components:
         - $ref: "#/components/schemas/SuggestionResponsePart"
         - $ref: "#/components/schemas/PaymentPart"
         - $ref: "#/components/schemas/PlacePart"
+        - $ref: "#/components/schemas/RatingRequestPart"
     MessageReadWebhook:
       description: Complete webhook payload for message.read events (2026-08-30 format)
       allOf:
@@ -8112,6 +8559,7 @@ components:
               - $ref: "#/components/schemas/PaymentPartResponse"
               - $ref: "#/components/schemas/PaymentReceiptPartResponse"
               - $ref: "#/components/schemas/LocationRequestPartResponse"
+              - $ref: "#/components/schemas/RatingRequestPartResponse"
               - $ref: "#/components/schemas/LocationPartResponse"
               - $ref: "#/components/schemas/PlacePartResponse"
         created_at:
@@ -8203,6 +8651,13 @@ components:
         - image_url
         - image_color
       properties:
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls, or null. Set it with
+            PATCH `rive`.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFile"
+            - type: "null"
         description:
           type:
             - string
@@ -8420,6 +8875,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
     SystemEventParty:
       type: object
       additionalProperties: false
@@ -8482,6 +8946,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
     SystemPartResponse:
       type: object
       additionalProperties: false
@@ -8666,6 +9139,15 @@ components:
               - https://www.instagram.com/ana
           description: >-
             The person's profile links, as they set them in Relay: at most 5 absolute https URLs, in the order they chose, each stored as the WHATWG URL parser normalises it (scheme and host lowercased, a non-ASCII host as punycode) and different from the others after normalising. Relay refuses control characters and whitespace, userinfo, hosts that are not public (localhost, IP literals, single-label names, .local and other private names), and a host label that mixes Latin with another script. Empty when they set none. Present only when kind is user. Relay sends no platform name; read the site from the URL.
+        about:
+          type:
+            - string
+            - "null"
+          maxLength: 160
+          examples:
+            - Builds robots in Ann Arbor.
+          description: >-
+            The person's about, as they wrote it in Relay: plain text, at most 160 characters, with no control characters. Null when they wrote none. Present only when kind is user.
     UnblockHandleRequest:
       type: object
       required:
@@ -8750,6 +9232,13 @@ components:
         image_recipe:
           $ref: "#/components/schemas/AgentImageRecipe"
           description: Existing native redraw recipe accompanying image_url or attachment_id.
+        rive:
+          description: >-
+            The Rive file this agent shows in its calls. Null removes it. If
+            omitted, the existing file is kept.
+          anyOf:
+            - $ref: "#/components/schemas/RiveFileInput"
+            - type: "null"
     UpdateWebhookSubscriptionRequest:
       type: object
       properties:
@@ -9057,6 +9546,9 @@ components:
         - payment.expired
         - location.sharing.started
         - location.sharing.stopped
+        - rating.created
+        - rating.updated
+        - rating.deleted
     WebhookEventsResult:
       type: object
       required:
@@ -9416,6 +9908,8 @@ x-relay-call-room-frames:
       $ref: "#/components/schemas/CallRoomEndFrame"
     heartbeat:
       $ref: "#/components/schemas/CallRoomHeartbeatFrame"
+    rive:
+      $ref: "#/components/schemas/CallRoomRiveFrame"
   server:
     ice_servers:
       $ref: "#/components/schemas/CallRoomIceServersFrame"
@@ -9425,6 +9919,8 @@ x-relay-call-room-frames:
       $ref: "#/components/schemas/CallRoomServerAnswerFrame"
     subscription_offer:
       $ref: "#/components/schemas/CallRoomSubscriptionOfferFrame"
+    rive_channel:
+      $ref: "#/components/schemas/CallRoomRiveChannelFrame"
     ended:
       $ref: "#/components/schemas/CallRoomEndedFrame"
     error:
@@ -9814,6 +10310,54 @@ x-relay-webhooks:
           application/json:
             schema:
               $ref: "#/components/schemas/LocationSharingStoppedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  rating.created.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookRatingCreatedV20260830
+      summary: Rating created
+      description: A person rated your agent for the first time, with stars and maybe a review.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RatingCreatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  rating.updated.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookRatingUpdatedV20260830
+      summary: Rating updated
+      description: A person changed their rating of your agent, its stars or its review.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RatingUpdatedWebhook"
+      responses:
+        "200":
+          description: Webhook received successfully
+  rating.deleted.v2026-08-30:
+    post:
+      tags:
+        - 2026-08-30
+      operationId: webhookRatingDeletedV20260830
+      summary: Rating deleted
+      description: A person took their rating of your agent back.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RatingDeletedWebhook"
       responses:
         "200":
           description: Webhook received successfully

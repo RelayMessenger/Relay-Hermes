@@ -6,12 +6,12 @@ instead of checking out another repository during CI or publication.
 | Field | Value |
 | --- | --- |
 | Source repository | `https://github.com/RelayMessenger/Relay-Server` |
-| Source commit | `65c26f166e1011be50205737b6f9273a50f08ee0` |
-| Source commit date | `2026-09-30T22:59:59-04:00` |
+| Source commit | `ed5608a17f35ce6e87bf8f66b6737157c13820b5` |
+| Source commit date | `2026-10-04T16:26:02-04:00` |
 | Source path | `contracts/developer/openapi.yaml` |
 | Local snapshot | `openapi.yaml` |
-| Byte length | `339872` |
-| SHA-256 | `106c738d4152b65be03f32938d89d9a433f87156478b0c8ce65abbd70ad6a1c9` |
+| Byte length | `361294` |
+| SHA-256 | `d718bf72bef79074ebab8110da7cd42553e151bee86336f1384d5bfb352ef7fb` |
 
 The snapshot was copied byte-for-byte from the locked source. It sits at a
 short path on purpose: Hermes copies the whole plugin into a dependency
