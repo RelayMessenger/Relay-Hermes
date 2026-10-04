@@ -172,10 +172,12 @@ def _message_shape(payload: Dict[str, Any], shape: str, *, outbound: bool = Fals
     """Re-key one message event as the old-only, new-only or both-key shape.
 
     Relay-Server 519 added the REST Message's ``chat_id``, ``from_handle`` and
-    ``is_from_me`` to message events beside the deprecated ``chat``,
-    ``sender_handle`` and ``direction``.
+    ``is_from_me`` to message events beside ``chat.id``, the deprecated
+    ``sender_handle``, and ``direction``. ``chat`` stays in every shape: its
+    ``is_group`` is the only group flag.
     """
     data = dict(payload["data"])
+    data["chat"] = dict(data["chat"])
     data["direction"] = "outbound" if outbound else "inbound"
     new = {
         "chat_id": data["chat"]["id"],
@@ -183,18 +185,22 @@ def _message_shape(payload: Dict[str, Any], shape: str, *, outbound: bool = Fals
         "is_from_me": outbound,
     }
     if shape == "new":
-        for old in ("chat", "sender_handle", "direction"):
+        for old in ("sender_handle", "direction"):
             data.pop(old)
+        data["chat"].pop("id")
     if shape in ("new", "both"):
         data.update(new)
     return {**payload, "data": data}
 
 
 @pytest.mark.parametrize("shape", ["old", "new", "both"])
-def test_message_event_old_new_and_both_key_shapes_read_the_same(shape):
-    inbound = parse_inbound(_message_shape(event(), shape))
+@pytest.mark.parametrize("group", [False, True])
+def test_message_event_old_new_and_both_key_shapes_read_the_same(shape, group):
+    inbound = parse_inbound(_message_shape(event(group=group), shape))
     assert inbound is not None
     assert inbound.chat_id == CHAT_ID
+    assert inbound.is_group is group
+    assert inbound.agent_handle == "helper"
     assert inbound.message_id == MESSAGE_ID
     assert inbound.sender_contact_id == "01993d50-ef7b-7b37-886b-23fd80c7ec15"
     assert inbound.sender_contact_kind == "user"

@@ -1252,7 +1252,10 @@ def event_sender(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def event_chat_id(data: Dict[str, Any]) -> str:
-    """The message event's chat id: ``chat_id``, else the deprecated ``chat.id``."""
+    """The message event's chat id: ``chat_id``, else ``chat.id``.
+
+    ``chat`` itself stays current: ``chat.is_group`` is the only group flag.
+    """
     chat_id = data.get("chat_id")
     if isinstance(chat_id, str) and chat_id:
         return chat_id
