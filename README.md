@@ -267,9 +267,9 @@ The staging helper refuses every other API origin.
 ## Locked Relay contract
 
 Current contract validation is pinned to Relay Server developer OpenAPI commit
-`ed5608a17f35ce6e87bf8f66b6737157c13820b5`. The exact
+`78e958bd35f5e7f33c1ce9b77ac11be1dac3afc8`. The exact
 `contracts/developer/openapi.yaml` SHA-256 is
-`d718bf72bef79074ebab8110da7cd42553e151bee86336f1384d5bfb352ef7fb`.
+`abe76bc8feadd85462ff4293eba9bc1b2cea44b9929b0fbc772a120d84efb365`.
 Those exact public bytes are checked in at
 `contracts/relay-server/openapi.yaml`;
 normal CI and RC publication validate that local snapshot without private

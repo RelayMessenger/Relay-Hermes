@@ -7821,9 +7821,8 @@ components:
         - parts
       properties:
         chat:
-          deprecated: true
           type: object
-          description: Chat information. Use chat_id instead, which matches the Message object.
+          description: The chat this message belongs to. id equals chat_id; is_group tells a direct chat from a group.
           required:
             - id
           properties:
