@@ -366,7 +366,8 @@ jobs:
 
       - name: Run the durable inbox tests
         run: |
-          python -m pip install --disable-pip-version-check "pytest>=8"
+          # state.py reads relay_api, which builds parts with the Relay SDK.
+          python -m pip install --disable-pip-version-check "pytest>=8" "relaymessenger>=0.1.0,<0.2"
           python -m pytest -q tests/test_state.py
 
   # The plugin's users install Hermes from PyPI, which lags the git pin the
