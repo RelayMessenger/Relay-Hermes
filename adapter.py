@@ -41,6 +41,7 @@ import asyncio
 import collections
 import contextvars
 import dataclasses
+import json
 import logging
 import mimetypes
 import os
@@ -85,8 +86,14 @@ from .relay_api import (
     parse_inbound,
     render_text,
     split_buttons,
+    split_carousel,
+    split_form,
     split_payment,
+    split_place,
+    split_rating_request,
+    split_rich_card,
     split_selection,
+    contact_card_context,
     location_share_context,
     place_context,
     selection_reply,
@@ -94,7 +101,14 @@ from .relay_api import (
     bubble_part,
     BUTTONS_BLOCK_INSTRUCTION,
     BUTTONS_GUIDANCE,
+    CARD_BLOCK_INSTRUCTION,
+    FORM_BLOCK_INSTRUCTION,
+    FORM_GUIDANCE,
     LINK_LINE_INSTRUCTION,
+    LOCATION_GUIDANCE,
+    PLACE_BLOCK_INSTRUCTION,
+    RATING_REQUEST_BLOCK_INSTRUCTION,
+    RATING_REQUEST_GUIDANCE,
     PAYMENT_BLOCK_INSTRUCTION,
     PAYMENT_GUIDANCE,
     SELECTION_BLOCK_INSTRUCTION,
@@ -151,7 +165,24 @@ MAX_INLINE_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
 MEDIA_PLACEHOLDER = "[media]"
-SILENCE_SENTINEL = "[no reply]"
+# Hermes's own silence token (docs: user-guide/messaging, "Intentional Silence
+# Tokens"). The gateway sends nothing for a turn whose whole answer is one of
+# its tokens. "[no reply]" is the token earlier releases of this plugin taught;
+# a session that learned it still goes quiet.
+SILENCE_SENTINEL = "[SILENT]"
+_LEGACY_SILENCE_SENTINEL = "[no reply]"
+try:
+    from gateway.response_filters import is_intentional_silence_response as _hermes_silence
+except ImportError:  # pragma: no cover - every supported Hermes has it
+    def _hermes_silence(response: Any) -> bool:
+        return isinstance(response, str) and response.strip().upper() in {"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"}
+# Hermes main (b08bb5a, 2026-09-26) posts a notice in place of a silence token
+# on a person's message unless the adapter sets MessageEvent.reply_expected to
+# False. Every Relay agent may stay silent on any message, so the adapter says
+# so wherever the running Hermes has the field (0.19.0 does not).
+_MESSAGE_EVENT_HAS_REPLY_EXPECTED = "reply_expected" in {
+    field.name for field in dataclasses.fields(MessageEvent)
+}
 REPLY_TO_MODES = {"off", "first", "all", "auto"}
 DEFAULT_REPLY_TO_MODE = "auto"
 
@@ -313,11 +344,17 @@ def _lift_component(answer: str) -> Tuple[str, Optional[Dict[str, Any]], Optiona
     """The words and the one component block under them.
 
     The SDK's ``answerMessages`` reads an answer this way (Relay-SDK
-    packages/sdk/src/links.ts): a payment is lifted first and rules out
-    buttons and selection; then a selection, which rules out buttons, so a
-    selection block leaves the words even when a buttons block follows it. A
-    block that cannot be used stays in the words with a reason.
+    packages/sdk/src/links.ts): a rating request first, which must be the
+    whole answer; then a form; then a payment, which rules out buttons and
+    selection; then a selection, which rules out buttons, so a selection block
+    leaves the words even when a buttons block follows it. A place, a
+    rich_card and a carousel follow the form, each the answer's one
+    component. A block that cannot be used stays in the words with a reason.
     """
+    for split in (split_rating_request, split_form, split_place, split_rich_card, split_carousel):
+        text, part, error = split(answer)
+        if part is not None or error is not None:
+            return text, part, error
     text, request, error = split_payment(answer)
     if request is not None:
         # Held until send time: the checkout_url exists only once the adapter
@@ -1027,6 +1064,7 @@ class RelayAdapter(BasePlatformAdapter):
             ),
             location_share_context(parts),
             place_context(parts),
+            contact_card_context(inbound.message),
         ]))
         media_paths, media_kinds, notes = await self._ingest_media(inbound.message)
         if notes:
@@ -1066,6 +1104,7 @@ class RelayAdapter(BasePlatformAdapter):
             media_urls=media_paths,
             media_types=media_kinds,
             **self._reply_context(inbound, reply_source),
+            **({"reply_expected": False} if _MESSAGE_EVENT_HAS_REPLY_EXPECTED else {}),
         )
 
         # Read at intake, the moment the message is accepted for Hermes, as
@@ -1492,16 +1531,13 @@ class RelayAdapter(BasePlatformAdapter):
         content, component, component_error = _lift_component(content)
         content = self.format_message(content)
 
-        # Model-chosen silence. People do not answer every "ok cool", and an
-        # agent forced to emit something emits filler. Silence stays DM-only:
-        # a group turn only reaches here because the agent was named, and being
-        # named and then saying nothing reads as broken rather than tactful.
-        if component is None and self._is_silence(content) and chat_id not in self._group_chats:
+        # Model-chosen silence, in a direct chat and in a group alike. People
+        # do not answer every "ok cool", and an agent forced to emit something
+        # emits filler; every Relay agent may stay silent on any turn.
+        if component is None and self._is_silence(content):
             logger.info("[%s] model chose not to reply in %s", self.name, chat_id)
             await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=None)
-        if component is None and self._is_silence(content):
-            content = "OK"
 
         # A bubble that is only a URL goes out as a link part in its own
         # Message, drawn as a card; the rest are text.
@@ -1543,7 +1579,11 @@ class RelayAdapter(BasePlatformAdapter):
     @staticmethod
     def _is_silence(content: str) -> bool:
         stripped = (content or "").strip()
-        return not stripped or stripped.lower() == SILENCE_SENTINEL
+        return (
+            not stripped
+            or stripped.lower() == _LEGACY_SILENCE_SENTINEL
+            or _hermes_silence(stripped)
+        )
 
     @staticmethod
     def truncate_message(
@@ -2079,6 +2119,106 @@ async def _standalone_send(
         return {"error": f"relay standalone send failed: {exc}"}
 
 
+def _tool_chat_id(args: Dict[str, Any]) -> str:
+    """The Chat a location tool acts on: the argument, else the Relay session's Chat."""
+    chat_id = str((args or {}).get("chat_id") or "").strip()
+    if chat_id:
+        return chat_id
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:  # Hermes before session contextvars
+        def get_session_env(name: str, default: str = "") -> str:
+            return os.getenv(name, default)
+    if get_session_env("HERMES_SESSION_PLATFORM", "") != PLATFORM_NAME:
+        return ""
+    return get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+
+
+async def _location_call(args: Dict[str, Any], operation: str) -> str:
+    """Run one location call with this profile's Agent Token; the result as JSON text."""
+    chat_id = _tool_chat_id(args)
+    if not chat_id:
+        return json.dumps({"error": "no Relay chat: pass chat_id, or call this from a Relay conversation"})
+    token = _resolve({}, "token", "RELAY_AGENT_TOKEN")
+    if not token:
+        return json.dumps({"error": "RELAY_AGENT_TOKEN is not set"})
+    try:
+        async with RelayClient(token, _configured_base_url({})) as client:
+            if operation == "request":
+                body = await client.request_location(chat_id)
+            else:
+                body = await client.get_location(chat_id)
+    except RelayApiError as error:
+        return json.dumps({"error": str(error), "status": error.status})
+    if operation == "request":
+        return json.dumps({"requested": True, "chat_id": chat_id})
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    locations = []
+    for feature in data.get("features") or []:
+        if not isinstance(feature, dict):
+            continue
+        coordinates = (feature.get("geometry") or {}).get("coordinates") or []
+        properties = feature.get("properties") or {}
+        if len(coordinates) != 2:
+            continue
+        # GeoJSON is [longitude, latitude]; the model reads named fields.
+        locations.append({
+            "handle": properties.get("handle"),
+            "latitude": coordinates[1],
+            "longitude": coordinates[0],
+            "updated_at": properties.get("updated_at"),
+        })
+    return json.dumps({"chat_id": chat_id, "locations": locations})
+
+
+async def relay_request_location(args: Dict[str, Any], **_: Any) -> str:
+    return await _location_call(args, "request")
+
+
+async def relay_read_location(args: Dict[str, Any], **_: Any) -> str:
+    return await _location_call(args, "read")
+
+
+def _location_tools_available() -> bool:
+    return bool(_resolve({}, "token", "RELAY_AGENT_TOKEN"))
+
+
+_CHAT_ID_PROPERTY = {
+    "chat_id": {
+        "type": "string",
+        "description": "The Relay chat id. Leave it out to use the chat this conversation is in.",
+    },
+}
+_LOCATION_TOOLS = {
+    "relay_request_location": (
+        relay_request_location,
+        "Ask the person in this one-to-one Relay chat to share their live location. They choose "
+        "whether to share and for how long; nothing comes back now. Read it with relay_read_location "
+        "once they share. Refused while they already share, in a group, and more than once a minute.",
+    ),
+    "relay_read_location": (
+        relay_read_location,
+        "Read the current live location of everyone sharing with you in this Relay chat, as latitude, "
+        "longitude and when it last arrived. The list is empty when nobody is sharing.",
+    ),
+}
+
+
+def register_location_tools(ctx) -> None:
+    """The two location calls as Hermes tools, the shape Hermes's a2a plugin uses."""
+    register_tool = getattr(ctx, "register_tool", None)
+    if register_tool is None:
+        return
+    for name, (handler, description) in _LOCATION_TOOLS.items():
+        parameters = {"type": "object", "properties": dict(_CHAT_ID_PROPERTY)}
+        register_tool(
+            name=name, toolset=PLATFORM_NAME, handler=handler, is_async=True,
+            description=description,
+            schema={"name": name, "description": description, "parameters": parameters},
+            check_fn=_location_tools_available,
+        )
+
+
 PLATFORM_HINT = (
     "You are texting inside Relay, a messenger where you appear as a contact. "
     "Write like a person texting: short, direct messages, plain text, no "
@@ -2091,7 +2231,11 @@ PLATFORM_HINT = (
     "request, or anything genuinely worth saying. "
     f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
     f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
-    f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE}"
+    f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE} "
+    f"{FORM_BLOCK_INSTRUCTION} {FORM_GUIDANCE} "
+    f"{PLACE_BLOCK_INSTRUCTION} {CARD_BLOCK_INSTRUCTION} "
+    f"{RATING_REQUEST_BLOCK_INSTRUCTION} {RATING_REQUEST_GUIDANCE} "
+    f"{LOCATION_GUIDANCE}"
 )
 
 
@@ -2122,3 +2266,4 @@ def register(ctx) -> None:
         allow_update_command=False,
         platform_hint=PLATFORM_HINT,
     )
+    register_location_tools(ctx)

@@ -2080,12 +2080,13 @@ def test_platform_hint_carries_the_payment_rules(plugin):
     )
 
     hint = plugin.PLATFORM_HINT
-    # The order every Relay runtime uses (Relay-SDK packages/pi/src/index.ts).
-    assert hint.endswith(
+    # The order every Relay runtime uses (Relay-SDK packages/pi/src/index.ts),
+    # then the components this plugin adds after it.
+    assert (
         f"{BUTTONS_BLOCK_INSTRUCTION} {LINK_LINE_INSTRUCTION} {BUTTONS_GUIDANCE} "
         f"{SELECTION_BLOCK_INSTRUCTION} {SELECTION_GUIDANCE} "
-        f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE}"
-    )
+        f"{PAYMENT_BLOCK_INSTRUCTION} {PAYMENT_GUIDANCE} "
+    ) in hint
     assert "digital_goods for digital content and tips" in hint
 
 
@@ -2794,3 +2795,208 @@ def test_agent_sender_is_read_from_every_message_event_shape(plugin, shape):
         **data.get("from_handle", data.get("sender_handle")), "kind": "user"
     }
     assert plugin.RelayAdapter._from_agent(SimpleNamespace(raw_message=payload)) is False
+
+
+# -- Form, place, cards, rating requests, location, contact cards ------------
+
+COMPONENT_FORM = {
+    "title": "Booking",
+    "pages": [{
+        "id": "details",
+        "title": "Details",
+        "fields": [{"id": "name", "type": "text", "label": "Name", "required": True}],
+    }],
+}
+COMPONENT_CARD = {
+    "title": "Zingerman's Deli",
+    "image_url": "https://example.com/deli.jpg",
+    "suggestions": [{"label": "Book", "id": "book"}],
+}
+COMPONENT_CARD_CONTENT = {
+    "media": {"type": "image", "url": "https://example.com/deli.jpg"},
+    "title": "Zingerman's Deli",
+    "suggestions": [{"type": "reply", "label": "Book", "id": "book"}],
+}
+
+
+def component_fence(tag: str, value: Any) -> str:
+    return f"```{tag}\n{json.dumps(value)}\n```"
+
+
+def contact_card_message() -> Dict[str, Any]:
+    return {
+        "parts": [],
+        "is_system_message": True,
+        "system_event": {
+            "type": "contact_card_shared",
+            "actor": {"id": "p-1", "handle": "advait", "kind": "user", "display_name": "Advait"},
+            "subject": None, "value": None, "icon_attachment_id": None, "call": None,
+            "contact_card": {
+                "id": "a-1", "handle": "chef", "kind": "agent", "first_name": "Chef",
+                "last_name": None, "is_active": True, "is_verified": False,
+            },
+        },
+    }
+
+
+
+def _send(plugin, tmp_path, answer: str, *, group: bool = False):
+    adapter = make_adapter(plugin, tmp_path)
+    client = FakeClient()
+    adapter._client = client
+    event = message_event(plugin, adapter, "event-components")
+    chat_id = event.source.chat_id
+    if group:
+        adapter._group_chats.add(chat_id)
+
+    async def run():
+        await adapter.on_processing_start(event)
+        return await adapter.send(chat_id, answer)
+
+    return asyncio.run(run()), client
+
+
+@pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("token", ["[SILENT]", "NO_REPLY", "[no reply]"])
+def test_silence_sends_nothing_in_a_direct_chat_and_a_group(plugin, tmp_path, group, token):
+    result, client = _send(plugin, tmp_path, token, group=group)
+    assert result.success and result.message_id is None
+    assert client.calls == []
+
+
+def test_platform_hint_teaches_the_hermes_silence_token(plugin):
+    from gateway.response_filters import is_intentional_silence_response
+
+    assert plugin.SILENCE_SENTINEL == "[SILENT]"
+    assert is_intentional_silence_response(plugin.SILENCE_SENTINEL)
+    assert f"reply with exactly {plugin.SILENCE_SENTINEL} and nothing else" in plugin.PLATFORM_HINT
+
+
+def test_every_message_lets_a_silence_token_stand_where_hermes_asks(plugin, tmp_path):
+    """Hermes main posts a notice for a silence token unless reply_expected is
+    False (gateway/platforms/event.py); the pinned Hermes has no such field."""
+    import dataclasses
+    from gateway.platforms.base import MessageEvent
+
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._client = FakeClient()
+    dispatched = []
+
+    async def capture(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture
+    inbound = importlib.import_module("relay_hermes.relay_api").parse_inbound(relay_event("event-quiet"))
+    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    if "reply_expected" in {field.name for field in dataclasses.fields(MessageEvent)}:
+        assert dispatched[0].reply_expected is False
+    else:
+        assert not hasattr(dispatched[0], "reply_expected")
+
+
+def test_send_puts_a_form_under_the_words_in_one_message(plugin, tmp_path):
+    result, client = _send(plugin, tmp_path, "Book a table.\n\n" + component_fence("form", COMPONENT_FORM))
+    assert result.success
+    assert [call["parts"] for call in client.calls] == [[
+        {"type": "text", "value": "Book a table."}, {"type": "form", **COMPONENT_FORM},
+    ]]
+
+
+@pytest.mark.parametrize("tag,value,part", [
+    ("place", {"latitude": 1.5, "longitude": 2.5}, {"type": "place", "latitude": 1.5, "longitude": 2.5}),
+    ("rich_card", COMPONENT_CARD, {"type": "rich_card", **COMPONENT_CARD_CONTENT}),
+    ("carousel", [COMPONENT_CARD, {"title": "B"}], {"type": "carousel", "cards": [COMPONENT_CARD_CONTENT, {"title": "B"}]}),
+])
+def test_send_carries_place_and_cards_beside_the_words(plugin, tmp_path, tag, value, part):
+    result, client = _send(plugin, tmp_path, "Here.\n" + component_fence(tag, value))
+    assert result.success
+    assert [call["parts"] for call in client.calls] == [[{"type": "text", "value": "Here."}, part]]
+
+
+def test_send_posts_a_rating_request_as_the_whole_message(plugin, tmp_path):
+    result, client = _send(plugin, tmp_path, component_fence("rating_request", {}))
+    assert result.success
+    assert [call["parts"] for call in client.calls] == [[{"type": "rating_request"}]]
+
+
+def test_platform_hint_teaches_every_new_component(plugin):
+    for name in (
+        "FORM_BLOCK_INSTRUCTION", "PLACE_BLOCK_INSTRUCTION", "CARD_BLOCK_INSTRUCTION",
+        "RATING_REQUEST_BLOCK_INSTRUCTION", "LOCATION_GUIDANCE",
+    ):
+        assert getattr(importlib.import_module("relay_hermes.relay_api"), name) in plugin.PLATFORM_HINT
+
+
+def test_shared_contact_card_reaches_the_model(plugin, tmp_path):
+    adapter = make_adapter(plugin, tmp_path)
+    adapter._client = FakeClient()
+    dispatched = []
+
+    async def capture(event):
+        dispatched.append(event)
+
+    adapter._dispatch_turn = capture
+    raw = relay_event("event-card")
+    raw["data"].update(contact_card_message())
+    inbound = importlib.import_module("relay_hermes.relay_api").parse_inbound(raw)
+    assert asyncio.run(adapter._on_inbound(inbound)) is True
+    assert "Relay contact card data" in dispatched[0].text
+    assert '"handle":"chef"' in dispatched[0].text
+
+
+def test_location_tools_register_and_call_relay(plugin, monkeypatch):
+    registered: Dict[str, Dict[str, Any]] = {}
+
+    class Ctx:
+        def register_platform(self, **kwargs):
+            pass
+
+        def register_tool(self, **kwargs):
+            registered[kwargs["name"]] = kwargs
+
+    plugin.register(Ctx())
+    assert set(registered) == {"relay_request_location", "relay_read_location"}
+    assert all(entry["is_async"] and entry["toolset"] == "relayapp" for entry in registered.values())
+
+    seen: List[str] = []
+
+    class Client:
+        def __init__(self, token, base_url):
+            assert token == "relay-test-token"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def request_location(self, chat_id):
+            seen.append(f"request {chat_id}")
+            return {"success": True}
+
+        async def get_location(self, chat_id):
+            seen.append(f"read {chat_id}")
+            return {"success": True, "data": {"type": "FeatureCollection", "features": [{
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [-83.743, 42.2808]},
+                "properties": {"handle": "advait", "updated_at": "2026-10-07T12:00:00Z"},
+            }]}}
+
+    monkeypatch.setenv("RELAY_AGENT_TOKEN", "relay-test-token")
+    monkeypatch.setattr(plugin, "RelayClient", Client)
+    assert registered["relay_read_location"]["check_fn"]() is True
+
+    async def run():
+        requested = await registered["relay_request_location"]["handler"]({"chat_id": "c-1"})
+        read = await registered["relay_read_location"]["handler"]({"chat_id": "c-1"})
+        missing = await registered["relay_read_location"]["handler"]({})
+        return requested, read, missing
+
+    requested, read, missing = asyncio.run(run())
+    assert seen == ["request c-1", "read c-1"]
+    assert json.loads(requested) == {"requested": True, "chat_id": "c-1"}
+    assert json.loads(read)["locations"] == [{
+        "handle": "advait", "latitude": 42.2808, "longitude": -83.743,
+        "updated_at": "2026-10-07T12:00:00Z",
+    }]
+    assert "error" in json.loads(missing)

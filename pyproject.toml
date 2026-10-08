@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relay-hermes"
-version = "1.0.0rc8.dev0"
+version = "1.0.0rc9.dev0"
 description = "Connect Hermes Agent to Relay as an always-on agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,8 @@ dependencies = [
   # Accept patch updates within the tested Hermes minor.
   "hermes-agent>=0.19.0,<0.22",
   "httpx>=0.27",
+  # The Relay Python SDK builds and checks the form, place and rating parts.
+  "relaymessenger>=0.1.0,<0.2",
   "websockets>=14",
 ]
 
