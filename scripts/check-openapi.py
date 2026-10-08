@@ -9,9 +9,9 @@ from pathlib import Path
 
 import yaml
 
-RELAY_OPENAPI_COMMIT = "78e958bd35f5e7f33c1ce9b77ac11be1dac3afc8"
+RELAY_OPENAPI_COMMIT = "6f50fcb69d1ce6dde8bf0fb0e12bd2ef379f0b09"
 RELAY_OPENAPI_SHA256 = (
-    "abe76bc8feadd85462ff4293eba9bc1b2cea44b9929b0fbc772a120d84efb365"
+    "79bd85b0150ef45ea4bbe5f498507dd86d784e7fbf6c3b299a5a81db091aacdd"
 )
 
 
@@ -32,6 +32,8 @@ def check_openapi(path: Path) -> None:
         "/v1/chats/{chatId}/read",
         "/v1/attachments",
         "/v1/websocket",
+        "/v1/chats/{chatId}/location/request",
+        "/v1/chats/{chatId}/location",
     }
     assert required_paths <= paths.keys()
     assert "post" not in paths.get("/v1/agents", {}), "Anonymous Agent registration is retired"
@@ -82,6 +84,21 @@ def check_openapi(path: Path) -> None:
         "contact.added",
         "contact.removed",
     } <= set(schemas["WebhookEventType"]["enum"])
+
+    # The parts the plugin sends and the system event it reads.
+    assert "post" in paths["/v1/chats/{chatId}/location/request"]
+    assert "get" in paths["/v1/chats/{chatId}/location"]
+    for name, part_type in (
+        ("PlacePart", "place"),
+        ("FormPart", "form"),
+        ("RichCardPart", "rich_card"),
+        ("CarouselPart", "carousel"),
+        ("RatingRequestPart", "rating_request"),
+    ):
+        assert schemas[name]["properties"]["type"]["enum"] == [part_type], name
+    system_event = schemas["SystemEvent"]["properties"]
+    assert "contact_card_shared" in system_event["type"]["enum"]
+    assert "contact_card" in system_event
 
     print(
         "openapi_contract=pass "
