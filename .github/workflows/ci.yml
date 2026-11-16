@@ -35,7 +35,7 @@ env:
 jobs:
   build:
     name: Build exact distributions once
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out the exact plugin source
@@ -113,7 +113,7 @@ jobs:
   test:
     name: Validate exact distributions on Python ${{ matrix.python-version }}
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
@@ -308,7 +308,7 @@ jobs:
   # without a prompt or --force. Run the scan of the Hermes users install.
   hermes-install-scan:
     name: Pass Hermes's install-time plugin scan
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       HERMES_GUARD_SRC: ${{ github.workspace }}/_hermes-main
@@ -378,7 +378,7 @@ jobs:
   published-hermes:
     name: Validate the wheel on the published Hermes ${{ matrix.python-version }}
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -432,7 +432,7 @@ jobs:
   # PyPI and written nowhere. Its decision table is unit-tested first.
   staging-bump-dry-run:
     name: Rehearse the staging bump
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out the exact plugin source
@@ -472,7 +472,7 @@ jobs:
   # it merges.
   release-dry-run:
     name: Rehearse the release
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out the exact plugin source
