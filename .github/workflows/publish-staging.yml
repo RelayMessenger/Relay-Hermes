@@ -48,7 +48,7 @@ jobs:
     if: >-
       github.repository == 'RelayMessenger/Relay-Hermes' &&
       github.ref == 'refs/heads/staging'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
@@ -146,7 +146,7 @@ jobs:
     name: Publish the dev version to PyPI
     needs: [bump, validate]
     if: ${{ !cancelled() && needs.bump.result == 'success' && needs.validate.result == 'success' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: pypi-staging
     permissions:

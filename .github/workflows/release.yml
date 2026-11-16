@@ -47,7 +47,7 @@ jobs:
   release:
     name: Derive, publish, and record
     if: github.repository == 'RelayMessenger/Relay-Hermes'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: pypi-release
     # contents: write records the tag; id-token: write is the OIDC token
